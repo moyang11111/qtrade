@@ -1,0 +1,106 @@
+# ── Data Source ──
+data:
+  source: pytdx                  # primary: pytdx | akshare
+  fallback: [akshare]            # fallback chain if primary fails
+  symbol: "300750"               # stock code
+  start_date: "20200101"         # YYYYMMDD
+  end_date: null                 # null = today
+  cache:
+    enabled: true
+    type: csv                    # csv | parquet
+    dir: data/cache
+    auto_refresh: false
+  bar_type: daily
+
+# ── Backtest Settings ──
+backtest:
+  initial_capital: 100000.0
+  # Commission
+  commission: 0.0003             # 万三 per side
+  min_commission: 5.0            # minimum 5 yuan per trade
+  commission_type: percentage
+  # Stamp duty (A-share sell only)
+  stamp_duty: 0.001              # 千一
+  stamp_duty_side: sell
+  # Slippage
+  slippage: 0.001                # 0.1%
+  slippage_type: percentage
+  # A-share rules
+  lot_size: 100                  # A-share lot
+  t_plus_n: 1                    # T+1
+  # Risk management
+  stop_loss_pct: 0.15
+  trail_stop_pct: 0.10
+  max_position_pct: 0.95
+
+# ── Position Sizing ──
+position_sizing:
+  method: strength               # fixed | strength | atr
+  fixed_pct: 0.95
+  min_strength: 0.3
+  scale_with_strength: true
+  # ATR-based
+  risk_per_trade: 0.02
+  atr_period: 14
+  atr_stop_mult: 2.0
+
+# ── Strategy ──
+strategy:
+  name: dual_ma
+  type: rule                     # rule | ml
+  params:
+    fast_period: 5
+    slow_period: 20
+
+# ── ML Pipeline (only when strategy.type == "ml") ──
+ml:
+  model_type: xgboost
+  model_params:
+    xgboost:
+      n_estimators: 200
+      max_depth: 5
+      learning_rate: 0.05
+      subsample: 0.8
+      colsample_bytree: 0.8
+    lstm:
+      hidden_size: 64
+      num_layers: 2
+      dropout: 0.3
+      epochs: 50
+      batch_size: 32
+      sequence_length: 20
+  train_start: "20200101"
+  train_end: "20231231"          # MUST be before backtest start
+  cv:
+    method: expanding            # expanding | walk_forward
+    n_folds: 5
+    val_window: 63               # ~3 months per fold
+    gap: 5                       # days between train end and val start
+  features:
+    groups: [technical, momentum, volatility]
+    target:
+      type: forward_return
+      horizon: 5
+      threshold: 0.02
+  registry:
+    dir: models
+    auto_version: true
+    keep_last_n: 10
+
+# ── Logging ──
+logging:
+  level: INFO
+  file: logs/qtrade.log
+  max_bytes: 10485760
+  backup_count: 5
+  log_trades: true
+  log_signals: false
+
+# ── Output ──
+output:
+  save_results: true
+  results_dir: results
+  trade_log_csv: true
+  plot: false                    # auto-generate charts
+  quantstats_report: false       # auto-generate QuantStats HTML
+  plot_style: candlestick

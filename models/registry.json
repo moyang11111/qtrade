@@ -1,0 +1,68 @@
+[
+  {
+    "model_id": "model_20260527_151708",
+    "path": "models\\model_20260527_151708.pkl",
+    "saved_at": "20260527_151708",
+    "metadata": {
+      "train_start": "2022-01-04",
+      "train_end": "2023-12-29",
+      "backtest_start": "20231231",
+      "cv_results": {
+        "folds": [
+          {
+            "accuracy": 0.5873,
+            "n_samples": 63,
+            "fold": 1,
+            "train_end": "2022-09-05",
+            "val_start": "2022-09-14"
+          },
+          {
+            "accuracy": 0.4921,
+            "n_samples": 63,
+            "fold": 2,
+            "train_end": "2022-12-09",
+            "val_start": "2022-12-19"
+          },
+          {
+            "accuracy": 0.6032,
+            "n_samples": 63,
+            "fold": 3,
+            "train_end": "2023-03-16",
+            "val_start": "2023-03-24"
+          },
+          {
+            "accuracy": 0.7143,
+            "n_samples": 63,
+            "fold": 4,
+            "train_end": "2023-06-19",
+            "val_start": "2023-06-29"
+          },
+          {
+            "accuracy": 0.6825,
+            "n_samples": 63,
+            "fold": 5,
+            "train_end": "2023-09-18",
+            "val_start": "2023-09-26"
+          }
+        ],
+        "mean_accuracy": 0.6159,
+        "std_accuracy": 0.078
+      },
+      "feature_columns": [
+        "rsi_14",
+        "macd_hist",
+        "bb_position",
+        "ma_ratio_5_20",
+        "ma_ratio_10_50",
+        "atr_ratio",
+        "return_5d",
+        "return_20d",
+        "return_60d",
+        "vol_ratio_5_20",
+        "vol_momentum",
+        "realized_vol_20",
+        "vol_regime"
+      ]
+    }
+  }
+]

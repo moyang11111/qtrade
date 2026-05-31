@@ -1,0 +1,149 @@
+version: '3.8'
+
+services:
+  # QTrade Backtesting Service
+  backtest:
+    build:
+      context: .
+      target: production
+    container_name: qtrade-backtest
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+      - ./reports:/app/reports
+      - ./models:/app/models
+      - ./logs:/app/logs
+    environment:
+      - QTRADE_ENV=production
+      - QTRADE_LOG_LEVEL=INFO
+    command: >
+      python -m qtrade backtest
+      --config /app/configs/default.yaml
+      --output /app/reports/backtest_result.html
+    networks:
+      - qtrade-network
+
+  # QTrade API Server
+  api:
+    build:
+      context: .
+      target: production
+    container_name: qtrade-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+      - ./reports:/app/reports
+      - ./models:/app/models
+      - ./logs:/app/logs
+    environment:
+      - QTRADE_ENV=production
+      - QTRADE_LOG_LEVEL=INFO
+      - QTRADE_API_HOST=0.0.0.0
+      - QTRADE_API_PORT=8000
+    command: >
+      uvicorn qtrade.api.main:app
+      --host 0.0.0.0
+      --port 8000
+      --workers 2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - qtrade-network
+
+  # QTrade Web Dashboard
+  dashboard:
+    build:
+      context: .
+      target: production
+    container_name: qtrade-dashboard
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+      - ./reports:/app/reports
+      - ./models:/app/models
+    environment:
+      - QTRADE_ENV=production
+      - QTRADE_API_URL=http://api:8000
+    command: >
+      streamlit run qtrade/web/dashboard.py
+      --server.port 8501
+      --server.address 0.0.0.0
+    depends_on:
+      - api
+    networks:
+      - qtrade-network
+
+  # QTrade Live Trading Service
+  live-trader:
+    build:
+      context: .
+      target: production
+    container_name: qtrade-live
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+      - ./logs:/app/logs
+      - ./models:/app/models
+    environment:
+      - QTRADE_ENV=production
+      - QTRADE_LOG_LEVEL=INFO
+    env_file:
+      - .env
+    command: >
+      python -m qtrade live
+      --config /app/configs/live_trading.yaml
+    restart: unless-stopped
+    networks:
+      - qtrade-network
+
+  # Redis for caching and message queue
+  redis:
+    image: redis:7-alpine
+    container_name: qtrade-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - qtrade-network
+
+  # PostgreSQL for data storage
+  postgres:
+    image: postgres:15-alpine
+    container_name: qtrade-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=qtrade
+      - POSTGRES_USER=qtrade
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-qtrade_secret}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qtrade"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - qtrade-network
+
+networks:
+  qtrade-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+  postgres-data:

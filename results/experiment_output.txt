@@ -1,0 +1,262 @@
+﻿
+============================================================
+  Fetching 600519
+============================================================
+  Got 58 bars: 2023-01-03 ~ 2023-03-30
+
+  dual_ma: 16 param combos
+    {'fast_period': 3, 'slow_period': 20, 'name': 'dual_ma'}  ->  ret=-1.91%  trades=3
+    {'fast_period': 3, 'slow_period': 30, 'name': 'dual_ma'}  ->  ret=+0.00%  trades=0
+    {'fast_period': 3, 'slow_period': 50, 'name': 'dual_ma'}  ->  ret=+0.00%  trades=0
+    {'fast_period': 3, 'slow_period': 60, 'name': 'dual_ma'}  ->  ret=+0.00%  trades=0
+    {'fast_period': 5, 'slow_period': 20, 'name': 'dual_ma'}  ->  ret=-0.77%  trades=2
+    {'fast_period': 5, 'slow_period': 30, 'name': 'dual_ma'}  ->  ret=+0.00%  trades=0
+    {'fast_period': 5, 'slow_period': 50, 'name': 'dual_ma'}  ->  ret=+0.00%  trades=0
+    {'fast_period': 5, 'slow_period': 60, 'name': 'dual_ma'}  ->  ret=+0.00%  trades=0
+    {'fast_period': 10, 'slow_period': 20, 'name': 'dual_ma'}  ->  ret=-0.56%  trades=1
+    {'fast_period': 10, 'slow_period': 30, 'name': 'dual_ma'}  ->  ret=+0.00%  trades=0
+    {'fast_period': 10, 'slow_period': 50, 'name': 'dual_ma'}  ->  ret=+0.00%  trades=0
+    {'fast_period': 10, 'slow_period': 60, 'name': 'dual_ma'}  ->  ret=+0.00%  trades=0
+    {'fast_period': 15, 'slow_period': 20, 'name': 'dual_ma'}  ->  ret=-0.80%  trades=1
+    {'fast_period': 15, 'slow_period': 30, 'name': 'dual_ma'}  ->  ret=+0.00%  trades=0
+    {'fast_period': 15, 'slow_period': 50, 'name': 'dual_ma'}  ->  ret=+0.00%  trades=0
+    {'fast_period': 15, 'slow_period': 60, 'name': 'dual_ma'}  ->  ret=+0.00%  trades=0
+
+  bollinger: 16 param combos
+    {'period': 10, 'std_mult': 1.5, 'name': 'bollinger'}  ->  ret=+0.89%  trades=1
+    {'period': 10, 'std_mult': 2.0, 'name': 'bollinger'}  ->  ret=+0.00%  trades=0
+    {'period': 10, 'std_mult': 2.5, 'name': 'bollinger'}  ->  ret=+0.00%  trades=0
+    {'period': 10, 'std_mult': 3.0, 'name': 'bollinger'}  ->  ret=+0.00%  trades=0
+    {'period': 20, 'std_mult': 1.5, 'name': 'bollinger'}  ->  ret=+0.99%  trades=1
+    {'period': 20, 'std_mult': 2.0, 'name': 'bollinger'}  ->  ret=+1.50%  trades=1
+    {'period': 20, 'std_mult': 2.5, 'name': 'bollinger'}  ->  ret=+0.00%  trades=0
+    {'period': 20, 'std_mult': 3.0, 'name': 'bollinger'}  ->  ret=+0.00%  trades=0
+    {'period': 30, 'std_mult': 1.5, 'name': 'bollinger'}  ->  ret=+0.97%  trades=1
+    {'period': 30, 'std_mult': 2.0, 'name': 'bollinger'}  ->  ret=+2.36%  trades=1
+    {'period': 30, 'std_mult': 2.5, 'name': 'bollinger'}  ->  ret=+0.00%  trades=0
+    {'period': 30, 'std_mult': 3.0, 'name': 'bollinger'}  ->  ret=+0.00%  trades=0
+    {'period': 50, 'std_mult': 1.5, 'name': 'bollinger'}  ->  ret=+3.17%  trades=1
+    {'period': 50, 'std_mult': 2.0, 'name': 'bollinger'}  ->  ret=+0.00%  trades=0
+    {'period': 50, 'std_mult': 2.5, 'name': 'bollinger'}  ->  ret=+0.00%  trades=0
+    {'period': 50, 'std_mult': 3.0, 'name': 'bollinger'}  ->  ret=+0.00%  trades=0
+
+  breakout: 16 param combos
+    {'entry_period': 10, 'exit_period': 5, 'name': 'breakout'}  ->  ret=+0.00%  trades=0
+    {'entry_period': 10, 'exit_period': 10, 'name': 'breakout'}  ->  ret=+0.00%  trades=0
+    {'entry_period': 10, 'exit_period': 15, 'name': 'breakout'}  ->  ret=+0.00%  trades=0
+    {'entry_period': 10, 'exit_period': 20, 'name': 'breakout'}  ->  ret=+0.00%  trades=0
+    {'entry_period': 20, 'exit_period': 5, 'name': 'breakout'}  ->  ret=+0.00%  trades=0
+    {'entry_period': 20, 'exit_period': 10, 'name': 'breakout'}  ->  ret=+0.00%  trades=0
+    {'entry_period': 20, 'exit_period': 15, 'name': 'breakout'}  ->  ret=+0.00%  trades=0
+    {'entry_period': 20, 'exit_period': 20, 'name': 'breakout'}  ->  ret=+0.00%  trades=0
+    {'entry_period': 30, 'exit_period': 5, 'name': 'breakout'}  ->  ret=+0.00%  trades=0
+    {'entry_period': 30, 'exit_period': 10, 'name': 'breakout'}  ->  ret=+0.00%  trades=0
+    {'entry_period': 30, 'exit_period': 15, 'name': 'breakout'}  ->  ret=+0.00%  trades=0
+    {'entry_period': 30, 'exit_period': 20, 'name': 'breakout'}  ->  ret=+0.00%  trades=0
+    {'entry_period': 50, 'exit_period': 5, 'name': 'breakout'}  ->  ret=+0.00%  trades=0
+    {'entry_period': 50, 'exit_period': 10, 'name': 'breakout'}  ->  ret=+0.00%  trades=0
+    {'entry_period': 50, 'exit_period': 15, 'name': 'breakout'}  ->  ret=+0.00%  trades=0
+    {'entry_period': 50, 'exit_period': 20, 'name': 'breakout'}  ->  ret=+0.00%  trades=0
+
+============================================================
+  Fetching 000858
+============================================================
+  Got 968 bars: 2022-01-04 ~ 2025-12-30
+
+  dual_ma: 16 param combos
+    {'fast_period': 3, 'slow_period': 20, 'name': 'dual_ma'}  ->  ret=-2.94%  trades=33
+    {'fast_period': 3, 'slow_period': 30, 'name': 'dual_ma'}  ->  ret=-6.44%  trades=22
+    {'fast_period': 3, 'slow_period': 50, 'name': 'dual_ma'}  ->  ret=+1.51%  trades=16
+    {'fast_period': 3, 'slow_period': 60, 'name': 'dual_ma'}  ->  ret=+0.18%  trades=14
+    {'fast_period': 5, 'slow_period': 20, 'name': 'dual_ma'}  ->  ret=-7.22%  trades=25
+    {'fast_period': 5, 'slow_period': 30, 'name': 'dual_ma'}  ->  ret=-6.00%  trades=17
+    {'fast_period': 5, 'slow_period': 50, 'name': 'dual_ma'}  ->  ret=-3.42%  trades=12
+    {'fast_period': 5, 'slow_period': 60, 'name': 'dual_ma'}  ->  ret=-3.96%  trades=10
+    {'fast_period': 10, 'slow_period': 20, 'name': 'dual_ma'}  ->  ret=-12.21%  trades=26
+    {'fast_period': 10, 'slow_period': 30, 'name': 'dual_ma'}  ->  ret=-11.17%  trades=16
+    {'fast_period': 10, 'slow_period': 50, 'name': 'dual_ma'}  ->  ret=-5.88%  trades=11
+    {'fast_period': 10, 'slow_period': 60, 'name': 'dual_ma'}  ->  ret=-2.00%  trades=8
+    {'fast_period': 15, 'slow_period': 20, 'name': 'dual_ma'}  ->  ret=-10.84%  trades=25
+    {'fast_period': 15, 'slow_period': 30, 'name': 'dual_ma'}  ->  ret=-3.54%  trades=15
+    {'fast_period': 15, 'slow_period': 50, 'name': 'dual_ma'}  ->  ret=-7.90%  trades=11
+    {'fast_period': 15, 'slow_period': 60, 'name': 'dual_ma'}  ->  ret=-2.44%  trades=8
+
+  bollinger: 16 param combos
+    {'period': 10, 'std_mult': 1.5, 'name': 'bollinger'}  ->  ret=-28.83%  trades=37
+    {'period': 10, 'std_mult': 2.0, 'name': 'bollinger'}  ->  ret=-14.21%  trades=19
+    {'period': 10, 'std_mult': 2.5, 'name': 'bollinger'}  ->  ret=-8.51%  trades=1
+    {'period': 10, 'std_mult': 3.0, 'name': 'bollinger'}  ->  ret=+0.00%  trades=0
+    {'period': 20, 'std_mult': 1.5, 'name': 'bollinger'}  ->  ret=-29.27%  trades=32
+    {'period': 20, 'std_mult': 2.0, 'name': 'bollinger'}  ->  ret=-26.83%  trades=21
+    {'period': 20, 'std_mult': 2.5, 'name': 'bollinger'}  ->  ret=-28.30%  trades=8
+    {'period': 20, 'std_mult': 3.0, 'name': 'bollinger'}  ->  ret=-4.20%  trades=1
+    {'period': 30, 'std_mult': 1.5, 'name': 'bollinger'}  ->  ret=-54.59%  trades=29
+    {'period': 30, 'std_mult': 2.0, 'name': 'bollinger'}  ->  ret=-39.13%  trades=15
+    {'period': 30, 'std_mult': 2.5, 'name': 'bollinger'}  ->  ret=-22.43%  trades=8
+    {'period': 30, 'std_mult': 3.0, 'name': 'bollinger'}  ->  ret=-6.66%  trades=1
+    {'period': 50, 'std_mult': 1.5, 'name': 'bollinger'}  ->  ret=-35.12%  trades=23
+    {'period': 50, 'std_mult': 2.0, 'name': 'bollinger'}  ->  ret=+5.87%  trades=11
+    {'period': 50, 'std_mult': 2.5, 'name': 'bollinger'}  ->  ret=+24.74%  trades=9
+    {'period': 50, 'std_mult': 3.0, 'name': 'bollinger'}  ->  ret=-7.17%  trades=2
+
+  breakout: 16 param combos
+    {'entry_period': 10, 'exit_period': 5, 'name': 'breakout'}  ->  ret=-14.42%  trades=23
+    {'entry_period': 10, 'exit_period': 10, 'name': 'breakout'}  ->  ret=-21.18%  trades=21
+    {'entry_period': 10, 'exit_period': 15, 'name': 'breakout'}  ->  ret=-20.77%  trades=20
+    {'entry_period': 10, 'exit_period': 20, 'name': 'breakout'}  ->  ret=-27.87%  trades=20
+    {'entry_period': 20, 'exit_period': 5, 'name': 'breakout'}  ->  ret=-33.41%  trades=15
+    {'entry_period': 20, 'exit_period': 10, 'name': 'breakout'}  ->  ret=-26.14%  trades=13
+    {'entry_period': 20, 'exit_period': 15, 'name': 'breakout'}  ->  ret=-36.34%  trades=13
+    {'entry_period': 20, 'exit_period': 20, 'name': 'breakout'}  ->  ret=-40.78%  trades=13
+    {'entry_period': 30, 'exit_period': 5, 'name': 'breakout'}  ->  ret=-18.00%  trades=10
+    {'entry_period': 30, 'exit_period': 10, 'name': 'breakout'}  ->  ret=+1.15%  trades=8
+    {'entry_period': 30, 'exit_period': 15, 'name': 'breakout'}  ->  ret=-14.18%  trades=8
+    {'entry_period': 30, 'exit_period': 20, 'name': 'breakout'}  ->  ret=-14.37%  trades=8
+    {'entry_period': 50, 'exit_period': 5, 'name': 'breakout'}  ->  ret=-0.57%  trades=6
+    {'entry_period': 50, 'exit_period': 10, 'name': 'breakout'}  ->  ret=+3.15%  trades=5
+    {'entry_period': 50, 'exit_period': 15, 'name': 'breakout'}  ->  ret=-2.49%  trades=5
+    {'entry_period': 50, 'exit_period': 20, 'name': 'breakout'}  ->  ret=+0.54%  trades=5
+
+============================================================
+  Fetching 000001
+============================================================
+  Got 968 bars: 2022-01-04 ~ 2025-12-30
+
+  dual_ma: 16 param combos
+    {'fast_period': 3, 'slow_period': 20, 'name': 'dual_ma'}  ->  ret=-3.35%  trades=35
+    {'fast_period': 3, 'slow_period': 30, 'name': 'dual_ma'}  ->  ret=+0.04%  trades=23
+    {'fast_period': 3, 'slow_period': 50, 'name': 'dual_ma'}  ->  ret=-10.04%  trades=23
+    {'fast_period': 3, 'slow_period': 60, 'name': 'dual_ma'}  ->  ret=-4.69%  trades=19
+    {'fast_period': 5, 'slow_period': 20, 'name': 'dual_ma'}  ->  ret=-2.94%  trades=29
+    {'fast_period': 5, 'slow_period': 30, 'name': 'dual_ma'}  ->  ret=-0.41%  trades=19
+    {'fast_period': 5, 'slow_period': 50, 'name': 'dual_ma'}  ->  ret=-3.96%  trades=19
+    {'fast_period': 5, 'slow_period': 60, 'name': 'dual_ma'}  ->  ret=-5.04%  trades=16
+    {'fast_period': 10, 'slow_period': 20, 'name': 'dual_ma'}  ->  ret=-8.95%  trades=25
+    {'fast_period': 10, 'slow_period': 30, 'name': 'dual_ma'}  ->  ret=-4.83%  trades=17
+    {'fast_period': 10, 'slow_period': 50, 'name': 'dual_ma'}  ->  ret=-6.37%  trades=13
+    {'fast_period': 10, 'slow_period': 60, 'name': 'dual_ma'}  ->  ret=-4.31%  trades=10
+    {'fast_period': 15, 'slow_period': 20, 'name': 'dual_ma'}  ->  ret=-8.02%  trades=32
+    {'fast_period': 15, 'slow_period': 30, 'name': 'dual_ma'}  ->  ret=-12.00%  trades=20
+    {'fast_period': 15, 'slow_period': 50, 'name': 'dual_ma'}  ->  ret=-11.43%  trades=12
+    {'fast_period': 15, 'slow_period': 60, 'name': 'dual_ma'}  ->  ret=-10.64%  trades=10
+
+  bollinger: 16 param combos
+    {'period': 10, 'std_mult': 1.5, 'name': 'bollinger'}  ->  ret=-33.02%  trades=37
+    {'period': 10, 'std_mult': 2.0, 'name': 'bollinger'}  ->  ret=-19.57%  trades=17
+    {'period': 10, 'std_mult': 2.5, 'name': 'bollinger'}  ->  ret=-6.19%  trades=4
+    {'period': 10, 'std_mult': 3.0, 'name': 'bollinger'}  ->  ret=+0.00%  trades=0
+    {'period': 20, 'std_mult': 1.5, 'name': 'bollinger'}  ->  ret=-18.48%  trades=27
+    {'period': 20, 'std_mult': 2.0, 'name': 'bollinger'}  ->  ret=-13.44%  trades=17
+    {'period': 20, 'std_mult': 2.5, 'name': 'bollinger'}  ->  ret=-6.08%  trades=7
+    {'period': 20, 'std_mult': 3.0, 'name': 'bollinger'}  ->  ret=-12.28%  trades=2
+    {'period': 30, 'std_mult': 1.5, 'name': 'bollinger'}  ->  ret=-17.33%  trades=23
+    {'period': 30, 'std_mult': 2.0, 'name': 'bollinger'}  ->  ret=-3.98%  trades=14
+    {'period': 30, 'std_mult': 2.5, 'name': 'bollinger'}  ->  ret=-7.13%  trades=9
+    {'period': 30, 'std_mult': 3.0, 'name': 'bollinger'}  ->  ret=-4.42%  trades=4
+    {'period': 50, 'std_mult': 1.5, 'name': 'bollinger'}  ->  ret=-10.46%  trades=15
+    {'period': 50, 'std_mult': 2.0, 'name': 'bollinger'}  ->  ret=+3.75%  trades=14
+    {'period': 50, 'std_mult': 2.5, 'name': 'bollinger'}  ->  ret=+7.07%  trades=6
+    {'period': 50, 'std_mult': 3.0, 'name': 'bollinger'}  ->  ret=-14.15%  trades=4
+
+  breakout: 16 param combos
+    {'entry_period': 10, 'exit_period': 5, 'name': 'breakout'}  ->  ret=-22.17%  trades=26
+    {'entry_period': 10, 'exit_period': 10, 'name': 'breakout'}  ->  ret=-14.99%  trades=22
+    {'entry_period': 10, 'exit_period': 15, 'name': 'breakout'}  ->  ret=-24.76%  trades=21
+    {'entry_period': 10, 'exit_period': 20, 'name': 'breakout'}  ->  ret=-25.40%  trades=19
+    {'entry_period': 20, 'exit_period': 5, 'name': 'breakout'}  ->  ret=-17.54%  trades=18
+    {'entry_period': 20, 'exit_period': 10, 'name': 'breakout'}  ->  ret=-8.31%  trades=15
+    {'entry_period': 20, 'exit_period': 15, 'name': 'breakout'}  ->  ret=-18.27%  trades=14
+    {'entry_period': 20, 'exit_period': 20, 'name': 'breakout'}  ->  ret=-21.02%  trades=13
+    {'entry_period': 30, 'exit_period': 5, 'name': 'breakout'}  ->  ret=-12.70%  trades=14
+    {'entry_period': 30, 'exit_period': 10, 'name': 'breakout'}  ->  ret=-12.07%  trades=13
+    {'entry_period': 30, 'exit_period': 15, 'name': 'breakout'}  ->  ret=-21.18%  trades=12
+    {'entry_period': 30, 'exit_period': 20, 'name': 'breakout'}  ->  ret=-23.20%  trades=11
+    {'entry_period': 50, 'exit_period': 5, 'name': 'breakout'}  ->  ret=-1.85%  trades=7
+    {'entry_period': 50, 'exit_period': 10, 'name': 'breakout'}  ->  ret=-7.21%  trades=7
+    {'entry_period': 50, 'exit_period': 15, 'name': 'breakout'}  ->  ret=-18.59%  trades=6
+    {'entry_period': 50, 'exit_period': 20, 'name': 'breakout'}  ->  ret=-18.14%  trades=5
+
+============================================================
+  Results saved to results/experiment_results.csv
+  Total experiments: 144
+============================================================
+
+  Valid runs (with trades): 104
+
+============================================================
+  Best parameter sets per strategy (by Sharpe)
+============================================================
+
+  dual_ma �� Top 3:
+    fast_period=3.0, slow_period=50.0
+      ret=+1.51%  sharpe=-0.685  dd=11.14%  trades=16  winrate=31.2%
+    fast_period=15.0, slow_period=30.0
+      ret=-3.54%  sharpe=-0.853  dd=15.15%  trades=15  winrate=20.0%
+    fast_period=3.0, slow_period=60.0
+      ret=+0.18%  sharpe=-0.862  dd=9.65%  trades=14  winrate=35.7%
+
+  bollinger �� Top 3:
+    period=50.0, std_mult=2.5
+      ret=+24.74%  sharpe=0.257  dd=25.58%  trades=9  winrate=33.3%
+    period=50.0, std_mult=2.0
+      ret=+5.87%  sharpe=0.003  dd=28.65%  trades=11  winrate=36.4%
+    period=50.0, std_mult=2.0
+      ret=+3.75%  sharpe=-0.042  dd=26.58%  trades=14  winrate=50.0%
+
+  breakout �� Top 3:
+    entry_period=30.0, exit_period=10.0
+      ret=+1.15%  sharpe=-0.192  dd=24.79%  trades=8  winrate=50.0%
+    entry_period=50.0, exit_period=10.0
+      ret=+3.15%  sharpe=-0.304  dd=17.28%  trades=5  winrate=40.0%
+    entry_period=50.0, exit_period=20.0
+      ret=+0.54%  sharpe=-0.356  dd=19.37%  trades=5  winrate=40.0%
+
+============================================================
+  Strategy comparison (avg across all symbols)
+============================================================
+          total_return               sharpe_ratio max_drawdown win_rate total_trades
+                  mean median    std         mean         mean     mean         mean
+strategy                                                                            
+bollinger       -11.68  -7.84  15.66        -1.08        23.59    26.81        11.75
+breakout        -16.66 -18.07  10.88        -1.66        28.36    29.68        13.00
+dual_ma          -5.15  -4.50   3.89        -2.40        10.85    23.32        16.61
+
+============================================================
+  Parameter sensitivity (avg Sharpe per param value)
+============================================================
+
+  dual_ma:
+    fast_period:
+        3.0  ->  avg Sharpe = -2.306
+        5.0  ->  avg Sharpe = -2.885
+       10.0  ->  avg Sharpe = -2.544
+       15.0  ->  avg Sharpe = -1.863
+    slow_period:
+       20.0  ->  avg Sharpe = -1.744
+       30.0  ->  avg Sharpe = -1.859
+       50.0  ->  avg Sharpe = -3.719
+       60.0  ->  avg Sharpe = -2.275
+
+  bollinger:
+    period:
+       10.0  ->  avg Sharpe = -0.985
+       20.0  ->  avg Sharpe = -1.679
+       30.0  ->  avg Sharpe = -0.941
+       50.0  ->  avg Sharpe = -0.683
+    std_mult:
+        1.5  ->  avg Sharpe = -1.337
+        2.0  ->  avg Sharpe = -0.634
+        2.5  ->  avg Sharpe = -1.006
+        3.0  ->  avg Sharpe = -1.421
+
+  breakout:
+    entry_period:
+       10.0  ->  avg Sharpe = -1.366
+       20.0  ->  avg Sharpe = -1.554
+       30.0  ->  avg Sharpe = -2.917
+       50.0  ->  avg Sharpe = -0.823
+    exit_period:
+        5.0  ->  avg Sharpe = -2.869
+       10.0  ->  avg Sharpe = -0.834
+       15.0  ->  avg Sharpe = -1.671
+       20.0  ->  avg Sharpe = -1.285

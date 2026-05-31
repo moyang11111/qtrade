@@ -1,0 +1,264 @@
+# =============================================================================
+# QTrade 实盘交易配置
+# =============================================================================
+# 实盘交易配置示例（使用模拟券商）
+# 使用方法: qtrade live --config configs/live_trading_example.yaml
+# =============================================================================
+
+# ── 数据源配置 ──
+data:
+  source: pytdx
+  fallback: [akshare]
+  symbols:                         # 实盘交易股票池
+    - "600519"                     # 贵州茅台
+    - "000858"                     # 五粮液
+    - "000001"                     # 平安银行
+  cache:
+    enabled: true
+    type: csv
+    dir: data/cache
+    auto_refresh: true             # 实盘模式自动刷新
+  bar_type: daily
+  realtime:
+    enabled: true                  # 启用实时行情
+    mode: websocket                # websocket | polling
+    interval: 1.0                  # 轮询间隔（秒）
+
+# ── 券商配置 ──
+broker:
+  type: mock                       # 券商类型: mock | alpaca | joinquant
+
+  # Mock 券商配置（模拟交易）
+  mock:
+    initial_capital: 1000000.0     # 初始资金 100万
+    simulate_latency: true         # 模拟网络延迟
+    latency_ms: 100                # 延迟毫秒数
+
+  # Alpaca 券商配置（美股）
+  # alpaca:
+  #   api_key: ${ALPACA_API_KEY}
+  #   api_secret: ${ALPACA_API_SECRET}
+  #   base_url: https://paper-api.alpaca.markets  # 模拟环境
+  #   # base_url: https://api.alpaca.markets      # 真实环境
+
+  # 掘金量化配置（A股）
+  # joinquant:
+  #   username: ${JQ_USERNAME}
+  #   password: ${JQ_PASSWORD}
+  #   account_id: ${JQ_ACCOUNT_ID}
+
+# ── 策略配置 ──
+strategy:
+  name: dual_ma
+  type: rule
+  params:
+    fast_period: 5
+    slow_period: 20
+
+  # 每只股票使用独立的策略实例
+  per_symbol: true
+
+# ── 仓位管理 ──
+position_sizing:
+  method: strength
+  fixed_pct: 0.30                  # 单只股票最大仓位 30%
+  min_strength: 0.5                # 提高信号强度阈值
+  scale_with_strength: true
+
+  # 总仓位限制
+  max_total_position: 0.80         # 总仓位不超过 80%
+  max_single_position: 0.30        # 单只股票不超过 30%
+
+# ── 风险控制 ──
+risk_control:
+  enabled: true
+
+  # 单股票限制
+  per_symbol:
+    max_position_pct: 0.30         # 单股最大仓位
+    max_loss_pct: 0.10             # 单股最大亏损
+    stop_loss_pct: 0.08            # 单股止损 8%
+    trail_stop_pct: 0.05           # 单股移动止损 5%
+
+  # 组合限制
+  portfolio:
+    max_total_position: 0.80       # 组合最大仓位
+    max_drawdown: 0.15             # 组合最大回撤 15%
+    daily_loss_limit: 0.05         # 日亏损限制 5%
+
+    # 相关性控制
+    max_correlation: 0.7           # 持仓相关性阈值
+    max_sector_exposure: 0.50      # 单行业最大敞口 50%
+
+  # 熔断机制
+  circuit_breaker:
+    enabled: true
+
+    # 日损失熔断
+    daily_loss:
+      threshold: 0.05              # 日损失 5% 触发熔断
+      cooldown_minutes: 60         # 熔断冷却 60 分钟
+
+    # 回撤熔断
+    drawdown:
+      threshold: 0.15              # 回撤 15% 触发熔断
+      cooldown_minutes: 1440       # 熔断冷却 24 小时
+
+    # 连续亏损熔断
+    consecutive_losses:
+      count: 5                     # 连续 5 次亏损
+      cooldown_minutes: 120        # 熔断冷却 120 分钟
+
+  # 交易频率限制
+  rate_limit:
+    max_orders_per_minute: 10      # 每分钟最多 10 笔订单
+    max_orders_per_hour: 50        # 每小时最多 50 笔订单
+
+# ── 订单管理 ──
+order_management:
+  # 订单类型
+  default_order_type: limit        # market | limit
+  limit_price_offset: 0.001        # 限价单价格偏移 0.1%
+
+  # 订单超时
+  order_timeout_seconds: 300       # 订单超时 5 分钟
+  cancel_on_timeout: true          # 超时自动撤单
+
+  # 部分成交处理
+  partial_fill:
+    min_fill_ratio: 0.5            # 最小成交比例
+    cancel_remaining: true         # 撤销未成交部分
+
+# ── 实时监控 ──
+monitoring:
+  # 持仓同步
+  position_sync:
+    interval_seconds: 5            # 每 5 秒同步持仓
+    sync_on_trade: true            # 交易后立即同步
+
+  # 账户同步
+  account_sync:
+    interval_seconds: 60           # 每 60 秒同步账户
+
+  # 行情监控
+  market_data:
+    check_interval_seconds: 1      # 行情检查间隔
+    stale_threshold_seconds: 10    # 行情过期阈值
+
+# ── 告警配置 ──
+alerts:
+  enabled: true
+
+  # 告警级别: INFO | WARNING | ERROR | CRITICAL
+  min_level: INFO
+
+  # 告警渠道
+  channels:
+    # 邮件告警
+    email:
+      enabled: false
+      smtp_host: smtp.gmail.com
+      smtp_port: 587
+      username: ${EMAIL_USERNAME}
+      password: ${EMAIL_PASSWORD}
+      from_addr: ${EMAIL_FROM}
+      to_addrs:
+        - ${EMAIL_TO}
+      use_tls: true
+
+    # Slack 告警
+    slack:
+      enabled: false
+      webhook_url: ${SLACK_WEBHOOK_URL}
+      channel: "#trading-alerts"
+      username: "QTrade Bot"
+
+    # 企业微信告警
+    wechat:
+      enabled: false
+      webhook_url: ${WECHAT_WEBHOOK_URL}
+
+    # 钉钉告警
+    dingtalk:
+      enabled: false
+      webhook_url: ${DINGTALK_WEBHOOK_URL}
+      secret: ${DINGTALK_SECRET}
+
+  # 告警事件配置
+  events:
+    # 交易告警
+    trade_executed: true           # 交易成交
+    trade_failed: true             # 交易失败
+    order_timeout: true            # 订单超时
+
+    # 风险告警
+    position_limit_warning: true   # 仓位限制警告
+    drawdown_warning: true         # 回撤警告
+    circuit_breaker_triggered: true  # 熔断触发
+
+    # 系统告警
+    connection_lost: true          # 连接断开
+    data_feed_error: true          # 行情错误
+    broker_error: true             # 券商错误
+
+    # 性能告警
+    high_latency: true             # 高延迟
+    stale_data: true               # 数据过期
+
+# ── 日志配置 ──
+logging:
+  level: INFO
+  file: logs/live_trading.log
+  max_bytes: 10485760
+  backup_count: 10                 # 保留更多历史日志
+  log_trades: true                 # 详细记录交易
+  log_signals: true                # 记录信号生成
+  log_orders: true                 # 记录订单状态
+  log_risk_events: true            # 记录风控事件
+
+# ── 输出配置 ──
+output:
+  save_results: true
+  results_dir: results/live
+
+  # 实时报告
+  realtime_report:
+    enabled: true
+    update_interval_seconds: 60    # 每分钟更新报告
+    output: results/live/realtime_report.html
+
+  # 交易日志
+  trade_log:
+    enabled: true
+    format: csv                    # csv | json
+    filename: trades_{date}.csv    # 按日期命名
+
+  # 绩效报告
+  performance_report:
+    enabled: true
+    generate_daily: true           # 每日生成报告
+    generate_on_stop: true         # 停止时生成报告
+    output_dir: results/live/reports
+
+# ── 故障恢复 ──
+recovery:
+  enabled: true
+
+  # 状态持久化
+  state_persistence:
+    enabled: true
+    save_interval_seconds: 60      # 每 60 秒保存状态
+    state_file: data/live_state.json
+
+  # 自动重启
+  auto_restart:
+    enabled: true
+    max_restarts: 5                # 最多重启 5 次
+    restart_delay_seconds: 60      # 重启延迟 60 秒
+
+  # 断线重连
+  reconnection:
+    enabled: true
+    max_retries: 10                # 最多重试 10 次
+    retry_delay_seconds: 5         # 重试延迟 5 秒
+    exponential_backoff: true      # 指数退避

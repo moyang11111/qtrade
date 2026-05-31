@@ -1,0 +1,261 @@
+# =============================================================================
+# QTrade 多策略组合配置
+# =============================================================================
+# 多策略组合配置示例，演示如何组合多个策略
+# 使用方法: qtrade backtest --config configs/multi_strategy_example.yaml
+# =============================================================================
+
+# ── 数据源配置 ──
+data:
+  source: pytdx
+  fallback: [akshare]
+  symbol: "300750"                 # 宁德时代
+  start_date: "20210101"
+  end_date: "20231231"
+  cache:
+    enabled: true
+    type: csv
+    dir: data/cache
+    auto_refresh: false
+  bar_type: daily
+
+# ── 回测引擎配置 ──
+backtest:
+  initial_capital: 2000000.0       # 初始资金 200万
+  commission: 0.0003
+  min_commission: 5.0
+  commission_type: percentage
+  stamp_duty: 0.001
+  stamp_duty_side: sell
+  slippage: 0.001
+  slippage_type: percentage
+  lot_size: 100
+  t_plus_n: 1
+  stop_loss_pct: 0.15
+  trail_stop_pct: 0.10
+  max_position_pct: 0.95
+
+# ── 多策略配置 ──
+strategies:
+  # 启用多策略模式
+  multi_strategy: true
+
+  # 策略组合方法: weighted_average | voting | meta_learner
+  combination_method: weighted_average
+
+  # 策略列表
+  list:
+    # 策略 1: 双均线策略（趋势跟踪）
+    - name: dual_ma
+      type: rule
+      weight: 0.4                  # 权重 40%
+      enabled: true
+      params:
+        fast_period: 5
+        slow_period: 20
+
+      # 策略独立的仓位管理
+      position_sizing:
+        method: fixed
+        fixed_pct: 0.30            # 该策略最大仓位 30%
+
+      # 策略独立的风控
+      risk_control:
+        stop_loss_pct: 0.10
+        trail_stop_pct: 0.08
+
+    # 策略 2: RSI + 布林带策略（均值回归）
+    - name: rsi_bb
+      type: rule
+      weight: 0.3                  # 权重 30%
+      enabled: true
+      params:
+        rsi_period: 14
+        rsi_overbought: 70
+        rsi_oversold: 30
+        bb_period: 20
+        bb_std: 2.0
+
+      position_sizing:
+        method: strength
+        min_strength: 0.4
+        scale_with_strength: true
+
+      risk_control:
+        stop_loss_pct: 0.12
+        trail_stop_pct: 0.10
+
+    # 策略 3: XGBoost ML 策略
+    - name: xgboost_signal
+      type: ml
+      weight: 0.3                  # 权重 30%
+      enabled: true
+      params:
+        model_path: models/xgboost_v1.pkl
+        buy_threshold: 0.6
+        sell_threshold: 0.4
+
+      position_sizing:
+        method: strength
+        min_strength: 0.5
+        scale_with_strength: true
+
+      risk_control:
+        stop_loss_pct: 0.15
+        trail_stop_pct: 0.12
+
+# ── 信号集成配置 ──
+signal_ensemble:
+  # 集成方法
+  method: weighted_average         # weighted_average | majority_vote | meta_learner
+
+  # 加权平均配置
+  weighted_average:
+    # 权重来源: strategy_weight | performance_weight | custom
+    weight_source: strategy_weight
+
+    # 性能加权（可选）
+    performance_weight:
+      lookback_days: 60            # 回溯 60 天
+      metric: sharpe_ratio         # 使用夏普比率作为权重
+      normalize: true              # 归一化权重
+
+  # 投票法配置
+  majority_vote:
+    min_agreement: 0.5             # 最少 50% 策略同意
+
+    # 平局处理
+    tie_breaker: strongest_signal  # strongest_signal | no_action
+
+  # 元学习器配置（高级）
+  meta_learner:
+    enabled: false
+    model_type: logistic_regression  # logistic_regression | random_forest
+    retrain_interval: 30           # 每 30 天重新训练
+    min_samples: 100               # 最少 100 个样本
+
+# ── 资金分配配置 ──
+capital_allocation:
+  # 分配方法: fixed_weight | risk_parity | kelly_criterion
+  method: fixed_weight
+
+  # 固定权重分配
+  fixed_weight:
+    # 权重来自策略配置
+    source: strategy_weight
+
+  # 风险平价分配
+  risk_parity:
+    lookback_days: 60              # 回溯 60 天计算波动率
+    target_volatility: 0.15        # 目标年化波动率 15%
+    rebalance_frequency: 20        # 每 20 天再平衡
+
+  # 凯利公式分配
+  kelly_criterion:
+    lookback_days: 60              # 回溯 60 天计算胜率和盈亏比
+    max_position: 0.50             # 单策略最大仓位 50%
+    fractional_kelly: 0.5          # 半凯利（更保守）
+
+# ── 再平衡配置 ──
+rebalancing:
+  enabled: true
+
+  # 再平衡触发条件
+  triggers:
+    # 时间触发
+    time_based:
+      enabled: true
+      frequency_days: 20           # 每 20 天再平衡
+
+    # 偏离触发
+    deviation_based:
+      enabled: true
+      threshold: 0.05              # 权重偏离 5% 触发再平衡
+
+    # 回撤触发
+    drawdown_based:
+      enabled: true
+      threshold: 0.10              # 回撤 10% 触发再平衡
+
+  # 再平衡方法
+  method: target_weight            # target_weight | incremental
+
+  # 交易成本考虑
+  consider_transaction_cost: true
+  min_trade_size: 0.01             # 最小交易比例 1%
+
+# ── 组合风险管理 ──
+portfolio_risk:
+  # 总仓位限制
+  max_total_position: 0.90         # 总仓位不超过 90%
+
+  # 策略相关性控制
+  correlation_control:
+    enabled: true
+    max_correlation: 0.7           # 策略相关性阈值
+    lookback_days: 60              # 回溯 60 天
+
+    # 相关性过高时的处理
+    action: reduce_weight          # reduce_weight | disable_strategy
+
+  # 组合回撤控制
+  drawdown_control:
+    enabled: true
+    warning_threshold: 0.10        # 回撤 10% 警告
+    action_threshold: 0.15         # 回撤 15% 采取行动
+    action: reduce_position        # reduce_position | stop_trading
+
+  # 策略表现监控
+  performance_monitoring:
+    enabled: true
+    lookback_days: 60
+
+    # 策略降级条件
+    degradation:
+      sharpe_threshold: 0.5        # 夏普比率低于 0.5
+      win_rate_threshold: 0.4      # 胜率低于 40%
+      consecutive_losses: 5        # 连续亏损 5 次
+
+    # 降级处理
+    action: reduce_weight          # reduce_weight | disable_strategy
+    weight_reduction: 0.5          # 权重减半
+
+# ── 日志配置 ──
+logging:
+  level: INFO
+  file: logs/multi_strategy.log
+  max_bytes: 10485760
+  backup_count: 5
+  log_trades: true
+  log_signals: true                # 记录每个策略的信号
+  log_ensemble: true               # 记录信号集成过程
+
+# ── 输出配置 ──
+output:
+  save_results: true
+  results_dir: results/multi_strategy
+  trade_log_csv: true
+
+  # 策略分解报告
+  strategy_breakdown:
+    enabled: true
+    output: results/multi_strategy/strategy_breakdown.html
+
+    # 包含内容
+    include:
+      - individual_performance     # 各策略独立表现
+      - contribution_analysis      # 贡献度分析
+      - correlation_matrix         # 策略相关性矩阵
+      - weight_evolution           # 权重演变
+      - signal_agreement           # 信号一致性分析
+
+  # 图表
+  plot: true
+  plots:
+    - equity_curve_comparison      # 策略资金曲线对比
+    - drawdown_comparison          # 回撤对比
+    - weight_allocation            # 权重分配图
+    - signal_heatmap               # 信号热力图
+
+  # QuantStats 报告
+  quantstats_report: true

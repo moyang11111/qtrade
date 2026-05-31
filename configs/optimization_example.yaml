@@ -1,0 +1,147 @@
+# =============================================================================
+# QTrade 参数优化示例配置
+# =============================================================================
+# 使用贝叶斯优化搜索双均线策略的最优参数
+# 使用方法: qtrade optimize --config configs/optimization_example.yaml
+# =============================================================================
+
+# ── 数据源配置 ──
+data:
+  source: pytdx
+  fallback: [akshare]
+  symbol: "000001"                 # 平安银行
+  start_date: "20200101"           # 使用 4 年数据优化
+  end_date: "20231231"
+  cache:
+    enabled: true
+    type: csv
+    dir: data/cache
+    auto_refresh: false
+  bar_type: daily
+
+# ── 回测引擎配置 ──
+backtest:
+  initial_capital: 500000.0        # 初始资金 50万
+  commission: 0.0003
+  min_commission: 5.0
+  commission_type: percentage
+  stamp_duty: 0.001
+  stamp_duty_side: sell
+  slippage: 0.001
+  slippage_type: percentage
+  lot_size: 100
+  t_plus_n: 1
+  stop_loss_pct: 0.15
+  trail_stop_pct: 0.10
+  max_position_pct: 0.95
+
+# ── 策略配置 ──
+strategy:
+  name: dual_ma
+  type: rule
+  params: {}                       # 参数将由优化器搜索
+
+# ── 参数优化配置 ──
+optimization:
+  # 优化方法: bayesian | grid_search | random_search
+  method: bayesian
+
+  # 贝叶斯优化配置（使用 Optuna）
+  bayesian:
+    n_trials: 100                  # 试验次数
+    timeout: 3600                  # 超时时间（秒）
+    n_jobs: 4                      # 并行任务数
+    sampler: TPE                   # 采样器: TPE | Random | CMAES
+    pruner: MedianPruner           # 剪枝器: MedianPruner | NopPruner
+
+  # 参数搜索空间
+  param_space:
+    fast_period:
+      type: int
+      low: 3
+      high: 20
+      step: 1
+
+    slow_period:
+      type: int
+      low: 10
+      high: 60
+      step: 1
+
+  # 优化目标
+  objective:
+    metric: sharpe_ratio           # 优化指标: sharpe_ratio | annual_return | calmar_ratio
+    direction: maximize            # 优化方向: maximize | minimize
+
+    # 多目标优化（可选）
+    # metrics:
+    #   - name: sharpe_ratio
+    #     weight: 0.5
+    #   - name: max_drawdown
+    #     weight: -0.3             # 负权重表示最小化
+    #   - name: annual_return
+    #     weight: 0.2
+
+  # 走步式验证（防止过拟合）
+  walk_forward:
+    enabled: true
+    n_splits: 5                    # 5 折验证
+    train_ratio: 0.7               # 70% 训练，30% 测试
+    gap: 5                         # 训练和测试间隔 5 天
+
+  # 约束条件
+  constraints:
+    - "fast_period < slow_period"  # 快线周期必须小于慢线周期
+    - "slow_period - fast_period >= 5"  # 周期差至少为 5
+
+# ── 日志配置 ──
+logging:
+  level: INFO
+  file: logs/optimization.log
+  max_bytes: 10485760
+  backup_count: 5
+  log_trades: false
+  log_signals: false
+
+# ── 输出配置 ──
+output:
+  save_results: true
+  results_dir: results/optimization
+
+  # 优化结果输出
+  optimization:
+    save_trials: true              # 保存所有试验结果
+    trials_csv: trials.csv         # 试验结果 CSV 文件
+    save_best: true                # 保存最优参数
+    best_params_yaml: best_params.yaml  # 最优参数 YAML 文件
+
+    # 可视化
+    plot_optimization_history: true     # 优化历史图
+    plot_param_importances: true        # 参数重要性图
+    plot_parallel_coordinate: true      # 平行坐标图
+    plot_contour: true                  # 等高线图（2个参数时）
+
+    plots_dir: results/optimization/plots  # 图表保存目录
+
+# ── 最优参数验证 ──
+validation:
+  enabled: true
+
+  # 使用独立测试集验证
+  test_data:
+    symbol: "000001"
+    start_date: "20240101"         # 使用 2024 年数据验证
+    end_date: null
+
+  # 验证指标
+  metrics:
+    - sharpe_ratio
+    - annual_return
+    - max_drawdown
+    - win_rate
+    - profit_factor
+
+  # 生成验证报告
+  report:
+    enabled: true
+    output: results/optimization/validation_report.html

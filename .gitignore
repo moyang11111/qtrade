@@ -1,0 +1,39 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Data cache
+data/cache/*.csv
+
+# Model artifacts
+models/*.pkl
+models/*.joblib
+models/*.pt
+models/*.pth
+
+# Logs
+logs/*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Claude conversation logs
+*.jsonl
+
+# Results CSV
+results/*.csv
+
+# Environment
+.env
+.venv/
+venv/

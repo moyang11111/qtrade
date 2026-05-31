@@ -1,0 +1,48 @@
+data:
+  symbol: "300750"
+  start_date: "20240101"
+  cache:
+    enabled: true
+    dir: data/cache
+
+backtest:
+  initial_capital: 100000
+  commission: 0.001
+  slippage: 0.001
+  lot_size: 100
+  stop_loss_pct: 0.15
+  trail_stop_pct: 0.10
+
+strategy:
+  name: ml_signal
+  type: ml
+  params:
+    buy_threshold: 0.6
+    sell_threshold: 0.4
+
+ml:
+  model_type: xgboost
+  model_params:
+    xgboost:
+      n_estimators: 200
+      max_depth: 5
+      learning_rate: 0.05
+      subsample: 0.8
+      colsample_bytree: 0.8
+  train_start: "20200101"
+  train_end: "20231231"
+  cv:
+    method: expanding
+    n_folds: 5
+    val_window: 63
+    gap: 5
+  features:
+    groups: [technical, momentum, volatility]
+    target:
+      horizon: 5
+      threshold: 0.02
+  registry:
+    dir: models
+
+logging:
+  level: INFO

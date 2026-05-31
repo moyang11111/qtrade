@@ -1,0 +1,86 @@
+# =============================================================================
+# QTrade 回测示例配置
+# =============================================================================
+# 这是一个简单的双均线策略回测配置示例
+# 使用方法: qtrade backtest --config configs/backtest_example.yaml
+# =============================================================================
+
+# ── 数据源配置 ──
+data:
+  source: pytdx                    # 主要数据源: pytdx | akshare | csv
+  fallback: [akshare]              # 备用数据源（故障转移）
+  symbol: "600519"                 # 股票代码（贵州茅台）
+  start_date: "20220101"           # 回测开始日期
+  end_date: "20231231"             # 回测结束日期
+  cache:
+    enabled: true                  # 启用数据缓存
+    type: csv                      # 缓存类型: csv | parquet
+    dir: data/cache                # 缓存目录
+    auto_refresh: false            # 自动刷新缓存
+  bar_type: daily                  # K线类型: daily | 60min | 30min | 15min
+
+# ── 回测引擎配置 ──
+backtest:
+  initial_capital: 1000000.0       # 初始资金 100万
+
+  # 手续费配置
+  commission: 0.0003               # 佣金率 万三（单边）
+  min_commission: 5.0              # 最低佣金 5元
+  commission_type: percentage      # 佣金类型: percentage | fixed
+
+  # 印花税（A股卖出时收取）
+  stamp_duty: 0.001                # 印花税率 千一
+  stamp_duty_side: sell            # 印花税方向: sell | both
+
+  # 滑点配置
+  slippage: 0.001                  # 滑点 0.1%
+  slippage_type: percentage        # 滑点类型: percentage | fixed
+
+  # A股交易规则
+  lot_size: 100                    # 最小交易单位（手）
+  t_plus_n: 1                      # T+1 交易制度
+
+  # 风险管理
+  stop_loss_pct: 0.10              # 固定止损 10%
+  trail_stop_pct: 0.08             # 移动止损 8%
+  max_position_pct: 0.95           # 最大仓位 95%
+
+# ── 仓位管理 ──
+position_sizing:
+  method: strength                 # 仓位计算方法: fixed | strength | atr
+  fixed_pct: 0.95                  # 固定仓位比例
+  min_strength: 0.3                # 最小信号强度
+  scale_with_strength: true        # 根据信号强度调整仓位
+
+  # ATR-based 仓位管理
+  risk_per_trade: 0.02             # 单笔交易风险 2%
+  atr_period: 14                   # ATR 周期
+  atr_stop_mult: 2.0               # ATR 止损倍数
+
+# ── 策略配置 ──
+strategy:
+  name: dual_ma                    # 策略名称
+  type: rule                       # 策略类型: rule | ml
+
+  # 策略参数
+  params:
+    fast_period: 5                 # 快线周期
+    slow_period: 20                # 慢线周期
+
+# ── 日志配置 ──
+logging:
+  level: INFO                      # 日志级别: DEBUG | INFO | WARNING | ERROR
+  file: logs/backtest_example.log  # 日志文件
+  max_bytes: 10485760              # 日志文件最大 10MB
+  backup_count: 5                  # 保留 5 个历史日志
+  log_trades: true                 # 记录交易详情
+  log_signals: false               # 记录信号生成
+
+# ── 输出配置 ──
+output:
+  save_results: true               # 保存回测结果
+  results_dir: results             # 结果保存目录
+  trade_log_csv: true              # 导出交易记录 CSV
+  plot: true                       # 自动生成图表
+  quantstats_report: true          # 生成 QuantStats 报告
+  plot_style: candlestick          # 图表样式: candlestick | line

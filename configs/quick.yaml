@@ -1,0 +1,18 @@
+data:
+  symbol: "300750"
+  start_date: "20220101"
+
+backtest:
+  initial_capital: 100000
+  commission: 0.001
+  slippage: 0.001
+
+strategy:
+  name: dual_ma
+  type: rule
+  params:
+    fast_period: 5
+    slow_period: 20
+
+logging:
+  level: INFO

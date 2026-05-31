@@ -1,0 +1,21 @@
+{
+  "symbol": "600519",
+  "metrics": {
+    "total_return": -9.6,
+    "annual_return": -3.34,
+    "final_value": 903966.6,
+    "years": 2.9,
+    "sharpe_ratio": -0.549,
+    "max_drawdown": 12.36,
+    "max_dd_duration": 250,
+    "total_trades": 4,
+    "win_rate": 50.0,
+    "profit_factor": 0.46,
+    "win_loss_ratio": 0.46,
+    "avg_win": 41357.93,
+    "avg_loss": 89374.63,
+    "max_consec_wins": 0,
+    "max_consec_losses": 0
+  },
+  "trade_count": 4
+}

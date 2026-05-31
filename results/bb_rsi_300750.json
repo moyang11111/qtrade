@@ -1,0 +1,21 @@
+{
+  "symbol": "300750",
+  "metrics": {
+    "total_return": -25.77,
+    "annual_return": -8.96,
+    "final_value": 742344.91,
+    "years": 2.9,
+    "sharpe_ratio": -1.75,
+    "max_drawdown": 28.33,
+    "max_dd_duration": 450,
+    "total_trades": 5,
+    "win_rate": 0.0,
+    "profit_factor": null,
+    "win_loss_ratio": null,
+    "avg_win": 0.0,
+    "avg_loss": 51531.02,
+    "max_consec_wins": 0,
+    "max_consec_losses": 0
+  },
+  "trade_count": 5
+}
