@@ -30,8 +30,8 @@ import pandas as pd
 import numpy as np
 
 from qtrade.live_trading.broker import MockBroker, OrderSide, OrderType
-from qtrade.strategy.rule.pullback_deep import PullbackDeepSignal
-from qtrade.strategy.rule.pullback_20d import Pullback20DSignal
+import qtrade.strategy  # 触发所有策略注册
+from qtrade.strategy.registry import get_signal_generator, list_strategies
 
 # 行情源：优先用通达信（pytdx TCP），失败则用腾讯 HTTP
 def _create_feed(poll_interval=3.0):
@@ -63,16 +63,18 @@ signal.signal(signal.SIGINT, on_sigint)
 class PaperTrader:
     """Paper trading system."""
 
-    def __init__(self, symbols, capital=1_000_000, poll_interval=5.0):
+    def __init__(self, symbols, capital=1_000_000, poll_interval=5.0, strategy_name="pullback_20d"):
         self.symbols = symbols
         self.capital = capital
         self.broker = MockBroker(initial_cash=capital)
         self.feed, self.feed_type = _create_feed(poll_interval)
-        self.strategy = Pullback20DSignal(dict(
-            peak_lookback=60, drop_min=0.15, drop_max=0.40,
-            vol_short=5, vol_long=20, vol_threshold=0.7, hold_bars=20,
-        ))
-        self._use_sltp = False
+
+        # 按名称加载策略，默认 Pullback20D
+        strategy_cls = get_signal_generator(strategy_name)
+        self.strategy = strategy_cls({})
+        self.strategy_name = strategy_name
+        # Pullback20D 不自带止盈止损，其他策略用 SignalFollower 的 SL/TP
+        self._use_sltp = strategy_name not in ("pullback_20d",)
 
         self.dfs = {}
         self.entry_prices = {}
@@ -309,7 +311,7 @@ class PaperTrader:
     def run(self, interval=30.0):
         """Main loop."""
         print(f"\n{'='*60}")
-        print(f"  QTrade 模拟盘 — Pullback20D 策略")
+        print(f"  QTrade 模拟盘 — {self.strategy_name} 策略")
         print(f"  监控股票: {', '.join(self.symbols)}")
         print(f"  买入: 回调15-40% + 成交量收缩 < 0.7")
         print(f"  卖出: 持有20个交易日 / 由策略信号触发")
@@ -369,13 +371,14 @@ class PaperTrader:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbols", default="002580,000066,002297,002757,600130,002328,002176")
+    parser.add_argument("--strategy", default="pullback_20d", help=f"策略名称: {', '.join(list_strategies())}")
     parser.add_argument("--capital", type=float, default=1_000_000)
     parser.add_argument("--interval", type=float, default=30)
     parser.add_argument("--poll", type=float, default=5)
     args = parser.parse_args()
 
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
-    trader = PaperTrader(symbols, args.capital, args.poll)
+    trader = PaperTrader(symbols, args.capital, args.poll, args.strategy)
     trader.run(args.interval)
 
 
