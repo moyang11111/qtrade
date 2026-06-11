@@ -158,17 +158,23 @@ class BaiduQuoteFeed(RealtimeDataFeed):
             time.sleep(self.poll_interval)
 
     def _fetch_quotes(self) -> dict[str, Tick]:
-        """拉取腾讯行情。"""
-        qt_symbols = [_normalize_symbol(s) for s in self._symbols]
-        url = TENCENT_QUOTE_URL + ",".join(qt_symbols)
+        """拉取腾讯行情，分批请求（每批最多50只）。"""
+        all_ticks = {}
+        symbols_list = list(self._symbols)
 
-        req = urllib.request.Request(url)
-        req.add_header("User-Agent", "Mozilla/5.0")
-        try:
-            resp = urllib.request.urlopen(req, timeout=10)
-            raw = resp.read().decode("gbk")
-        except Exception as e:
-            logger.warning("Tencent quote request failed: %s", e)
-            return {}
+        for i in range(0, len(symbols_list), 50):
+            batch = symbols_list[i:i+50]
+            qt_symbols = [_normalize_symbol(s) for s in batch]
+            url = TENCENT_QUOTE_URL + ",".join(qt_symbols)
 
-        return _parse_tencent_quote(raw)
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", "Mozilla/5.0")
+            try:
+                resp = urllib.request.urlopen(req, timeout=10)
+                raw = resp.read().decode("gbk")
+                ticks = _parse_tencent_quote(raw)
+                all_ticks.update(ticks)
+            except Exception as e:
+                logger.warning("Tencent quote batch {} failed: {}", i//50, e)
+
+        return all_ticks

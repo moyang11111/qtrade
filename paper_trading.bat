@@ -8,5 +8,5 @@ echo   策略: PullbackDeepSignal
 echo   止盈10%% / 止损5%%
 echo =======================================
 echo.
-python scripts\paper_trading.py %*
+python scripts\paper_trading.py --all %*
 pause
