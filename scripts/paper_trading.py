@@ -25,6 +25,23 @@ RUNNING = True
 signal.signal(signal.SIGINT, lambda *_: globals().update(RUNNING=False) or print("\nShutting down..."))
 
 
+def fetch_live_price(symbol: str) -> float:
+    """直接获取单只股票的实时价格（不走行情缓存）。"""
+    import urllib.request
+    prefix = "sh" if symbol.startswith(("6", "9")) else "sz"
+    url = f"https://qt.gtimg.cn/q={prefix}{symbol}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        resp = urllib.request.urlopen(req, timeout=5)
+        line = resp.read().decode("gbk").split(";")[0]
+        if '"' in line:
+            vals = line.split('"')[1].split("~")
+            return float(vals[3]) if vals[3] else 0
+    except Exception:
+        pass
+    return 0
+
+
 def _create_feed(poll=3.0):
     try:
         from qtrade.live_trading.tdx_feed import TdxQuoteFeed
@@ -71,12 +88,13 @@ class StrategySlot:
                 action = int(latest.get("signal_action", 0))
 
                 if action == 1 and (pos is None or pos.quantity == 0):
-                    price = self.feed.get_price(sym)
+                    # 先试行情缓存，没有则直接请求
+                    price = self.feed.get_price(sym) or fetch_live_price(sym)
                     if price and price > 0:
                         self._buy(sym, price, float(latest.get("signal_strength", 0.5)))
 
                 elif action == -1 and pos and pos.quantity > 0:
-                    price = self.feed.get_price(sym)
+                    price = self.feed.get_price(sym) or fetch_live_price(sym)
                     if price and price > 0:
                         self._sell(sym, price, "signal")
             except Exception:
