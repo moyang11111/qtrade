@@ -30,15 +30,18 @@ def fetch_live_price(symbol: str) -> float:
     import urllib.request
     prefix = "sh" if symbol.startswith(("6", "9")) else "sz"
     url = f"https://qt.gtimg.cn/q={prefix}{symbol}"
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        resp = urllib.request.urlopen(req, timeout=5)
-        line = resp.read().decode("gbk").split(";")[0]
-        if '"' in line:
-            vals = line.split('"')[1].split("~")
-            return float(vals[3]) if vals[3] else 0
-    except Exception:
-        pass
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            resp = urllib.request.urlopen(req, timeout=5)
+            line = resp.read().decode("gbk").split(";")[0]
+            if '"' in line:
+                vals = line.split('"')[1].split("~")
+                p = float(vals[3]) if vals[3] else 0
+                if p > 0:
+                    return p
+        except Exception:
+            pass
     return 0
 
 
@@ -90,14 +93,15 @@ class StrategySlot:
                 if action == 1 and (pos is None or pos.quantity == 0):
                     price = self.feed.get_price(sym) or fetch_live_price(sym)
                     if price and price > 0:
+                        self.broker.set_price(sym, price)
                         self._buy(sym, price, float(latest.get("signal_strength", 0.5)))
-                    else:
-                        # 价格获取失败，等待下次检查
-                        pass
+                        time.sleep(0.1)  # 避免腾讯API限频
+                    # 无价格则等下次检查
 
                 elif action == -1 and pos and pos.quantity > 0:
                     price = self.feed.get_price(sym) or fetch_live_price(sym)
                     if price and price > 0:
+                        self.broker.set_price(sym, price)
                         self._sell(sym, price, "signal")
             except Exception as e:
                 print(f"  [{self.name}] {sym} check error: {e}")
