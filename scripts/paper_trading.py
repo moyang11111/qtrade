@@ -88,17 +88,19 @@ class StrategySlot:
                 action = int(latest.get("signal_action", 0))
 
                 if action == 1 and (pos is None or pos.quantity == 0):
-                    # 先试行情缓存，没有则直接请求
                     price = self.feed.get_price(sym) or fetch_live_price(sym)
                     if price and price > 0:
                         self._buy(sym, price, float(latest.get("signal_strength", 0.5)))
+                    else:
+                        # 价格获取失败，等待下次检查
+                        pass
 
                 elif action == -1 and pos and pos.quantity > 0:
                     price = self.feed.get_price(sym) or fetch_live_price(sym)
                     if price and price > 0:
                         self._sell(sym, price, "signal")
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  [{self.name}] {sym} check error: {e}")
 
     def _buy(self, sym, price, strength):
         acc = self.broker.get_account()
@@ -228,7 +230,7 @@ class MultiPaperTrader:
         self.dashboard()
 
         last_db = time.time()
-        last_check = time.time()
+        last_check = 0  # 立即执行首次检查
 
         try:
             while RUNNING:
@@ -237,7 +239,7 @@ class MultiPaperTrader:
                 if now - last_db >= interval:
                     self.dashboard()
                     last_db = now
-                if now - last_check >= 60:
+                if now - last_check >= 30:  # 每30秒检查信号
                     self.check_all()
                     last_check = now
         except KeyboardInterrupt:
