@@ -1,4 +1,4 @@
-"""CLI entry point â€” python -m qtrade."""
+"""CLI entry point â€?python -m qtrade."""
 
 import argparse
 import sys
@@ -95,7 +95,7 @@ def _generate_plots(result, results_dir: str, cfg: dict):
 
     symbol = cfg["data"]["symbol"]
     strat_name = cfg["strategy"]["name"]
-    title = f"{symbol} â€” {strat_name}"
+    title = f"{symbol} â€?{strat_name}"
 
     if not result.equity_curve.empty:
         plot_equity_curve(
@@ -111,7 +111,7 @@ def _generate_plots(result, results_dir: str, cfg: dict):
     if result.trade_log:
         plot_annual_returns(
             result.equity_curve,
-            title=f"{title} â€” Annual Returns",
+            title=f"{title} â€?Annual Returns",
             save_path=f"{results_dir}/annual_returns.png"
         )
 
@@ -128,7 +128,7 @@ def _generate_quantstats_report(result, results_dir: str, cfg: dict):
 
     symbol = cfg["data"]["symbol"]
     strat_name = cfg["strategy"]["name"]
-    title = f"qtrade: {symbol} â€” {strat_name}"
+    title = f"qtrade: {symbol} â€?{strat_name}"
 
     try:
         path = generate_quantstats_report(
@@ -246,8 +246,109 @@ def cmd_compare(args):
         print("[VIZ] Comparison chart saved: results/strategy_comparison.png")
 
 
+def cmd_optimize(args):
+    """Run parameter optimization (grid or bayesian)."""
+    cfg = load_config(args.config)
+    setup_logging(cfg)
+
+    from qtrade.data.fetcher import DataFetcher
+    from qtrade.strategy.registry import get_signal_generator
+    from qtrade.backtest.engine import BacktestEngine
+    from qtrade.optimization.grid_search import GridSearchOptimizer
+    from qtrade.optimization.bayesian import BayesianOptimizer
+
+    opt_cfg = cfg.get("optimization", {})
+    method = opt_cfg.get("method", args.method or "grid")
+
+    # Fetch data
+    data_cfg = cfg["data"]
+    fetcher = DataFetcher(cfg)
+    df = fetcher.fetch(data_cfg["symbol"], data_cfg["start_date"], data_cfg.get("end_date"))
+    print(f"[DATA] {data_cfg['symbol']}: {len(df)} rows")
+
+    # Build objective function: runs backtest and returns total_return
+    def objective(strategy_cls, params):
+        gen = strategy_cls({"name": cfg["strategy"]["name"], **params})
+        df_sig = gen.generate_signals(df)
+        engine = BacktestEngine(cfg)
+        result = engine.run(df_sig)
+        return result.metrics.get("total_return", -999)
+
+    param_space = opt_cfg.get("param_grid", opt_cfg.get("param_space", {}))
+    if not param_space:
+        print("[ERROR] No param_grid or param_space in optimization config.")
+        return
+
+    strat_cls = get_signal_generator(cfg["strategy"]["name"])
+
+    if method == "bayesian":
+        opt = BayesianOptimizer(strat_cls, param_space, objective, direction="maximize")
+    else:
+        opt = GridSearchOptimizer(strat_cls, param_space, objective)
+
+    print(f"[OPT] Running {method} optimization...")
+    best = opt.optimize(df)
+    print(f"[OPT] Best params: {best.get('best_params', best)}")
+    print(f"[OPT] Best score: {best.get('best_score', 'N/A')}")
+
+
+def cmd_live(args):
+    """Start live / paper trading."""
+    cfg = load_config(args.config)
+    setup_logging(cfg)
+
+    from qtrade.live_trading.broker import MockBroker
+    from qtrade.live_trading.data_feed import RealtimeDataFeed
+    from qtrade.live_trading.live_trader import LiveTrader
+    from qtrade.live_trading.risk_monitor import RiskMonitor
+    from qtrade.strategy.registry import get_signal_generator
+
+    data_cfg = cfg["data"]
+    symbols = args.symbols or [data_cfg.get("symbol", "000001")]
+    if isinstance(symbols, str):
+        symbols = symbols.split(",")
+
+    strat_cfg = cfg["strategy"]
+    strat_cls = get_signal_generator(strat_cfg["name"])
+    strategy = strat_cls({**strat_cfg.get("params", {}), "name": strat_cfg["name"]})
+
+    broker = MockBroker(initial_capital=cfg.get("backtest", {}).get("initial_capital", 1000000))
+    data_feed = RealtimeDataFeed(symbols)
+    risk_monitor = RiskMonitor()
+
+    trader = LiveTrader(
+        broker=broker,
+        data_feed=data_feed,
+        strategy=strategy,
+        risk_monitor=risk_monitor,
+    )
+    print(f"[LIVE] Starting paper trading for {symbols}...")
+    trader.start(symbols)
+
+
+def cmd_report(args):
+    """Generate an HTML report from a results equity curve CSV or backtest-id."""
+    from pathlib import Path
+    import pandas as pd
+
+    output = args.output or "results/quantstats_report.html"
+
+    if args.equity_csv:
+        equity = pd.read_csv(args.equity_csv, index_col=0, parse_dates=True)
+        if equity.shape[1] >= 1:
+            equity = equity.iloc[:, 0]
+    else:
+        print("[ERROR] Specify --equity-csv <path> or an equity curve file.")
+        return
+
+    from qtrade.backtest.report import generate_quantstats_report
+    title = args.title or "qtrade Strategy Report"
+    path = generate_quantstats_report(equity, output_path=output, title=title)
+    print(f"[REPORT] Saved: {path}")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="qtrade â€” A-share quant framework")
+    parser = argparse.ArgumentParser(description="qtrade â€?A-share quant framework")
     sub = parser.add_subparsers(dest="command")
 
     # backtest
@@ -267,6 +368,25 @@ def main():
                            help="Strategy names (default: all registered)")
     cmp_parser.add_argument("--plot", action="store_true", help="Generate comparison chart")
 
+    # optimize
+    opt_parser = sub.add_parser("optimize", help="Run parameter optimization")
+    opt_parser.add_argument("--config", "-c", default="configs/optimization_example.yaml")
+    opt_parser.add_argument("--method", "-m", choices=["grid", "bayesian"],
+                           help="Optimization method (default: from config)")
+
+    # live
+    live_parser = sub.add_parser("live", help="Start live/paper trading")
+    live_parser.add_argument("--config", "-c", default="configs/live_trading_example.yaml")
+    live_parser.add_argument("--symbols", "-s", nargs="+",
+                           help="Symbols to trade (e.g. 600519 000001)")
+
+    # report
+    rpt_parser = sub.add_parser("report", help="Generate HTML report from equity curve")
+    rpt_parser.add_argument("--equity-csv", help="Path to equity curve CSV")
+    rpt_parser.add_argument("--output", "-o", default="results/quantstats_report.html",
+                           help="Output HTML path")
+    rpt_parser.add_argument("--title", "-t", help="Report title")
+
     args = parser.parse_args()
 
     if args.command == "backtest":
@@ -275,6 +395,12 @@ def main():
         cmd_train(args)
     elif args.command == "compare":
         cmd_compare(args)
+    elif args.command == "optimize":
+        cmd_optimize(args)
+    elif args.command == "live":
+        cmd_live(args)
+    elif args.command == "report":
+        cmd_report(args)
     else:
         parser.print_help()
 

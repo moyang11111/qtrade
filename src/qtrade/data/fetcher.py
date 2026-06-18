@@ -1,4 +1,4 @@
-"""DataFetcher â€” unified data access with source fallback and storage caching."""
+"""DataFetcher â€?unified data access with source fallback and storage caching."""
 
 import logging
 from datetime import datetime
@@ -17,7 +17,9 @@ logger = logging.getLogger("qtrade.data.fetcher")
 class DataFetcher:
     """Fetch OHLCV data with multi-source fallback and local caching."""
 
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict = None):
+        if cfg is None:
+            cfg = {"data": {}}
         data_cfg = cfg.get("data", {})
         cache_cfg = data_cfg.get("cache", {})
 
@@ -77,6 +79,26 @@ class DataFetcher:
                 continue
 
         raise RuntimeError(f"All sources failed for {symbol}: {last_error}")
+
+    def fetch_history(self, symbol: str, start_date: str = "20220101",
+                      end_date: str = None) -> pd.DataFrame:
+        """Alias for fetch() ¡ª backward-compatible with skill/QUICKSTART docs.
+
+        Args:
+            symbol: Stock symbol, e.g. "600519".
+            start_date: Start date in "YYYY-MM-DD" or "YYYYMMDD" format.
+            end_date: End date in "YYYY-MM-DD" or "YYYYMMDD" format.
+
+        Returns:
+            DataFrame with OHLCV columns.
+        """
+        import re
+        start = re.sub(r"\D", "", start_date)  # normalize "2023-01-01" -> "20230101"
+        if end_date:
+            end = re.sub(r"\D", "", end_date)
+        else:
+            end = None
+        return self.fetch(symbol, start, end)
 
     def fetch_index(self, symbol: str = "000300",
                     start: str = "20220101", end: str = None) -> pd.DataFrame:

@@ -91,3 +91,20 @@ def _validate(cfg: dict) -> None:
     capital = cfg.get("backtest", {}).get("initial_capital", 0)
     if capital <= 0:
         raise ValueError(f"backtest.initial_capital must be positive, got {capital}")
+
+
+class Config(dict):
+    """Dictionary subclass with a from_yaml factory for backward compatibility.
+
+    Usage:
+        config = Config.from_yaml("configs/quick.yaml")
+        # Behaves exactly like the dict returned by load_config()
+    """
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "Config":
+        """Load a YAML config file, returning a Config (dict subclass)."""
+        return cls(load_config(path))
+
+    def __repr__(self):
+        return f"Config({super().__repr__()})"
