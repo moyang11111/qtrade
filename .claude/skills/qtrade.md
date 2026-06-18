@@ -1,340 +1,208 @@
+---
+name: qtrade
+description: 使用 QTrade 量化交易框架进行 A 股策略研究、回测、参数优化和实盘交易
+---
+
 # QTrade Skill
 
-## 描述
-使用 QTrade 量化交易框架进行 A 股策略研究、回测和实盘交易。
+使用 QTrade 框架进行 A 股量化交易的全流程工作。
 
 ## 触发条件
-当用户提到以下任何情况时自动激活：
+当用户提到以下情况时激活：
 - 量化交易、策略回测、股票分析
 - qtrade、backtrader、backtest
 - 技术指标、因子分析、策略优化
 - 实盘交易、风控、资金管理
-- 需要使用 qtrade 框架
 
-## 核心能力
+## 项目路径
+- 本地路径: `C:\Users\ASUS\qtrade`
+- 源码: `src/qtrade/`
+- 配置: `configs/` (7 个 YAML 文件)
+- 文档: README.md, QUICKSTART.md, docs/ARCHITECTURE.md
 
-### 1. 数据获取与管理
+## 数据获取
 ```python
 from qtrade.data import DataFetcher
 
-# 获取历史数据
+# 无参构造（使用默认配置）
 fetcher = DataFetcher()
-data = fetcher.fetch_history(
-    symbol="600519",           # 股票代码
-    start_date="2023-01-01",
-    end_date="2023-12-31"
-)
+data = fetcher.fetch_history(symbol="600519", start_date="2023-01-01", end_date="2023-12-31")
 
-# 多数据源支持：pytdx, akshare, csv
-# 自动故障转移和数据缓存
+# 或带配置构造
+from qtrade import load_config
+cfg = load_config("configs/quick.yaml")
+fetcher = DataFetcher(cfg)
+data = fetcher.fetch("600519", "20230101", "20231231")
 ```
 
-### 2. 策略开发与回测
+多数据源：pytdx / akshare / csv，自动故障转移和缓存。
+
+## 策略开发与回测
+所有策略实现统一的 `SignalGenerator` 接口，输出 `signal_action/signal_strength/signal_score` 三列。
+
+**推荐写法（配置驱动）：**
 ```python
-from qtrade.strategies import DualMAStrategy
-from qtrade.backtest import BacktestEngine
-from qtrade import Config
+from qtrade import load_config, BacktestEngine
+from qtrade.data import DataFetcher
+from qtrade.strategy.registry import get_signal_generator
 
-# 加载配置
-config = Config.from_yaml("configs/default.yaml")
+cfg = load_config("configs/quick.yaml")
+fetcher = DataFetcher(cfg)
+df = fetcher.fetch(cfg["data"]["symbol"], cfg["data"]["start_date"], cfg["data"]["end_date"])
 
-# 创建策略
-strategy = DualMAStrategy(fast_window=5, slow_window=20)
+# 策略名从 config 读取，参数通过 config 传递
+strat_cls = get_signal_generator(cfg["strategy"]["name"])
+generator = strat_cls({"name": cfg["strategy"]["name"], **cfg["strategy"].get("params", {})})
+df_signals = generator.generate_signals(df)
 
-# 运行回测
-engine = BacktestEngine(config)
-result = engine.run(strategy, data)
-
-# 查看结果
+engine = BacktestEngine(cfg)
+result = engine.run(df_signals)
 print(result.metrics)
 result.plot()
 result.save_report("report.html")
 ```
 
-### 3. 特征工程
+**快捷写法（兼容 QUICKSTART 文档）：**
 ```python
-from qtrade.features import TechnicalIndicators
+from qtrade import Config, BacktestEngine, DataFetcher
+from qtrade.strategies import DualMAStrategy
 
-# 计算技术指标
-indicators = TechnicalIndicators()
-features = indicators.compute_all(data)
+config = Config.from_yaml("configs/backtest_example.yaml")
+fetcher = DataFetcher()
+data = fetcher.fetch_history(symbol="600519", start_date="2023-01-01", end_date="2023-12-31")
 
-# 支持的指标：RSI, MACD, 布林带, ATR, 动量等 50+ 种
+strategy = DualMAStrategy({"name": "dual_ma", "fast_window": 5, "slow_window": 20})
+# 注意：engine.run() 接受的是已含信号的 DataFrame，需先调用 strategy.generate_signals()
+df_signals = strategy.generate_signals(data)
+
+engine = BacktestEngine(config)
+result = engine.run(df_signals)
+print(result.metrics)
+result.plot()
+result.save_report("report.html")
 ```
 
-### 4. 参数优化
+## 内置策略（15 个）
+| 注册名 | 类名 | 类型 |
+|--------|------|------|
+| `dual_ma` | DualMASignal / DualMAStrategy | 均线 |
+| `trend_5d` | Trend5DSignal / Trend5DStrategy | 均线 |
+| `bollinger` | BollingerSignal / BollingerStrategy | 布林 |
+| `bb_rsi` | BBRsiSignal / BBRsiStrategy | 布林 |
+| `pullback_bb_mid` | PullbackBBMidSignal / PullbackBBMidStrategy | 布林 |
+| `pullback_deep` | PullbackDeepSignal / PullbackDeepStrategy | 回调 |
+| `pullback_vol` | PullbackVolSignal / PullbackVolStrategy | 回调 |
+| `pullback_20d` | Pullback20DSignal / Pullback20DStrategy | 回调 |
+| `breakout` | BreakoutSignal / BreakoutStrategy | 突破 |
+| `adaptive` | AdaptiveSignal / AdaptiveStrategy | 自适应 |
+| `hybrid` | AdaptiveHybridSignal / AdaptiveHybridStrategy | 自适应 |
+| `event_driven` | EventDrivenSignal / EventDrivenStrategy | 事件 |
+| `event_v2` | EventDrivenV2Signal / EventDrivenV2Strategy | 事件 |
+| `regime_filter` | RegimeFilterSignal / RegimeFilterStrategy | 市场 |
+| `regime_v2` | RegimeFilterV2Signal / RegimeFilterV2Strategy | 市场 |
+
+## 特征工程
+50+ 技术指标（`qtrade.features.technical`）：RSI, MACD, 布林带, ATR, 动量等。
+```python
+from qtrade.features.engine import FeatureEngine
+fe = FeatureEngine({"indicators": ["rsi", "macd", "bb"]})
+df_features = fe.compute(df)
+```
+
+## 参数优化
 ```python
 from qtrade.optimization import GridSearchOptimizer, BayesianOptimizer
 
 # 网格搜索
-optimizer = GridSearchOptimizer(
-    strategy_class=DualMAStrategy,
-    param_grid={
-        'fast_window': [5, 10, 15],
-        'slow_window': [20, 30, 40]
-    }
-)
-best_params = optimizer.optimize(data)
+opt = GridSearchOptimizer(strategy_cls, param_grid={"fast_window": [3,5,10], "slow_window": [15,20,30]}, objective_func=my_objective)
+best = opt.optimize(df)
 
-# 贝叶斯优化（更智能）
-bayesian_opt = BayesianOptimizer(
-    strategy_class=DualMAStrategy,
-    param_space={
-        'fast_window': (5, 20),
-        'slow_window': (20, 60)
-    },
-    objective_func=lambda s: s.sharpe_ratio
-)
+# 贝叶斯优化（基于 Optuna）
+opt = BayesianOptimizer(strategy_cls, param_space={"fast_window": {"type":"int","low":2,"high":20}}, objective_func=my_objective)
+best = opt.optimize(df)
 ```
 
-### 5. 多策略组合
+## 多策略组合
 ```python
-from qtrade.portfolio import StrategyCombiner
+from qtrade.portfolio.combiner import StrategyCombiner
 
-combiner = StrategyCombiner()
-combiner.add_strategy(strategy1, weight=0.5)
-combiner.add_strategy(strategy2, weight=0.3)
-combiner.add_strategy(strategy3, weight=0.2)
-
-# 生成组合信号
-combined_signals = combiner.generate_signals(data)
+combiner = StrategyCombiner([(strategy1, 0.5), (strategy2, 0.5)])
+combined_signals = combiner.generate_signals(df)
 ```
 
-### 6. 风险控制
+## 风险控制
 ```python
-from qtrade.risk_control import RiskMiddleware
+from qtrade.risk_control.middleware import RiskMiddleware
+from qtrade.risk_control.limits import PositionLimits, PortfolioLimits
+from qtrade.risk_control.stop_loss import StopLossManager
+from qtrade.risk_control.circuit_breaker import DrawdownBreaker
 
-risk_control = RiskMiddleware(
-    max_position_pct=0.2,        # 单只股票最大仓位 20%
-    max_drawdown=0.15,           # 最大回撤 15%
-    stop_loss=0.05,              # 止损 5%
-    daily_loss_limit=0.03        # 单日亏损限制 3%
+rm = RiskMiddleware(
+    position_limits=PositionLimits(max_single_position_pct=0.2),
+    stop_loss_manager=StopLossManager(stop_loss_pct=0.05),
+    drawdown_breaker=DrawdownBreaker(max_drawdown=0.15),
 )
 ```
 
-### 7. 实盘交易
+## 实盘交易
 ```python
 from qtrade.live_trading import LiveTrader
 from qtrade.live_trading.broker import MockBroker
+from qtrade.live_trading.data_feed import RealtimeDataFeed
+from qtrade.live_trading.risk_monitor import RiskMonitor
 
-# 配置券商
 broker = MockBroker(initial_capital=1000000)
-
-# 创建实时数据源
-data_feed = RealtimeDataFeed(symbols=["600519"])
-
-# 启动实盘交易
+data_feed = RealtimeDataFeed(["600519"])
 trader = LiveTrader(
     broker=broker,
     data_feed=data_feed,
     strategy=strategy,
-    risk_control=risk_control
+    risk_monitor=RiskMonitor(),  # 注意：参数名是 risk_monitor
 )
-trader.start()
+trader.start(["600519"])
 ```
 
-### 8. 可视化与报告
+## 可视化
 ```python
-# 生成图表
-result.plot_equity_curve()
-result.plot_drawdown()
-result.plot_monthly_returns()
+# BacktestResult 方法
+result.plot()                    # 资金曲线 + 回撤图
+result.plot_equity_curve()       # 仅资金曲线
+result.plot_drawdown()           # 仅回撤图
+result.save_report("r.html")     # 生成 QuantStats HTML 报告
+result.save_quantstats_report()  # 同上
 
-# 生成 HTML 报告
-result.save_report("analysis.html")
-
-# 使用 QuantStats
-result.save_quantstats_report("quantstats.html")
+# 独立函数
+from qtrade.visualization.charts import plot_equity_curve, plot_drawdown
+from qtrade.backtest.report import generate_quantstats_report
 ```
 
-## CLI 命令
-
+## CLI
 ```bash
-# 运行回测
-qtrade backtest --config configs/default.yaml --symbol 600519
-
-# 参数优化
-qtrade optimize --config configs/optimization.yaml
-
-# 启动实盘交易
-qtrade live --config configs/live.yaml
-
-# 生成报告
-qtrade report --backtest-id <id> --output report.html
+qtrade backtest  --config configs/quick.yaml --plot --report
+qtrade train     --config configs/ml_xgboost.yaml
+qtrade compare   --config configs/quick.yaml --strategies dual_ma bollinger --plot
+qtrade optimize  --config configs/optimization_example.yaml --method grid
+qtrade live      --config configs/live_trading_example.yaml --symbols 600519 000001
+qtrade report    --equity-csv results/equity.csv --output report.html
 ```
 
-## 配置文件示例
-
-### configs/default.yaml
-```yaml
-data:
-  source: pytdx
-  symbol: "600519"
-  start_date: "2023-01-01"
-  end_date: "2023-12-31"
-
-strategy:
-  name: dual_ma
-  params:
-    fast_window: 5
-    slow_window: 20
-
-backtest:
-  initial_capital: 1000000
-  commission: 0.001
-  slippage: 0.001
-
-risk_control:
-  max_position_pct: 0.2
-  max_drawdown: 0.15
-  stop_loss: 0.05
-```
+## 配置文件
+| 文件 | 用途 |
+|------|------|
+| `configs/quick.yaml` | 快速回测（默认） |
+| `configs/default.yaml` | 完整回测配置 |
+| `configs/backtest_example.yaml` | 示例回测 |
+| `configs/optimization_example.yaml` | 参数优化 |
+| `configs/live_trading_example.yaml` | 实盘/模拟盘 |
+| `configs/multi_strategy_example.yaml` | 多策略组合 |
+| `configs/ml_xgboost.yaml` | ML 训练+回测 |
 
 ## 工作流程
-
-### 策略研究流程
-1. 数据探索（EDA）
-2. 特征工程
-3. 策略开发
-4. 回测验证
-5. 参数优化
-6. 风险评估
-
-### 实盘交易流程
-1. 策略回测验证
-2. 模拟盘测试
-3. 风控配置
-4. 实盘部署
-5. 实时监控
-6. 定期评估
-
-## 常用策略模板
-
-### 双均线策略
-```python
-class DualMAStrategy(StrategyBase):
-    def __init__(self, fast_window=5, slow_window=20):
-        self.fast_window = fast_window
-        self.slow_window = slow_window
-    
-    def generate_signals(self, df):
-        signals = pd.DataFrame(index=df.index)
-        
-        fast_ma = df['close'].rolling(self.fast_window).mean()
-        slow_ma = df['close'].rolling(self.slow_window).mean()
-        
-        signals['signal_action'] = 0
-        signals.loc[fast_ma > slow_ma, 'signal_action'] = 1   # 买入
-        signals.loc[fast_ma < slow_ma, 'signal_action'] = -1  # 卖出
-        signals['signal_strength'] = 0.8
-        
-        return signals
-```
-
-### RSI 策略
-```python
-class RSIStrategy(StrategyBase):
-    def __init__(self, period=14, oversold=30, overbought=70):
-        self.period = period
-        self.oversold = oversold
-        self.overbought = overbought
-    
-    def generate_signals(self, df):
-        signals = pd.DataFrame(index=df.index)
-        
-        # 计算 RSI
-        delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=self.period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=self.period).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        
-        signals['signal_action'] = 0
-        signals.loc[rsi < self.oversold, 'signal_action'] = 1    # 超卖买入
-        signals.loc[rsi > self.overbought, 'signal_action'] = -1  # 超买卖出
-        signals['signal_strength'] = 0.7
-        
-        return signals
-```
+1. 数据探索（EDA: `qtrade.eda`）→ 2. 特征工程（`qtrade.features`）→ 3. 策略开发（`qtrade.strategy`）→ 4. 回测验证（`qtrade.backtest`）→ 5. 参数优化（`qtrade.optimization`）→ 6. 风险评估（`qtrade.risk_control`）→ 7. 模拟盘（`qtrade.live_trading` + MockBroker）→ 8. 实盘部署 → 9. 监控与评估
 
 ## 最佳实践
-
-### 1. 数据质量
-- 始终检查数据完整性
-- 处理缺失值和异常值
-- 验证数据对齐
-
-### 2. 回测验证
-- 使用走步式验证防止过拟合
-- 考虑交易成本（手续费、滑点）
-- 进行样本外测试
-
-### 3. 风险管理
-- 设置合理的仓位限制
-- 配置止损和熔断机制
-- 监控实时风险指标
-
-### 4. 实盘交易
-- 先用模拟盘充分测试
-- 配置完整的告警系统
-- 保持详细的交易日志
-
-## 故障排除
-
-### 数据获取失败
-```python
-# 配置备用数据源
-data_config = {
-    'source': 'pytdx',
-    'fallback': ['akshare', 'csv']
-}
-```
-
-### 回测性能慢
-```python
-# 使用向量化回测
-from qtrade.backtest import VectorizedBacktestEngine
-engine = VectorizedBacktestEngine(config)
-```
-
-### 内存不足
-```python
-# 分批处理数据
-for chunk in data.chunk(1000):
-    signals = strategy.generate_signals(chunk)
-```
-
-## 项目资源
-
-- **文档**: https://qtrade.readthedocs.io
-- **代码仓库**: https://github.com/qtrade/qtrade
-- **问题反馈**: https://github.com/qtrade/qtrade/issues
-- **示例代码**: examples/ 目录
-
-## 依赖安装
-
-```bash
-# 基础安装
-pip install qtrade
-
-# 完整安装（推荐）
-pip install qtrade[all]
-
-# 按需安装
-pip install qtrade[data,ml,live,web,optimization]
-```
-
-## 版本信息
-
-当前版本: 1.0.0
-Python 支持: 3.10+
-许可证: MIT
-
-## 注意事项
-
-1. **实盘风险**: 实盘交易涉及真实资金，请谨慎操作
-2. **数据延迟**: 实时数据可能有延迟，影响策略执行
-3. **市场风险**: 历史表现不代表未来收益
-4. **系统风险**: 网络故障、系统宕机可能导致损失
-
-建议先在模拟盘充分测试后再进行实盘交易。
+- 数据质量：用 `qtrade.eda.quality` 检查完整性、处理缺失值
+- 防过拟合：使用 `qtrade.optimization.walk_forward.WalkForwardValidator` 做步进式验证
+- 风险第一：仓位限制、止损、熔断（`RiskMiddleware`）
+- 模拟盘充分测试后再上实盘
+- 策略必须先 `generate_signals(df)` 生成信号列，再将含信号 DataFrame 传入 `engine.run()`
