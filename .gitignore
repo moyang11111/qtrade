@@ -54,3 +54,15 @@ results/*.csv
 .env
 .venv/
 venv/
+
+# ---- 一次性工具脚本 ----
+_apply_fixes.py
+_fix.py
+
+# ---- 分析产物（子目录）----
+results/factor_mining/
+results/factor_study/
+results/short_term/
+
+# ---- 旧版桌面终端（远程根目录已有新版 qtrade-desktop）----
+src/qtrade/desktop/
