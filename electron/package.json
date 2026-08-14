@@ -1,0 +1,44 @@
+{
+  "name": "qtrade-desktop",
+  "version": "1.0.0",
+  "description": "QTrade Desktop - A-share trading terminal",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder"
+  },
+  "dependencies": {
+    "electron": "^31.0.0"
+  },
+  "devDependencies": {
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "com.qtrade.desktop",
+    "productName": "QTrade",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "../static/**",
+      "../server.py",
+      "../qtrade.ico"
+    ],
+    "extraResources": [
+      {
+        "from": "../server.py",
+        "to": "server.py"
+      }
+    ],
+    "win": {
+      "icon": "../qtrade.ico",
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

@@ -1,39 +1,56 @@
+# ---- Python ----
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.egg-info/
 dist/
 build/
 .eggs/
 
-# Data cache
+# ---- Node / Electron ----
+electron/node_modules/
+
+# ---- 运行时状态 ----
+*.log
+stderr.log
+ai_paper_state.json
+
+# ---- 大型数据产物（可由程序重新生成）----
+strategy_compare.json
+rsi_layered_results.json
+*.pkl
+
+# ---- 临时测试数据 ----
+test_small*.csv
+failover_test_out.txt
+
+# ---- 量化框架数据缓存 ----
 data/cache/*.csv
 
-# Model artifacts
-models/*.pkl
+# ---- 模型产物 ----
 models/*.joblib
 models/*.pt
 models/*.pth
 
-# Logs
+# ---- 日志 ----
 logs/*.log
 
-# IDE
+# ---- IDE ----
 .vscode/
 .idea/
 *.swp
 
-# OS
+# ---- OS ----
 Thumbs.db
 .DS_Store
 
-# Claude conversation logs
+# ---- Claude 会话记录 ----
 *.jsonl
 
-# Results CSV
+# ---- 结果 CSV ----
 results/*.csv
 
-# Environment
+# ---- 环境 ----
 .env
 .venv/
 venv/
