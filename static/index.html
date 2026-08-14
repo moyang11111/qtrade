@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QTrade — A股量化交易终端</title>
+  <link rel="stylesheet" href="css/style.css?v=4">
+  <!-- TradingView lightweight-charts (支持 panes) -->
+  <script src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+</head>
+<body>
+
+  <!-- ====== 工具栏 ====== -->
+  <header class="toolbar">
+    <div class="logo">📊 Q<span>Trade</span></div>
+    <input type="text" id="searchInput" placeholder="搜索股票代码...">
+    <button class="btn" id="btnRefresh">🔄 刷新</button>
+    <button class="btn" id="btnTraining">🎯 训练营</button>
+    <button class="btn accent" id="btnBacktest">📈 回测</button>
+    <span class="live-badge" id="liveBadge" hidden>● 实时</span>
+    <div class="spacer"></div>
+    <div class="clock" id="clock">--</div>
+  </header>
+
+  <!-- ====== 主内容区 ====== -->
+  <div class="main">
+
+    <!-- 左栏：股票列表 -->
+    <aside class="sidebar-left">
+      <div class="section-title">⭐ 自选股 <span id="watchlistCount">(0)</span></div>
+      <div id="watchlistStocks"></div>
+      <div class="section-title">🕐 最近浏览</div>
+      <div id="recentStocks"></div>
+      <div class="section-title">全部 A 股 <span id="stockCount">(--)</span></div>
+      <div class="stock-list" id="stockList">
+        <div class="stock-item loading">加载中...</div>
+      </div>
+    </aside>
+
+    <!-- 中间：图表 -->
+    <section class="chart-area">
+      <div class="chart-header">
+        <span class="sym-name" id="symName">——</span>
+        <span class="sym-price" id="symPrice">——</span>
+        <span class="sym-chg" id="symChg">——</span>
+        <div class="indicator-toggles" id="indicatorToggles">
+          <span class="ind-tag active" data-ind="ma">MA</span>
+          <span class="ind-tag" data-ind="boll">BOLL</span>
+          <span class="ind-tag" data-ind="macd">MACD</span>
+          <span class="ind-tag" data-ind="rsi">RSI</span>
+        </div>
+        <button class="btn" id="btnWatchlist" title="加入/移除自选">⭐ 加自选</button>
+      </div>
+      <div class="chart-container" id="chartContainer"></div>
+    </section>
+
+    <!-- 右栏：行情详情 -->
+    <aside class="sidebar-right">
+      <div class="card">
+        <h3>📋 行情报价</h3>
+        <div class="quote-row"><span class="label">名称</span><span class="value" id="qName">——</span></div>
+        <div class="quote-row"><span class="label">今开</span><span class="value" id="qOpen">——</span></div>
+        <div class="quote-row"><span class="label">最高</span><span class="value" id="qHigh">——</span></div>
+        <div class="quote-row"><span class="label">最低</span><span class="value" id="qLow">——</span></div>
+        <div class="quote-row"><span class="label">60日最高</span><span class="value" id="qH60">——</span></div>
+        <div class="quote-row"><span class="label">60日最低</span><span class="value" id="qL60">——</span></div>
+        <div class="quote-row"><span class="label">20日均量</span><span class="value" id="qVol">——</span></div>
+        <div class="quote-row"><span class="label">换手率</span><span class="value" id="qTurnover">——</span></div>
+        <div class="quote-row"><span class="label">行情时间</span><span class="value" id="qTime">——</span></div>
+      </div>
+      <div class="card">
+        <h3>📡 策略信号</h3>
+        <div id="signalLines">
+          <div class="signal-line muted">请选择股票</div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>🤖 DSA AI 观点</h3>
+        <div id="aiViews">
+          <div class="signal-line muted">运行 DSA 桌面版并分析后显示</div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>🔬 DSA 技术分析</h3>
+        <button class="btn wide" id="btnDSAAnalyze" style="margin-bottom:8px">运行 DSA 分析</button>
+        <div id="dsaResult">
+          <div class="signal-line muted">选中股票后点击上方按钮</div>
+        </div>
+      </div>
+      <button class="btn accent wide" id="btnQuickBacktest">🚀 快速回测当前股票</button>
+    </aside>
+  </div>
+
+  <!-- ====== 底部面板 ====== -->
+  <footer class="bottom-panel">
+    <div class="tabs">
+      <div class="tab-btn active" data-tab="trades">📋 交易记录</div>
+      <div class="tab-btn" data-tab="equity">📊 资金曲线</div>
+      <div class="tab-btn" data-tab="ai">🤖 AI 模拟盘</div>
+      <div class="tab-btn" data-tab="log">📝 系统日志</div>
+    </div>
+    <div class="tab-content" id="tabContent">
+      <div class="muted">运行回测后将在此显示交易记录。</div>
+    </div>
+  </footer>
+
+  <!-- ====== 回测对话框 ====== -->
+  <div class="modal-overlay" id="backtestModal" hidden>
+    <div class="modal">
+      <h2>📈 策略回测</h2>
+      <label for="btSymbol">股票代码</label>
+      <input type="text" id="btSymbol" placeholder="如 000001">
+      <label for="btStrategy">策略</label>
+      <select id="btStrategy">
+        <option value="dual_ma">双均线 (dual_ma)</option>
+        <option value="trend_5d">五日趋势 (trend_5d)</option>
+        <option value="bollinger">布林带 (bollinger)</option>
+        <option value="bb_rsi">布林+RSI (bb_rsi)</option>
+        <option value="pullback_20d">缩量回调20日 (pullback_20d)</option>
+        <option value="pullback_deep">深度回调 (pullback_deep)</option>
+        <option value="breakout">突破策略 (breakout)</option>
+        <option value="rsi_layered">RSI分层买入 (rsi_layered)</option>
+        <option value="reversal_20">超跌反弹20日 (reversal_20)</option>
+        <option value="reversal_combo">超跌反弹增强 (reversal_combo)</option>
+      </select>
+      <div class="param-row">
+        <div>
+          <label for="btCapital">初始资金</label>
+          <input type="number" id="btCapital" value="100000">
+        </div>
+        <div>
+          <label for="btCommission">手续费 (%)</label>
+          <input type="number" id="btCommission" value="0.03" step="0.01">
+        </div>
+        <div>
+          <label for="btStopLoss">止损 (%)</label>
+          <input type="number" id="btStopLoss" value="5" step="0.5">
+        </div>
+        <div>
+          <label for="btTakeProfit">止盈 (%)</label>
+          <input type="number" id="btTakeProfit" value="15" step="0.5">
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="btnCloseBacktest">取消</button>
+        <button class="btn primary" id="btnRunBacktest">🚀 运行回测</button>
+      </div>
+      <div class="result-area" id="btResult" hidden></div>
+    </div>
+  </div>
+
+  <!-- ====== K线训练营 ====== -->
+  <div class="training-overlay" id="trainingOverlay" hidden>
+    <div class="training-header">
+      <div class="training-title">🎯 K线训练营</div>
+      <div class="training-tabs" id="trainingTabs">
+        <div class="tr-tab active" data-mode="guess">📊 猜涨跌</div>
+        <div class="tr-tab" data-mode="trade">🎯 买卖点</div>
+        <div class="tr-tab" data-mode="replay">🔄 逐根复盘</div>
+      </div>
+      <div class="training-stats">
+        <span class="stat">得分 <b id="trScore">0</b></span>
+        <span class="stat">连对 <b id="trStreak">0</b></span>
+        <span class="stat">最佳 <b id="trBest">0</b></span>
+      </div>
+      <div class="training-controls">
+        <label class="tr-label" id="trHorizonWrap">预测天数
+          <select id="trHorizon">
+            <option value="3">3 天</option>
+            <option value="5" selected>5 天</option>
+            <option value="10">10 天</option>
+            <option value="20">20 天</option>
+          </select>
+        </label>
+        <button class="btn" id="trClose">✕ 关闭</button>
+      </div>
+    </div>
+    <div class="training-hint" id="trHint">已加载 K 线，请判断未来走势</div>
+    <div class="training-chart" id="trainingChart"></div>
+
+    <!-- 模式：猜涨跌 -->
+    <div class="training-actions" id="trActionsGuess" hidden>
+      <button class="btn tr-big up" id="trUp">📈 看涨</button>
+      <button class="btn tr-big down" id="trDown">📉 看跌</button>
+    </div>
+
+    <!-- 模式：买卖点训练 -->
+    <div class="training-actions" id="trActionsTrade" hidden>
+      <div class="trade-palette">
+        <button class="btn tr-big up" id="trBuy">🟢 买入</button>
+        <button class="btn tr-big down" id="trSell">🔴 卖出</button>
+        <button class="btn" id="trUndo">↩ 撤销</button>
+        <button class="btn primary" id="trFinish">✅ 完成结算</button>
+      </div>
+      <div class="trade-status" id="trTradeStatus">点击图上位置标记买卖点（先买后卖，最多 10 个点）</div>
+    </div>
+
+    <!-- 模式：逐根复盘 -->
+    <div class="training-actions" id="trActionsReplay" hidden>
+      <div class="replay-palette">
+        <button class="btn tr-big up" id="rpBuy">🟢 买入</button>
+        <button class="btn tr-big up" id="rpAdd">➕ 加仓</button>
+        <button class="btn tr-big down" id="rpCut">➖ 减仓</button>
+        <button class="btn tr-big down" id="rpClear">⛔ 清仓</button>
+        <button class="btn" id="rpHold">⏸ 持有</button>
+        <button class="btn primary" id="rpNext">➡ 下一根</button>
+      </div>
+      <div class="replay-status" id="rpStatus">持有 0 股 | 成本 -- | 浮盈 -- | 现金 --</div>
+    </div>
+
+    <div class="training-result" id="trResult" hidden></div>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script src="js/chart.js"></script>
+  <script src="js/training.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
