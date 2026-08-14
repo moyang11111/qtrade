@@ -1,4 +1,4 @@
-"""DataFetcher â€?unified data access with source fallback and storage caching."""
+"""DataFetcher â€” unified data access with source fallback and storage caching."""
 
 import logging
 from datetime import datetime
@@ -81,19 +81,10 @@ class DataFetcher:
         raise RuntimeError(f"All sources failed for {symbol}: {last_error}")
 
     def fetch_history(self, symbol: str, start_date: str = "20220101",
-                      end_date: str = None) -> pd.DataFrame:
-        """Alias for fetch() ¡ª backward-compatible with skill/QUICKSTART docs.
-
-        Args:
-            symbol: Stock symbol, e.g. "600519".
-            start_date: Start date in "YYYY-MM-DD" or "YYYYMMDD" format.
-            end_date: End date in "YYYY-MM-DD" or "YYYYMMDD" format.
-
-        Returns:
-            DataFrame with OHLCV columns.
-        """
+                      end_date: str = None):
+        """Alias for fetch() with friendly parameter names."""
         import re
-        start = re.sub(r"\D", "", start_date)  # normalize "2023-01-01" -> "20230101"
+        start = re.sub(r"\D", "", start_date)
         if end_date:
             end = re.sub(r"\D", "", end_date)
         else:

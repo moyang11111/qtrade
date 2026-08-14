@@ -1,4 +1,4 @@
-"""Performance metrics calculation â€?comprehensive metrics with QuantStats integration."""
+"""Performance metrics calculation â€” comprehensive metrics with QuantStats integration."""
 
 import logging
 from dataclasses import dataclass, field
@@ -14,59 +14,45 @@ logger = logging.getLogger("qtrade.backtest.performance")
 
 @dataclass
 class BacktestResult:
-    """Complete backtest output with convenience methods for plotting and reporting."""
+    """Complete backtest output with convenience methods."""
     metrics: dict = field(default_factory=dict)
     trade_log: list[dict] = field(default_factory=list)
     equity_curve: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
     config: dict = field(default_factory=dict)
 
-    # ©¤©¤ Convenience methods ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
-
     def plot(self, save_dir: str = "results") -> None:
-        """Generate equity curve + drawdown plots (backward-compatible shortcut)."""
+        """Generate equity curve + drawdown plots."""
         self.plot_equity_curve(save_dir=save_dir)
         self.plot_drawdown(save_dir=save_dir)
 
-    def plot_equity_curve(self, benchmark: Optional[pd.Series] = None,
-                          title: Optional[str] = None, save_dir: str = "results") -> None:
-        """Plot equity curve via the visualization module."""
+    def plot_equity_curve(self, benchmark=None, title=None, save_dir: str = "results") -> None:
+        """Plot equity curve."""
         from qtrade.visualization.charts import plot_equity_curve as _plot
         if self.equity_curve.empty:
-            print("[WARN] Empty equity curve, nothing to plot.")
+            print("[WARN] Empty equity curve.")
             return
-        _plot(
-            self.equity_curve,
-            benchmark=benchmark,
-            title=title or "Strategy Equity Curve",
-            save_path=f"{save_dir}/equity_curve.png",
-        )
+        _plot(self.equity_curve, benchmark=benchmark,
+              title=title or "Strategy Equity Curve",
+              save_path=f"{save_dir}/equity_curve.png")
 
-    def plot_drawdown(self, title: Optional[str] = None,
-                      save_dir: str = "results") -> None:
-        """Plot drawdown chart via the visualization module."""
+    def plot_drawdown(self, title=None, save_dir: str = "results") -> None:
+        """Plot drawdown."""
         from qtrade.visualization.charts import plot_drawdown as _plot
         if self.equity_curve.empty:
-            print("[WARN] Empty equity curve, nothing to plot.")
+            print("[WARN] Empty equity curve.")
             return
-        _plot(
-            self.equity_curve,
-            title=title or "Strategy Drawdown",
-            save_path=f"{save_dir}/drawdown.png",
-        )
+        _plot(self.equity_curve, title=title or "Strategy Drawdown",
+              save_path=f"{save_dir}/drawdown.png")
 
     def save_report(self, output_path: str = "results/report.html") -> str:
-        """Generate a QuantStats HTML report (convenience method)."""
+        """Generate QuantStats HTML report."""
         return self.save_quantstats_report(output_path)
 
-    def save_quantstats_report(self, output_path: str = "results/quantstats_report.html",
-                               title: Optional[str] = None) -> str:
-        """Generate a QuantStats HTML report."""
+    def save_quantstats_report(self, output_path: str = "results/quantstats_report.html", title=None) -> str:
+        """Generate QuantStats HTML report."""
         from qtrade.backtest.report import generate_quantstats_report
-        return generate_quantstats_report(
-            self.equity_curve,
-            output_path=output_path,
-            title=title or "qtrade Strategy Report",
-        )
+        return generate_quantstats_report(self.equity_curve, output_path=output_path,
+                                          title=title or "qtrade Strategy Report")
 
 
 def calc_metrics(cerebro_result, capital: float, total_days: int) -> dict:

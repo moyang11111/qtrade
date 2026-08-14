@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from loguru import logger
 
-from qtrade.strategy.base import SignalGenerator as StrategyInterface  # alias for backward compatibility
+from qtrade.strategy.base import SignalGenerator as StrategyInterface
 
 
 class StrategyCombiner:

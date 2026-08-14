@@ -94,17 +94,9 @@ def _validate(cfg: dict) -> None:
 
 
 class Config(dict):
-    """Dictionary subclass with a from_yaml factory for backward compatibility.
-
-    Usage:
-        config = Config.from_yaml("configs/quick.yaml")
-        # Behaves exactly like the dict returned by load_config()
-    """
-
+    """Dict subclass with from_yaml factory for backward compatibility."""
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "Config":
-        """Load a YAML config file, returning a Config (dict subclass)."""
+    def from_yaml(cls, path):
         return cls(load_config(path))
-
     def __repr__(self):
-        return f"Config({super().__repr__()})"
+        return "Config(" + super().__repr__() + ")"
