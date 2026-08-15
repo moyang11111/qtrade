@@ -76,7 +76,10 @@ def cmd_backtest(args):
     results_dir = output_cfg.get("results_dir", "results")
 
     if output_cfg.get("save_results", False):
-        save_trade_log(result.trade_log, results_dir)
+        try:
+            save_trade_log(result.trade_log, results_dir)
+        except Exception as e:
+            print(f"[WARN] Failed to save trade log: {e}")
 
     # 8. Visualization
     if args.plot or output_cfg.get("plot", False):
@@ -254,33 +257,70 @@ def cmd_optimize(args):
     from qtrade.data.fetcher import DataFetcher
     from qtrade.strategy.registry import get_signal_generator
     from qtrade.backtest.engine import BacktestEngine
-    from qtrade.optimization.grid_search import GridSearchOptimizer
+    from qtrade.optimization.grid_search import GridSearchOptimizer, expand_param_space
     from qtrade.optimization.bayesian import BayesianOptimizer
+
     opt_cfg = cfg.get("optimization", {})
     method = opt_cfg.get("method", args.method or "grid")
     data_cfg = cfg["data"]
     fetcher = DataFetcher(cfg)
     df = fetcher.fetch(data_cfg["symbol"], data_cfg["start_date"], data_cfg.get("end_date"))
     print(f"[DATA] {data_cfg['symbol']}: {len(df)} rows")
-    def objective(strategy_cls, params):
-        gen = strategy_cls({"name": cfg["strategy"]["name"], **params})
-        df_sig = gen.generate_signals(df)
+
+    objective_metric = opt_cfg.get("objective", {}).get("metric", "total_return")
+    direction = opt_cfg.get("objective", {}).get("direction", "maximize")
+
+    def objective(strategy, data):
+        df_sig = strategy.generate_signals(data)
         engine = BacktestEngine(cfg)
         result = engine.run(df_sig)
-        return result.metrics.get("total_return", -999)
-    param_space = opt_cfg.get("param_grid", opt_cfg.get("param_space", {}))
+        return result.metrics.get(objective_metric, -999)
+
+    param_space = opt_cfg.get("param_space") or opt_cfg.get("param_grid") or {}
     if not param_space:
-        print("[ERROR] No param_grid or param_space in optimization config.")
+        print("[ERROR] No param_space or param_grid in optimization config.")
         return
+
+    constraints = opt_cfg.get("constraints", [])
     strat_cls = get_signal_generator(cfg["strategy"]["name"])
+    strat_name = cfg["strategy"]["name"]
+
+    print(f"[OPT] Running {method} optimization for {strat_name}...")
     if method == "bayesian":
-        opt = BayesianOptimizer(strat_cls, param_space, objective, direction="maximize")
+        opt = BayesianOptimizer(strat_cls, param_space, objective, direction=direction,
+                                constraints=constraints, strategy_name=strat_name)
+        n_trials = opt_cfg.get("bayesian", {}).get("n_trials", 100)
+        timeout = opt_cfg.get("bayesian", {}).get("timeout")
+        best = opt.optimize(df, n_trials=n_trials, timeout=timeout)
     else:
-        opt = GridSearchOptimizer(strat_cls, param_space, objective)
-    print(f"[OPT] Running {method} optimization...")
-    best = opt.optimize(df)
-    print(f"[OPT] Best params: {best.get('best_params', best)}")
-    print(f"[OPT] Best score: {best.get('best_score', 'N/A')}")
+        # param_space may be an Optuna-style spec; convert to a concrete grid.
+        if all(isinstance(v, (list, tuple)) for v in param_space.values()):
+            grid = {k: list(v) for k, v in param_space.items()}
+        else:
+            grid = expand_param_space(param_space)
+        opt = GridSearchOptimizer(strat_cls, grid, objective,
+                                  constraints=constraints, strategy_name=strat_name)
+        best = opt.optimize(df)
+
+    print(f"[OPT] Best params: {best.get('best_params')}")
+    print(f"[OPT] Best score: {best.get('best_score')}")
+
+    # Walk-forward validation (optional)
+    if opt_cfg.get("walk_forward", {}).get("enabled", False):
+        from qtrade.optimization.walk_forward import WalkForwardValidator
+        if all(isinstance(v, (list, tuple)) for v in param_space.values()):
+            grid = {k: list(v) for k, v in param_space.items()}
+        else:
+            grid = expand_param_space(param_space)
+        wf = WalkForwardValidator(strat_cls, grid, objective,
+                                  n_splits=opt_cfg["walk_forward"].get("n_splits", 5),
+                                  train_ratio=opt_cfg["walk_forward"].get("train_ratio", 0.7),
+                                  gap=opt_cfg["walk_forward"].get("gap", 0),
+                                  constraints=constraints,
+                                  strategy_name=strat_name)
+        summary = wf.validate(df)
+        print(f"[WF] Walk-forward avg test score: {summary.get('avg_test_score')}")
+        print(f"[WF] Score degradation: {summary.get('avg_score_degradation')}")
 
 
 def cmd_live(args):
@@ -288,21 +328,41 @@ def cmd_live(args):
     cfg = load_config(args.config)
     setup_logging(cfg)
     from qtrade.live_trading.broker import MockBroker
-    from qtrade.live_trading.data_feed import RealtimeDataFeed
     from qtrade.live_trading.live_trader import LiveTrader
     from qtrade.live_trading.risk_monitor import RiskMonitor
     from qtrade.strategy.registry import get_signal_generator
+
     data_cfg = cfg["data"]
     symbols = args.symbols or [data_cfg.get("symbol", "000001")]
     if isinstance(symbols, str):
         symbols = symbols.split(",")
+
     strat_cfg = cfg["strategy"]
     strat_cls = get_signal_generator(strat_cfg["name"])
     strategy = strat_cls({**strat_cfg.get("params", {}), "name": strat_cfg["name"]})
+
     broker = MockBroker(initial_cash=cfg.get("backtest", {}).get("initial_capital", 1000000))
-    data_feed = RealtimeDataFeed(symbols)
+    # Prefer the native TDX TCP feed (3s poll), fall back to Tencent HTTP.
+    try:
+        from qtrade.live_trading.tdx_feed import TdxQuoteFeed
+        feed = TdxQuoteFeed(poll_interval=3.0)
+        if not feed.connect():
+            feed = None
+    except Exception:
+        feed = None
+    if feed is None:
+        from qtrade.live_trading.baidu_feed import BaiduQuoteFeed
+        feed = BaiduQuoteFeed(poll_interval=5.0)
+
     risk_monitor = RiskMonitor()
-    trader = LiveTrader(broker=broker, data_feed=data_feed, strategy=strategy, risk_monitor=risk_monitor)
+    trader = LiveTrader(
+        broker=broker,
+        data_feed=feed,
+        strategy=strategy,
+        risk_monitor=risk_monitor,
+        signal_interval=30.0,
+        lot_size=cfg.get("backtest", {}).get("lot_size", 100),
+    )
     print(f"[LIVE] Starting paper trading for {symbols}...")
     trader.start(symbols)
 

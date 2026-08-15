@@ -1,9 +1,12 @@
-"""百度/腾讯实时行情数据源 — 用于模拟盘。
+"""腾讯实时行情数据源 — 用于模拟盘。
 
 使用腾讯财经 HTTP API（qt.gtimg.cn）获取实时报价，
 按固定间隔轮询，生成 Tick 事件推送。
 
 优点：免费、无需注册、不封IP、支持批量查询。
+
+历史原因保留了 ``BaiduQuoteFeed`` 类名，建议新代码使用
+``TencentQuoteFeed``（同一实现）。
 """
 
 from __future__ import annotations
@@ -73,7 +76,7 @@ def _parse_tencent_quote(raw: str) -> dict[str, Tick]:
 
 
 class BaiduQuoteFeed(RealtimeDataFeed):
-    """基于腾讯财经的轮询式实时行情。
+    """基于腾讯财经的轮询式实时行情（历史类名，等价于 TencentQuoteFeed）。
 
     非交易时间返回的价格为最新收盘价（仍可用于测试模拟盘逻辑）。
     """
@@ -178,3 +181,7 @@ class BaiduQuoteFeed(RealtimeDataFeed):
                 logger.warning("Tencent quote batch {} failed: {}", i//50, e)
 
         return all_ticks
+
+
+# 语义清晰的别名：底层实际是腾讯行情。
+TencentQuoteFeed = BaiduQuoteFeed

@@ -133,13 +133,21 @@ class BrokerAdapter(ABC):
 class MockBroker(BrokerAdapter):
     """Mock broker for testing and paper trading."""
 
-    def __init__(self, initial_cash: float = 100000.0):
+    def __init__(self, initial_cash: float = 100000.0,
+                 commission_rate: float = 0.0003,
+                 min_commission: float = 5.0,
+                 stamp_duty: float = 0.001,
+                 slippage: float = 0.0):
         self.cash = initial_cash
         self.positions: Dict[str, Position] = {}
         self.orders: Dict[str, Dict] = {}
         self.connected = False
         self.order_counter = 0
         self.prices: Dict[str, float] = {}
+        self.commission_rate = commission_rate
+        self.min_commission = min_commission
+        self.stamp_duty = stamp_duty
+        self.slippage = slippage
 
         logger.info(f"MockBroker initialized with ${initial_cash:,.2f}")
 
@@ -206,29 +214,31 @@ class MockBroker(BrokerAdapter):
         if price is None:
             raise ValueError(f"No price available for {symbol}")
 
-        # Calculate order value
-        order_value = quantity * price
-
         # Execute immediately for market orders
         if order_type == OrderType.MARKET:
             if side == OrderSide.BUY:
-                if order_value > self.cash:
-                    raise ValueError(f"Insufficient cash: need ${order_value:.2f}, have ${self.cash:.2f}")
+                fill_price = price * (1 + self.slippage)
+                gross = quantity * fill_price
+                commission = max(self.min_commission, gross * self.commission_rate)
+                stamp = gross * self.stamp_duty if self.stamp_duty else 0.0
+                total_cost = gross + commission + stamp
+                if total_cost > self.cash:
+                    raise ValueError(f"Insufficient cash: need ${total_cost:.2f}, have ${self.cash:.2f}")
 
-                self.cash -= order_value
+                self.cash -= total_cost
 
                 if symbol in self.positions:
                     pos = self.positions[symbol]
-                    total_cost = pos.avg_price * pos.quantity + price * quantity
-                    pos.quantity += quantity
-                    pos.avg_price = total_cost / pos.quantity
+                    total_shares = pos.quantity + quantity
+                    pos.avg_price = (pos.avg_price * pos.quantity + total_cost) / total_shares
+                    pos.quantity = total_shares
                     pos.market_value = pos.quantity * price
                 else:
                     self.positions[symbol] = Position(
                         symbol=symbol,
                         quantity=quantity,
-                        avg_price=price,
-                        market_value=order_value,
+                        avg_price=total_cost / quantity,
+                        market_value=quantity * price,
                         unrealized_pl=0.0,
                         unrealized_plpc=0.0,
                     )
@@ -237,7 +247,13 @@ class MockBroker(BrokerAdapter):
                 if symbol not in self.positions or self.positions[symbol].quantity < quantity:
                     raise ValueError(f"Insufficient position: {symbol}")
 
-                self.cash += order_value
+                fill_price = price * (1 - self.slippage)
+                gross = quantity * fill_price
+                commission = max(self.min_commission, gross * self.commission_rate)
+                stamp = gross * self.stamp_duty if self.stamp_duty else 0.0
+                proceeds = gross - commission - stamp
+
+                self.cash += proceeds
                 pos = self.positions[symbol]
                 pos.quantity -= quantity
                 pos.market_value = pos.quantity * price

@@ -43,4 +43,5 @@ __all__ = [
     'PullbackBBMidSignal',
     'PullbackDeepSignal',
     'PullbackVolSignal',
+    'Pullback20DSignal',
 ]

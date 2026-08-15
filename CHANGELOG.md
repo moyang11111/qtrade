@@ -279,11 +279,11 @@ fetcher = DataFetcher()
 data = fetcher.fetch_history(symbol="600519", start_date="2023-01-01")
 
 # 创建策略
-strategy = DualMAStrategy(fast_window=5, slow_window=20)
+strategy = get_signal_generator("dual_ma")({"name": "dual_ma", "fast_period": 5, "slow_period": 20})
 
 # 运行回测
 engine = BacktestEngine(config)
-result = engine.run(strategy, data)
+result = engine.run(strategy.generate_signals(data))
 
 # 查看结果
 print(result.metrics)

@@ -30,6 +30,8 @@ class SignalFollower(bt.Strategy):
         risk_per_trade=0.02,
         atr_period=14,
         atr_stop_mult=2.0,
+        # A-share T+1 settlement: positions opened today cannot be closed today
+        t_plus_n=1,
         # Martingale re-buy (after stop loss)
         martingale_enabled=False,
         martingale_drop_pct=0.05,   # re-buy every 5% drop from stop price
@@ -44,6 +46,7 @@ class SignalFollower(bt.Strategy):
         self.trade_log = []
         self.equity_curve = []
         self._entry_date = None
+        self._pending_exit = False
 
         # Martingale state
         self._stop_loss_price = None  # price where stop loss was triggered
@@ -111,29 +114,28 @@ class SignalFollower(bt.Strategy):
         if self.position:
             self.highest = max(self.highest, self.data.close[0])
 
-            # Take profit
+            # T+1 settlement: if a sell was requested on entry day it is
+            # deferred to the next bar.
+            if self._pending_exit and self._can_close_today():
+                self._close_position("pending")
+                return
+
+            exit_reason = None
             if (self.p.take_profit_pct > 0 and self.entry_price and
                 self.data.close[0] >= self.entry_price * (1 + self.p.take_profit_pct)):
-                self.order = self.close()
-                self._stop_loss_price = None  # reset martingale on take profit
-                self._martingale_level = 0
-                return
+                exit_reason = "take_profit"
+            elif self.entry_price and self.data.close[0] < self.entry_price * (1 - self.p.stop_loss_pct):
+                exit_reason = "stop_loss"
+            elif self.data.close[0] < self.highest * (1 - self.p.trail_stop_pct):
+                exit_reason = "trailing_stop"
+            elif action == -1:
+                exit_reason = "signal"
 
-            # Hard stop-loss
-            if self.entry_price and self.data.close[0] < self.entry_price * (1 - self.p.stop_loss_pct):
-                self.order = self.close()
-                return
-
-            # Trailing stop
-            if self.data.close[0] < self.highest * (1 - self.p.trail_stop_pct):
-                self.order = self.close()
-                return
-
-            # Signal-based exit
-            if action == -1:
-                self.order = self.close()
-                self._stop_loss_price = None  # reset martingale on signal exit
-                self._martingale_level = 0
+            if exit_reason:
+                if not self._can_close_today():
+                    self._pending_exit = True
+                    return
+                self._close_position(exit_reason)
                 return
 
         else:
@@ -156,6 +158,22 @@ class SignalFollower(bt.Strategy):
                     self.order = self.buy(size=size)
                     self._stop_loss_price = None  # reset martingale on fresh entry
                     self._martingale_level = 0
+
+    def _can_close_today(self) -> bool:
+        """A-share T+1: positions opened today cannot be closed today."""
+        if not self.p.t_plus_n:
+            return True
+        if self._entry_date is None:
+            return True
+        return self.data.datetime.date(0) > self._entry_date
+
+    def _close_position(self, reason: str):
+        """Close the current position."""
+        self.order = self.close()
+        self._pending_exit = False
+        if reason in ("signal", "take_profit"):
+            self._stop_loss_price = None
+            self._martingale_level = 0
 
     def _calc_position_size(self, strength: float) -> int:
         """Calculate position size based on sizing method."""

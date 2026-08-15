@@ -36,6 +36,9 @@ class LiveTrader:
         risk_monitor: Optional[RiskMonitor] = None,
         alert_system: Optional[AlertSystem] = None,
         position_sync_interval: float = 5.0,
+        signal_interval: float = 30.0,
+        lot_size: int = 100,
+        historical_data_dir: str = "data/cache",
     ):
         """
         Args:
@@ -45,12 +48,18 @@ class LiveTrader:
             risk_monitor: RiskMonitor instance (optional)
             alert_system: AlertSystem instance (optional)
             position_sync_interval: Seconds between position syncs
+            signal_interval: Minimum seconds between signal checks per symbol
+            lot_size: A-share lot size (shares are rounded down to this multiple)
+            historical_data_dir: Directory containing cached daily-bar CSVs
         """
         self.broker = broker
         self.data_feed = data_feed
         self.strategy = strategy
         self.risk_monitor = risk_monitor or RiskMonitor()
         self.alert_system = alert_system or AlertSystem()
+        self.signal_interval = signal_interval
+        self.lot_size = lot_size
+        self.historical_data_dir = historical_data_dir
 
         # Initialize components
         self.order_manager = OrderManager(broker)
@@ -61,6 +70,8 @@ class LiveTrader:
         self.symbols: List[str] = []
         self.current_prices: Dict[str, float] = {}
         self.last_signals: Dict[str, int] = {}
+        self._last_signal_time: Dict[str, float] = {}
+        self._hist_cache: dict = {}
 
         # Register callbacks
         self.data_feed.on_tick(self._on_tick)
@@ -180,7 +191,7 @@ class LiveTrader:
                 time.sleep(1.0)
 
     def _on_tick(self, tick: Tick):
-        """Handle incoming tick."""
+        """Handle incoming tick: update prices and run throttled signal checks."""
         try:
             # Update current price
             self.current_prices[tick.symbol] = tick.price
@@ -197,56 +208,20 @@ class LiveTrader:
                     # Position exceeds limit - reduce position
                     logger.warning(f"Position limit exceeded for {tick.symbol}")
 
+            # Throttled signal evaluation for tick-driven feeds (TDX / Tencent)
+            now = time.time()
+            if now - self._last_signal_time.get(tick.symbol, 0) >= self.signal_interval:
+                self._last_signal_time[tick.symbol] = now
+                self._evaluate_symbol(tick.symbol, tick.price)
+
         except Exception as e:
             logger.error(f"Error processing tick: {e}")
 
     def _on_bar(self, bar: Bar):
-        """Handle incoming bar (main trading logic)."""
+        """Handle incoming bar (bar-driven feeds such as PollingFeed/WebSocketFeed)."""
         try:
-            symbol = bar.symbol
-
-            # Check if trading is allowed
-            if not self.risk_monitor.can_trade():
-                return
-
-            # Check for open orders
-            open_orders = self.order_manager.get_open_orders(symbol)
-            if open_orders:
-                logger.debug(f"Skipping {symbol} - has open orders")
-                return
-
-            # Get historical data for strategy
-            # Note: In real implementation, you'd fetch historical bars here
-            # For now, we'll use a placeholder
-            historical_data = self._get_historical_data(symbol)
-
-            if historical_data is None or len(historical_data) < 50:
-                return
-
-            # Generate signals from strategy
-            signals = self.strategy.generate_signals(historical_data)
-
-            if signals is None or len(signals) == 0:
-                return
-
-            # Get latest signal
-            latest_signal = signals.iloc[-1]
-            signal_action = latest_signal.get('signal_action', 0)
-            signal_strength = latest_signal.get('signal_strength', 0)
-
-            # Check if signal changed
-            last_signal = self.last_signals.get(symbol, 0)
-            if signal_action == last_signal:
-                return
-
-            self.last_signals[symbol] = signal_action
-
-            # Execute signal
-            if signal_action == 1:  # Buy signal
-                self._execute_buy(symbol, signal_strength, bar.close)
-            elif signal_action == -1:  # Sell signal
-                self._execute_sell(symbol, signal_strength, bar.close)
-
+            self.current_prices[bar.symbol] = bar.close
+            self._evaluate_symbol(bar.symbol, bar.close)
         except Exception as e:
             logger.error(f"Error processing bar: {e}")
             self.alert_system.send_alert(
@@ -255,6 +230,51 @@ class LiveTrader:
                 f"Error processing bar for {bar.symbol}: {str(e)}",
                 {'symbol': bar.symbol}
             )
+
+    def _evaluate_symbol(self, symbol: str, current_price: float):
+        """Generate strategy signals and execute trades for one symbol."""
+        if not self.risk_monitor.can_trade():
+            return
+
+        if current_price <= 0:
+            return
+
+        # Check for open orders
+        open_orders = self.order_manager.get_open_orders(symbol)
+        if open_orders:
+            logger.debug(f"Skipping {symbol} - has open orders")
+            return
+
+        # Get historical data for strategy
+        historical_data = self._get_historical_data(symbol)
+
+        if historical_data is None or len(historical_data) < 50:
+            logger.debug(f"Skipping {symbol} - insufficient history ({0 if historical_data is None else len(historical_data)})")
+            return
+
+        # Generate signals from strategy
+        signals = self.strategy.generate_signals(historical_data)
+
+        if signals is None or len(signals) == 0:
+            return
+
+        # Get latest signal
+        latest_signal = signals.iloc[-1]
+        signal_action = int(latest_signal.get('signal_action', 0) or 0)
+        signal_strength = float(latest_signal.get('signal_strength', 0) or 0)
+
+        # Check if signal changed
+        last_signal = self.last_signals.get(symbol, 0)
+        if signal_action == last_signal:
+            return
+
+        self.last_signals[symbol] = signal_action
+
+        # Execute signal
+        if signal_action == 1:  # Buy signal
+            self._execute_buy(symbol, signal_strength, current_price)
+        elif signal_action == -1:  # Sell signal
+            self._execute_sell(symbol, signal_strength, current_price)
 
     def _execute_buy(self, symbol: str, strength: float, current_price: float):
         """Execute buy signal."""
@@ -271,8 +291,10 @@ class LiveTrader:
         # Adjust by signal strength (0-1)
         position_value = max_position_value * strength
 
-        # Calculate quantity
+        # Calculate quantity (rounded down to whole lots for A-shares)
         quantity = int(position_value / current_price)
+        if self.lot_size and self.lot_size > 1:
+            quantity = (quantity // self.lot_size) * self.lot_size
 
         if quantity < 1:
             logger.debug(f"Position too small for {symbol}")
@@ -389,10 +411,50 @@ class LiveTrader:
         )
 
     def _get_historical_data(self, symbol: str):
-        """Get historical data for strategy (placeholder)."""
-        # In real implementation, fetch from data provider
-        # For now, return None to skip
-        return None
+        """Get historical daily bars for the strategy.
+
+        Loads from the local CSV cache first, then falls back to the
+        framework DataFetcher (pytdx / akshare).
+        """
+        import pandas as pd
+        from pathlib import Path
+
+        if symbol in self._hist_cache:
+            return self._hist_cache[symbol]
+
+        # 1. Local CSV cache (e.g. data/cache/000001.csv)
+        cache_path = Path(self.historical_data_dir) / f"{symbol}.csv"
+        df = None
+        if cache_path.exists():
+            try:
+                df = pd.read_csv(cache_path, index_col=0, parse_dates=True)
+                df.columns = [str(c).lower() for c in df.columns]
+            except Exception as e:
+                logger.warning("Failed to load cached history for {}: {}", symbol, e)
+                df = None
+
+        # 2. Fall back to the framework data fetcher
+        if df is None:
+            try:
+                from qtrade.data.fetcher import DataFetcher
+                fetcher = DataFetcher()
+                df = fetcher.fetch(symbol, "20200101")
+            except Exception as e:
+                logger.warning("Failed to fetch history for {}: {}", symbol, e)
+                return None
+
+        if df is None or df.empty:
+            return None
+
+        # Keep only OHLCV columns (lowercase)
+        cols = [c for c in ["open", "high", "low", "close", "volume"] if c in df.columns]
+        if len(cols) < 4:
+            logger.warning("Insufficient OHLCV columns for {}", symbol)
+            return None
+        df = df[cols].sort_index()
+
+        self._hist_cache[symbol] = df
+        return df
 
     def get_status(self) -> Dict:
         """Get current trading status."""

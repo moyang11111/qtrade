@@ -50,12 +50,26 @@ class DataFetcher:
         if end is None:
             end = datetime.now().strftime("%Y%m%d")
 
-        # Try cache first
+        # Try cache first, but only when it fully covers the requested range.
+        # A partial cache (e.g. only 2024 data when 2020-2026 was requested)
+        # would silently shorten the backtest, so it is ignored.
         if self.use_cache:
             cached = self.storage.load_range(symbol, start, end)
             if cached is not None and len(cached) > 0:
-                logger.debug("Cache hit: %s (%d rows)", symbol, len(cached))
-                return validate_ohlcv(cached, f"{symbol}(cache)")
+                start_ts = pd.to_datetime(start)
+                end_ts = pd.to_datetime(end)
+                # Allow a small tail tolerance for weekends/holidays/after-hours.
+                tail_tolerance = pd.Timedelta(days=10)
+                covers_start = cached.index.min() <= start_ts
+                covers_end = cached.index.max() >= end_ts - tail_tolerance
+                if covers_start and covers_end:
+                    logger.debug("Cache hit: %s (%d rows)", symbol, len(cached))
+                    return validate_ohlcv(cached, f"{symbol}(cache)")
+                logger.warning(
+                    "Cache %s covers only [%s ~ %s]; requested [%s ~ %s] - fetching fresh.",
+                    symbol, cached.index.min().date(), cached.index.max().date(),
+                    start_ts.date(), end_ts.date(),
+                )
 
         # Try each source in order
         spec = DataSpec(symbol=symbol, start_date=start, end_date=end)

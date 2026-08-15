@@ -24,7 +24,7 @@ class FeatureEngine:
         """Compute all features. All outputs are shift(1) for anti-lookahead."""
         result = df.copy()
         close = df["close"]
-        volume = df["volume"]
+        vol = df["volume"]
 
         # Technical
         result["rsi_14"] = technical.compute_rsi(close, 14)
@@ -45,8 +45,8 @@ class FeatureEngine:
         result["return_5d"] = momentum.compute_return(close, 5)
         result["return_20d"] = momentum.compute_return(close, 20)
         result["return_60d"] = momentum.compute_return(close, 60)
-        result["vol_ratio_5_20"] = momentum.compute_vol_ratio(volume, 5, 20)
-        result["vol_momentum"] = momentum.compute_vol_momentum(volume, 5)
+        result["vol_ratio_5_20"] = momentum.compute_vol_ratio(vol, 5, 20)
+        result["vol_momentum"] = momentum.compute_vol_momentum(vol, 5)
 
         # Volatility
         result["realized_vol_20"] = volatility.compute_realized_vol(close, 20)

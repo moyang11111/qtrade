@@ -14,6 +14,43 @@ from qtrade.backtest.performance import BacktestResult, calc_metrics
 logger = logging.getLogger("qtrade.backtest.engine")
 
 
+class AShareCommission(bt.CommInfoBase):
+    """A-share commission model: percentage commission + min commission + stamp duty.
+
+    Backtrader does not natively support minimum commission or stamp duty, so we
+    subclass CommInfoBase and return the absolute cash cost for each operation.
+    """
+
+    params = (
+        ("commission", 0.0003),          # commission rate (percentage)
+        ("commission_type", "percentage"),
+        ("min_commission", 5.0),         # minimum commission per trade
+        ("stamp_duty", 0.001),           # stamp duty rate (sell side by default)
+        ("stamp_duty_side", "sell"),     # sell | buy | both
+        ("stocklike", True),
+        ("commtype", bt.CommInfoBase.COMM_PERC),
+        ("percabs", True),
+    )
+
+    def _getcommission(self, size, price, pseudoexec):
+        value = abs(size) * price
+
+        if self.p.commission_type == "percentage":
+            comm = value * self.p.commission
+        else:
+            comm = self.p.commission  # fixed amount per trade
+
+        if self.p.min_commission and comm < self.p.min_commission:
+            comm = self.p.min_commission
+
+        total = comm
+        side = "buy" if size > 0 else "sell"
+        if self.p.stamp_duty and self.p.stamp_duty_side in ("both", side):
+            total += value * self.p.stamp_duty
+
+        return total
+
+
 class BacktestEngine:
     """Parameterized backtest engine wrapping backtrader."""
 
@@ -44,6 +81,7 @@ class BacktestEngine:
         # Strategy with full parameters
         cerebro.addstrategy(SignalFollower,
                             lot_size=self.broker_cfg.lot_size,
+                            t_plus_n=self.broker_cfg.t_plus_n,
                             sizing_method=self.sizing_cfg.method,
                             base_position_pct=self.broker_cfg.max_position_pct,
                             min_strength=self.sizing_cfg.min_strength,
@@ -62,9 +100,14 @@ class BacktestEngine:
         bc = self.broker_cfg
         cerebro.broker.setcash(bc.initial_capital)
 
-        # Commission (backtrader doesn't natively support min_commission or stamp_duty,
-        # so we use the standard commission + log a note)
-        cerebro.broker.setcommission(commission=bc.commission)
+        # A-share commission model: rate + min commission + stamp duty.
+        cerebro.broker.addcommissioninfo(AShareCommission(
+            commission=bc.commission,
+            commission_type=bc.commission_type,
+            min_commission=bc.min_commission,
+            stamp_duty=bc.stamp_duty,
+            stamp_duty_side=bc.stamp_duty_side,
+        ))
 
         # Slippage
         if bc.slippage_type == "percentage":

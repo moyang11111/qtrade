@@ -66,3 +66,4 @@ results/short_term/
 
 # ---- 旧版桌面终端（远程根目录已有新版 qtrade-desktop）----
 src/qtrade/desktop/
+src/qtrade/desktop_legacy/

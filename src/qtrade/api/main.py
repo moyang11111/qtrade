@@ -6,24 +6,27 @@ Provides endpoints for:
 - Strategy management
 - Backtest execution
 - Live trading control
-- Performance reports
 - Data management
+- Configuration management
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from __future__ import annotations
+
+import threading
 from datetime import datetime
 from pathlib import Path
-import asyncio
+from typing import Any, Dict, List, Optional
+
+import pandas as pd
 import yaml
+from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from qtrade.backtest import BacktestEngine
 from qtrade.data import DataFetcher
-from qtrade.strategies import StrategyRegistry
-from qtrade.config import Config
+from qtrade.strategy.registry import get_signal_generator, list_strategies as list_strategy_names
 
 # Create FastAPI app
 app = FastAPI(
@@ -44,8 +47,8 @@ app.add_middleware(
 )
 
 # Global state
-active_backtests = {}
-live_traders = {}
+active_backtests: Dict[str, dict] = {}
+live_traders: Dict[str, dict] = {}
 
 
 # ============================================================================
@@ -60,11 +63,11 @@ class HealthResponse(BaseModel):
 
 class BacktestRequest(BaseModel):
     strategy_name: str = Field(..., description="Name of the strategy to backtest")
-    symbol: str = Field(..., description="Stock symbol (e.g., '000001.SZ')")
-    start_date: str = Field(..., description="Start date (YYYY-MM-DD)")
-    end_date: str = Field(..., description="End date (YYYY-MM-DD)")
+    symbol: str = Field(..., description="Stock symbol (e.g., '000001')")
+    start_date: str = Field(..., description="Start date (YYYYMMDD)")
+    end_date: Optional[str] = Field(None, description="End date (YYYYMMDD)")
     initial_capital: float = Field(100000.0, description="Initial capital")
-    commission: float = Field(0.001, description="Commission rate")
+    commission: float = Field(0.0003, description="Commission rate")
     slippage: float = Field(0.001, description="Slippage rate")
     params: Optional[Dict[str, Any]] = Field(None, description="Strategy parameters")
 
@@ -81,6 +84,7 @@ class BacktestResultResponse(BaseModel):
     metrics: Optional[Dict[str, Any]] = None
     trades: Optional[List[Dict[str, Any]]] = None
     equity_curve: Optional[List[Dict[str, Any]]] = None
+    error: Optional[str] = None
 
 
 class StrategyInfo(BaseModel):
@@ -92,8 +96,9 @@ class StrategyInfo(BaseModel):
 class LiveTradingRequest(BaseModel):
     strategy_name: str
     symbols: List[str]
-    config_path: str
+    config_path: Optional[str] = None
     broker: str = Field("mock", description="Broker type: mock, alpaca")
+    initial_cash: float = Field(100000.0, description="Initial cash")
 
 
 class LiveTradingResponse(BaseModel):
@@ -103,20 +108,58 @@ class LiveTradingResponse(BaseModel):
 
 
 # ============================================================================
-# Health Check
+# Helpers
 # ============================================================================
 
-@app.get("/health", response_model=HealthResponse)
-async def health_check():
-    """Health check endpoint."""
-    return HealthResponse(
-        status="healthy",
-        timestamp=datetime.now(),
-        version="1.0.0",
-    )
+def _build_backtest_cfg(request: BacktestRequest) -> dict:
+    return {
+        "data": {
+            "symbol": request.symbol,
+            "start_date": request.start_date,
+            "end_date": request.end_date,
+        },
+        "backtest": {
+            "initial_capital": request.initial_capital,
+            "commission": request.commission,
+            "slippage": request.slippage,
+        },
+        "strategy": {
+            "name": request.strategy_name,
+            "type": "rule",
+            "params": request.params or {},
+        },
+    }
 
 
-@app.get("/")
+def _run_backtest_for_request(request: BacktestRequest) -> dict:
+    cfg = _build_backtest_cfg(request)
+    fetcher = DataFetcher(cfg)
+    df = fetcher.fetch(request.symbol, request.start_date, request.end_date or "")
+    strategy_cls = get_signal_generator(request.strategy_name)
+    strategy = strategy_cls({"name": request.strategy_name, **(request.params or {})})
+    df_signals = strategy.generate_signals(df)
+    engine = BacktestEngine(cfg)
+    result = engine.run(df_signals)
+
+    equity_curve: List[Dict[str, Any]] = []
+    if not result.equity_curve.empty:
+        equity_curve = [
+            {"date": str(d), "value": float(v)}
+            for d, v in result.equity_curve.items()
+        ]
+
+    return {
+        "metrics": result.metrics,
+        "trades": result.trade_log,
+        "equity_curve": equity_curve,
+    }
+
+
+# ============================================================================
+# Root
+# ============================================================================
+
+@app.get("/", response_model=None)
 async def root():
     """Root endpoint."""
     return {
@@ -126,6 +169,11 @@ async def root():
     }
 
 
+@app.get("/health", response_model=HealthResponse)
+async def health():
+    return HealthResponse(status="ok", timestamp=datetime.now(), version="1.0.0")
+
+
 # ============================================================================
 # Strategy Management
 # ============================================================================
@@ -133,41 +181,32 @@ async def root():
 @app.get("/strategies", response_model=List[StrategyInfo])
 async def list_strategies():
     """List all available strategies."""
-    strategies = StrategyRegistry.list_strategies()
-
     result = []
-    for name in strategies:
-        strategy_class = StrategyRegistry.get(name)
-        if strategy_class:
-            # Get default parameters
-            params = {}
-            if hasattr(strategy_class, 'default_params'):
-                params = strategy_class.default_params()
-
-            result.append(StrategyInfo(
-                name=name,
-                description=strategy_class.__doc__ or "No description",
-                parameters=params,
-            ))
-
+    for name in list_strategy_names():
+        try:
+            strategy_cls = get_signal_generator(name)
+        except KeyError:
+            continue
+        result.append(StrategyInfo(
+            name=name,
+            description=(strategy_cls.__doc__ or "No description").strip(),
+            parameters={},
+        ))
     return result
 
 
 @app.get("/strategies/{strategy_name}", response_model=StrategyInfo)
 async def get_strategy(strategy_name: str):
     """Get strategy details."""
-    strategy_class = StrategyRegistry.get(strategy_name)
-    if not strategy_class:
+    try:
+        strategy_cls = get_signal_generator(strategy_name)
+    except KeyError:
         raise HTTPException(status_code=404, detail=f"Strategy '{strategy_name}' not found")
-
-    params = {}
-    if hasattr(strategy_class, 'default_params'):
-        params = strategy_class.default_params()
 
     return StrategyInfo(
         name=strategy_name,
-        description=strategy_class.__doc__ or "No description",
-        parameters=params,
+        description=(strategy_cls.__doc__ or "No description").strip(),
+        parameters={},
     )
 
 
@@ -181,69 +220,30 @@ async def start_backtest(request: BacktestRequest, background_tasks: BackgroundT
     import uuid
 
     backtest_id = str(uuid.uuid4())
-
-    # Store initial state
     active_backtests[backtest_id] = {
         "status": "running",
         "started_at": datetime.now(),
-        "request": request.dict(),
+        "request": request,
     }
-
-    # Run backtest in background
     background_tasks.add_task(run_backtest_task, backtest_id, request)
-
-    return BacktestResponse(
-        backtest_id=backtest_id,
-        status="running",
-        message="Backtest started successfully",
-    )
+    return BacktestResponse(backtest_id=backtest_id, status="running", message="Backtest started successfully")
 
 
-async def run_backtest_task(backtest_id: str, request: BacktestRequest):
+def run_backtest_task(backtest_id: str, request: BacktestRequest):
     """Background task to run backtest."""
     try:
-        # Load configuration
-        config = Config()
-        config.data.symbol = request.symbol
-        config.data.start_date = request.start_date
-        config.data.end_date = request.end_date
-        config.backtest.initial_capital = request.initial_capital
-        config.backtest.commission = request.commission
-        config.backtest.slippage = request.slippage
-        config.strategy.name = request.strategy_name
-
-        if request.params:
-            config.strategy.params = request.params
-
-        # Fetch data
-        fetcher = DataFetcher()
-        data = fetcher.fetch_history(
-            symbol=request.symbol,
-            start_date=request.start_date,
-            end_date=request.end_date,
-        )
-
-        # Create strategy
-        strategy_class = StrategyRegistry.get(request.strategy_name)
-        if not strategy_class:
-            raise ValueError(f"Strategy '{request.strategy_name}' not found")
-
-        strategy = strategy_class(**(request.params or {}))
-
-        # Run backtest
-        engine = BacktestEngine(config)
-        result = engine.run(strategy, data)
-
-        # Store results
-        active_backtests[backtest_id]["status"] = "completed"
-        active_backtests[backtest_id]["completed_at"] = datetime.now()
-        active_backtests[backtest_id]["metrics"] = result.metrics.to_dict()
-        active_backtests[backtest_id]["trades"] = result.trades.to_dict('records')
-        active_backtests[backtest_id]["equity_curve"] = result.equity_curve.to_dict('records')
-
+        result = _run_backtest_for_request(request)
+        active_backtests[backtest_id].update({
+            "status": "completed",
+            "completed_at": datetime.now(),
+            **result,
+        })
     except Exception as e:
-        active_backtests[backtest_id]["status"] = "failed"
-        active_backtests[backtest_id]["error"] = str(e)
+        active_backtests[backtest_id].update({
+            "status": "failed",
+            "completed_at": datetime.now(),
+            "error": str(e),
+        })
 
 
 @app.get("/backtest/{backtest_id}", response_model=BacktestResultResponse)
@@ -253,46 +253,17 @@ async def get_backtest_result(backtest_id: str):
         raise HTTPException(status_code=404, detail="Backtest not found")
 
     backtest = active_backtests[backtest_id]
-
     if backtest["status"] == "running":
-        return BacktestResultResponse(
-            backtest_id=backtest_id,
-            status="running",
-        )
-    elif backtest["status"] == "failed":
-        return BacktestResultResponse(
-            backtest_id=backtest_id,
-            status="failed",
-        )
-    else:
-        return BacktestResultResponse(
-            backtest_id=backtest_id,
-            status="completed",
-            metrics=backtest.get("metrics"),
-            trades=backtest.get("trades"),
-            equity_curve=backtest.get("equity_curve"),
-        )
+        return BacktestResultResponse(backtest_id=backtest_id, status="running")
+    if backtest["status"] == "failed":
+        return BacktestResultResponse(backtest_id=backtest_id, status="failed", error=backtest.get("error"))
 
-
-@app.get("/backtest/{backtest_id}/report")
-async def get_backtest_report(backtest_id: str):
-    """Get backtest HTML report."""
-    if backtest_id not in active_backtests:
-        raise HTTPException(status_code=404, detail="Backtest not found")
-
-    backtest = active_backtests[backtest_id]
-    if backtest["status"] != "completed":
-        raise HTTPException(status_code=400, detail="Backtest not completed yet")
-
-    report_path = Path("reports") / f"backtest_{backtest_id}.html"
-
-    if not report_path.exists():
-        raise HTTPException(status_code=404, detail="Report not found")
-
-    return FileResponse(
-        path=str(report_path),
-        media_type="text/html",
-        filename=f"backtest_{backtest_id}.html",
+    return BacktestResultResponse(
+        backtest_id=backtest_id,
+        status="completed",
+        metrics=backtest.get("metrics"),
+        trades=backtest.get("trades"),
+        equity_curve=backtest.get("equity_curve"),
     )
 
 
@@ -300,72 +271,60 @@ async def get_backtest_report(backtest_id: str):
 # Live Trading Management
 # ============================================================================
 
+def _create_live_trader(strategy_name: str, symbols: List[str], initial_cash: float):
+    from qtrade.live_trading.broker import MockBroker
+    from qtrade.live_trading.live_trader import LiveTrader
+    from qtrade.live_trading.risk_monitor import RiskMonitor
+
+    strategy_cls = get_signal_generator(strategy_name)
+    strategy = strategy_cls({"name": strategy_name})
+
+    broker = MockBroker(initial_cash=initial_cash)
+
+    try:
+        from qtrade.live_trading.tdx_feed import TdxQuoteFeed
+        feed = TdxQuoteFeed(poll_interval=3.0)
+        if not feed.connect():
+            feed = None
+    except Exception:
+        feed = None
+
+    if feed is None:
+        from qtrade.live_trading.baidu_feed import BaiduQuoteFeed
+        feed = BaiduQuoteFeed(poll_interval=5.0)
+
+    trader = LiveTrader(
+        broker=broker,
+        data_feed=feed,
+        strategy=strategy,
+        risk_monitor=RiskMonitor(),
+        signal_interval=30.0,
+    )
+    return trader
+
+
 @app.post("/live/start", response_model=LiveTradingResponse)
 async def start_live_trading(request: LiveTradingRequest):
     """Start live trading."""
     import uuid
 
     trader_id = str(uuid.uuid4())
-
     try:
-        # Load configuration
-        config_path = Path(request.config_path)
-        if not config_path.exists():
-            raise ValueError(f"Config file not found: {request.config_path}")
-
-        with open(config_path, 'r') as f:
-            config_dict = yaml.safe_load(f)
-
-        # Create broker
-        if request.broker == "mock":
-            from qtrade.live_trading.broker import MockBroker
-            broker = MockBroker()
-        elif request.broker == "alpaca":
-            from qtrade.live_trading.broker import AlpacaBroker
-            broker = AlpacaBroker()
-        else:
-            raise ValueError(f"Unknown broker: {request.broker}")
-
-        # Create data feed
-        from qtrade.live_trading.data_feed import RealtimeDataFeed
-        data_feed = RealtimeDataFeed(config_dict)
-
-        # Create strategy
-        strategy_class = StrategyRegistry.get(request.strategy_name)
-        if not strategy_class:
-            raise ValueError(f"Strategy '{request.strategy_name}' not found")
-
-        strategy = strategy_class()
-
-        # Create live trader
-        from qtrade.live_trading import LiveTrader
-        trader = LiveTrader(
-            broker=broker,
-            data_feed=data_feed,
-            strategy=strategy,
-            symbols=request.symbols,
-        )
-
-        # Start trader
-        asyncio.create_task(trader.start())
-
-        # Store trader
-        live_traders[trader_id] = {
-            "trader": trader,
-            "status": "running",
-            "started_at": datetime.now(),
-            "symbols": request.symbols,
-            "strategy": request.strategy_name,
-        }
-
-        return LiveTradingResponse(
-            trader_id=trader_id,
-            status="running",
-            message="Live trading started successfully",
-        )
-
+        trader = _create_live_trader(request.strategy_name, request.symbols, request.initial_cash)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    thread = threading.Thread(target=trader.start, args=(request.symbols,), daemon=True)
+    thread.start()
+
+    live_traders[trader_id] = {
+        "trader": trader,
+        "status": "running",
+        "started_at": datetime.now(),
+        "symbols": request.symbols,
+        "strategy": request.strategy_name,
+    }
+    return LiveTradingResponse(trader_id=trader_id, status="running", message="Live trading started successfully")
 
 
 @app.post("/live/{trader_id}/stop")
@@ -374,14 +333,10 @@ async def stop_live_trading(trader_id: str):
     if trader_id not in live_traders:
         raise HTTPException(status_code=404, detail="Trader not found")
 
-    trader_info = live_traders[trader_id]
-    trader = trader_info["trader"]
-
-    await trader.stop()
-
-    trader_info["status"] = "stopped"
-    trader_info["stopped_at"] = datetime.now()
-
+    trader = live_traders[trader_id]["trader"]
+    trader.stop()
+    live_traders[trader_id]["status"] = "stopped"
+    live_traders[trader_id]["stopped_at"] = datetime.now()
     return {"message": "Live trading stopped successfully"}
 
 
@@ -393,16 +348,13 @@ async def get_live_trading_status(trader_id: str):
 
     trader_info = live_traders[trader_id]
     trader = trader_info["trader"]
-
-    status = trader.get_status()
-
     return {
         "trader_id": trader_id,
         "status": trader_info["status"],
         "started_at": trader_info["started_at"],
         "symbols": trader_info["symbols"],
         "strategy": trader_info["strategy"],
-        "metrics": status,
+        "metrics": trader.get_status(),
     }
 
 
@@ -414,8 +366,7 @@ async def get_live_positions(trader_id: str):
 
     trader = live_traders[trader_id]["trader"]
     positions = trader.position_sync.get_position_summary()
-
-    return {"positions": positions}
+    return {"positions": positions.to_dict(orient="records") if not positions.empty else []}
 
 
 @app.get("/live/{trader_id}/orders")
@@ -425,9 +376,7 @@ async def get_live_orders(trader_id: str):
         raise HTTPException(status_code=404, detail="Trader not found")
 
     trader = live_traders[trader_id]["trader"]
-    orders = trader.get_orders()
-
-    return {"orders": orders}
+    return {"orders": trader.get_orders()}
 
 
 @app.post("/live/{trader_id}/emergency-stop")
@@ -438,7 +387,6 @@ async def emergency_stop(trader_id: str, reason: str = "Manual emergency stop"):
 
     trader = live_traders[trader_id]["trader"]
     trader.emergency_stop(reason)
-
     return {"message": f"Emergency stop triggered: {reason}"}
 
 
@@ -448,15 +396,28 @@ async def emergency_stop(trader_id: str, reason: str = "Manual emergency stop"):
 
 @app.get("/data/symbols")
 async def list_symbols():
-    """List available symbols."""
-    # This would query the data source
-    return {"symbols": []}
+    """List symbols available in the local CSV cache."""
+    cache_dir = Path("data/cache")
+    if not cache_dir.exists():
+        return {"symbols": []}
+    symbols = sorted(p.stem for p in cache_dir.glob("*.csv") if p.stat().st_size > 500)
+    return {"symbols": symbols}
 
 
 @app.get("/data/{symbol}/info")
 async def get_symbol_info(symbol: str):
-    """Get symbol information."""
-    return {"symbol": symbol, "info": {}}
+    """Get a small info payload for one symbol from cached data."""
+    cache_path = Path("data/cache") / f"{symbol}.csv"
+    if not cache_path.exists():
+        raise HTTPException(status_code=404, detail=f"No cached data for {symbol}")
+    df = pd.read_csv(cache_path, index_col=0, parse_dates=True)
+    return {
+        "symbol": symbol,
+        "rows": len(df),
+        "start": str(df.index[0].date()),
+        "end": str(df.index[-1].date()),
+        "last_close": float(df["close"].iloc[-1]),
+    }
 
 
 # ============================================================================
@@ -465,15 +426,12 @@ async def get_symbol_info(symbol: str):
 
 @app.get("/config")
 async def get_config():
-    """Get current configuration."""
+    """Get current default configuration."""
     config_path = Path("configs/default.yaml")
     if not config_path.exists():
         raise HTTPException(status_code=404, detail="Config not found")
-
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-
-    return config
+    with open(config_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
 
 @app.get("/configs")
@@ -481,13 +439,8 @@ async def list_configs():
     """List available configuration files."""
     config_dir = Path("configs")
     configs = []
-
     for config_file in config_dir.glob("*.yaml"):
-        configs.append({
-            "name": config_file.stem,
-            "path": str(config_file),
-        })
-
+        configs.append({"name": config_file.stem, "path": str(config_file)})
     return {"configs": configs}
 
 
@@ -500,10 +453,7 @@ async def global_exception_handler(request, exc):
     """Global exception handler."""
     return JSONResponse(
         status_code=500,
-        content={
-            "error": str(exc),
-            "type": type(exc).__name__,
-        },
+        content={"error": str(exc), "type": type(exc).__name__},
     )
 
 

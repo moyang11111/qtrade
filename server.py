@@ -847,6 +847,7 @@ class AiPaperTrader:
             # 买入
             if action in ("buy", "add") and score >= 55:
                 qty = int(cash * 0.25 / (price * (1 + self.COST)))  # 每只约 25% 仓位
+                qty = (qty // 100) * 100  # A股一手 = 100 股
                 if qty > 0 and sym not in positions:
                     cost = qty * price * (1 + self.COST)
                     cash -= cost
@@ -1218,10 +1219,16 @@ class APIHandler(SimpleHTTPRequestHandler):
 def find_data_dir(explicit: str | None) -> Path:
     if explicit and Path(explicit).exists():
         return Path(explicit)
+
+    # Prefer paths relative to this file (portable), then common absolute
+    # locations as a last resort.
+    here = Path(__file__).resolve().parent
     candidates = [
-        Path("C:/Users/ASUS/qtrade/data/cache"),
-        Path("../data/cache"),
+        here / "data" / "cache",
+        here.parent / "data" / "cache",
         Path("data/cache"),
+        Path("../data/cache"),
+        Path.home() / "qtrade" / "data" / "cache",
     ]
     for c in candidates:
         if c.exists():

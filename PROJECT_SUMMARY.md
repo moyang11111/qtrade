@@ -222,61 +222,58 @@ QTrade 是一个功能完善的 A 股量化交易框架，支持从策略研究�
 
 ### 场景 1: 策略研究
 ```python
-# 1. 数据探索
-from qtrade.eda import EDAAnalyzer
-eda = EDAAnalyzer(data)
-eda.analyze_quality()
-eda.analyze_distribution()
+# 1. 数据获取
+from qtrade.data import DataFetcher
+fetcher = DataFetcher(config)
+data = fetcher.fetch_history("600519", "2023-01-01", "2023-12-31")
 
 # 2. 特征工程
-from qtrade.features import FeatureLibrary
-lib = FeatureLibrary()
-features = lib.compute_features(data)
+from qtrade.features.engine import FeatureEngine
+features = FeatureEngine({}).compute_features(data)
 
 # 3. 策略开发
-from qtrade.strategies import DualMAStrategy
-strategy = DualMAStrategy(fast_window=5, slow_window=20)
+from qtrade.strategy.registry import get_signal_generator
+strategy = get_signal_generator("dual_ma")({"name": "dual_ma", "fast_period": 5, "slow_period": 20})
 
 # 4. 回测验证
 from qtrade.backtest import BacktestEngine
 engine = BacktestEngine(config)
-result = engine.run(strategy, data)
+result = engine.run(strategy.generate_signals(data))
 
 # 5. 参数优化
-from qtrade.optimization import BayesianOptimizer
-optimizer = BayesianOptimizer(strategy, param_space={...})
-best_params = optimizer.optimize(data)
+from qtrade.optimization.bayesian import BayesianOptimizer
+optimizer = BayesianOptimizer(get_signal_generator("dual_ma"), param_space={...},
+                              objective_func=lambda strat, df: 0.0)
+best = optimizer.optimize(data)
 ```
 
 ### 场景 2: 多策略组合
 ```python
 from qtrade.portfolio import StrategyCombiner
 
-combiner = StrategyCombiner()
-combiner.add_strategy(strategy1, weight=0.4)
-combiner.add_strategy(strategy2, weight=0.3)
-combiner.add_strategy(strategy3, weight=0.3)
-
+combiner = StrategyCombiner([(strategy1, 0.4), (strategy2, 0.3), (strategy3, 0.3)])
 combined_signals = combiner.generate_signals(data)
-result = engine.run_portfolio(combiner, data)
+result = engine.run(combined_signals)
 ```
 
-### 场景 3: 实盘交易
+### 场景 3: 实盘/模拟交易
 ```python
 from qtrade.live_trading import LiveTrader
-from qtrade.live_trading.broker import AlpacaBroker
+from qtrade.live_trading.broker import MockBroker
+from qtrade.live_trading.baidu_feed import BaiduQuoteFeed
 
-broker = AlpacaBroker(api_key=..., api_secret=...)
-data_feed = RealtimeDataFeed(symbols=["600519"])
+broker = MockBroker(initial_cash=1000000)
+data_feed = BaiduQuoteFeed(poll_interval=5.0)
 
 trader = LiveTrader(
     broker=broker,
     data_feed=data_feed,
     strategy=strategy,
-    risk_control=risk_control
+    risk_monitor=risk_monitor,
+    signal_interval=30.0,
 )
 
-trader.start()
+trader.start(["600519"])
 ```
 
 ## 📊 性能指标

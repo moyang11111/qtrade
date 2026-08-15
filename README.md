@@ -8,7 +8,10 @@ A 股量化交易框架 + 桌面交易终端：15 种内置策略，支持从数
 ## 快速开始
 
 ```bash
-# 安装依赖
+# 安装依赖（从 pyproject.toml 安装）
+pip install -e .
+
+# 或者使用 requirements.txt
 pip install -r requirements.txt
 
 # 启动模拟盘（默认监控 7 只主力信号股）
@@ -90,8 +93,10 @@ qtrade/
 ### 启动
 
 ```bash
-cd qtrade_desktop
-python server.py --data-dir C:/Users/ASUS/qtrade/data/cache   # 或双击 run.bat
+# 项目根目录直接启动（自动打开浏览器）
+python server.py --data-dir data/cache
+
+# 或双击 run.bat
 ```
 
 打开 http://127.0.0.1:8765

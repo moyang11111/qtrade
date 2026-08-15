@@ -58,7 +58,9 @@ def _create_feed(poll=3.0):
 class StrategySlot:
     """一个策略 + 一份资金的独立账户。"""
 
-    def __init__(self, name: str, capital: float, symbols: list[str], feed):
+    def __init__(self, name: str, capital: float, symbols: list[str], feed,
+                 use_sltp: bool = True, stop_loss_pct: float = 0.05,
+                 take_profit_pct: float = 0.10):
         self.name = name
         self.capital = capital
         self.symbols = symbols
@@ -68,7 +70,10 @@ class StrategySlot:
         self.dfs = {}
         self.entry_prices = {}
         self.trade_log = []
-        self._use_sltp = name not in ("pullback_20d",)
+        self._use_sltp = use_sltp
+        self._stop_loss_pct = stop_loss_pct
+        self._take_profit_pct = take_profit_pct
+        self._signal_cache = {}  # symbol -> (last_date, action, strength)
 
     def load_data(self):
         cache = Path("data/cache")
@@ -80,21 +85,32 @@ class StrategySlot:
                 if all(c in df.columns for c in ["open","high","low","close","volume"]) and len(df) >= 120:
                     self.dfs[sym] = df
 
+        missing = [s for s in self.symbols if s not in self.dfs]
+        if missing:
+            print(f"  [{self.name}] 警告: {len(missing)} 只股票无本地缓存将被跳过: {','.join(missing[:10])}{'...' if len(missing) > 10 else ''}")
+
     def check(self):
         """检查信号，执行买卖。"""
         for sym in list(self.dfs.keys()):
             df = self.dfs[sym]
             pos = self.broker.get_position(sym)
             try:
-                sig_df = self.strategy.generate_signals(df)
-                latest = sig_df.iloc[-1]
-                action = int(latest.get("signal_action", 0))
+                last_date = df.index[-1]
+                cached = self._signal_cache.get(sym)
+                if cached is not None and cached[0] == last_date:
+                    action, strength = cached[1], cached[2]
+                else:
+                    sig_df = self.strategy.generate_signals(df)
+                    latest = sig_df.iloc[-1]
+                    action = int(latest.get("signal_action", 0))
+                    strength = float(latest.get("signal_strength", 0.5))
+                    self._signal_cache[sym] = (last_date, action, strength)
 
                 if action == 1 and (pos is None or pos.quantity == 0):
                     price = self.feed.get_price(sym) or fetch_live_price(sym)
                     if price and price > 0:
                         self.broker.set_price(sym, price)
-                        self._buy(sym, price, float(latest.get("signal_strength", 0.5)))
+                        self._buy(sym, price, strength)
                         time.sleep(0.1)  # 避免腾讯API限频
                     # 无价格则等下次检查
 
@@ -137,27 +153,34 @@ class StrategySlot:
         if sym not in self.symbols:
             return
         self.broker.set_price(sym, price)
-        # SL/TP for non-pullback_20d strategies
+        # SL/TP management (configurable, disabled by --no-sltp)
         if self._use_sltp and sym in self.entry_prices and self.entry_prices[sym] > 0:
             ep = self.entry_prices[sym]
             pos = self.broker.get_position(sym)
             if pos and pos.quantity > 0:
-                if price >= ep * 1.10:
-                    self._sell(sym, price, "止盈+10%")
-                elif price <= ep * 0.95:
-                    self._sell(sym, price, "止损-5%")
+                if price >= ep * (1 + self._take_profit_pct):
+                    self._sell(sym, price, f"止盈+{self._take_profit_pct*100:.0f}%")
+                elif price <= ep * (1 - self._stop_loss_pct):
+                    self._sell(sym, price, f"止损-{self._stop_loss_pct*100:.0f}%")
 
 
 class MultiPaperTrader:
     """多策略并行的模拟盘。"""
 
-    def __init__(self, slots_config: list[tuple[str, float, list[str]]], poll_interval=5.0):
+    def __init__(self, slots_config: list[tuple[str, float, list[str]]], poll_interval=5.0,
+                 use_sltp_default: bool = True, stop_loss_pct: float = 0.05,
+                 take_profit_pct: float = 0.10):
         self.feed, self.feed_type = _create_feed(poll_interval)
         self.slots = []
 
         all_symbols = set()
         for name, capital, syms in slots_config:
-            slot = StrategySlot(name, capital, syms, self.feed)
+            # 默认 pullback_20d 是纯信号持有策略，不启用 SL/TP
+            use_sltp = use_sltp_default and name not in ("pullback_20d",)
+            slot = StrategySlot(name, capital, syms, self.feed,
+                                use_sltp=use_sltp,
+                                stop_loss_pct=stop_loss_pct,
+                                take_profit_pct=take_profit_pct)
             slot.load_data()
             self.slots.append(slot)
             all_symbols.update(syms)
@@ -191,8 +214,21 @@ class MultiPaperTrader:
             ret = eq - slot.capital
             ret_pct = (eq / slot.capital - 1) * 100
             positions = [p for p in slot.broker.get_positions() if p.quantity > 0]
-            sig_count = sum((slot.strategy.generate_signals(slot.dfs[sym]).iloc[-1]["signal_action"] == 1)
-                           for sym in slot.dfs.keys() if sym in slot.dfs)
+            sig_count = 0
+            for sym in slot.dfs:
+                last_date = slot.dfs[sym].index[-1]
+                cached = slot._signal_cache.get(sym)
+                if cached is not None and cached[0] == last_date:
+                    sig_count += 1 if cached[1] == 1 else 0
+                else:
+                    try:
+                        sig = slot.strategy.generate_signals(slot.dfs[sym])
+                        action = int(sig.iloc[-1].get("signal_action", 0))
+                        strength = float(sig.iloc[-1].get("signal_strength", 0.5))
+                        slot._signal_cache[sym] = (last_date, action, strength)
+                        sig_count += 1 if action == 1 else 0
+                    except Exception:
+                        pass
 
             print(f"\n  [{slot.name}] 资金={slot.capital/10000:.0f}万  权益={eq:,.0f}  "
                   f"收益={ret:+,.0f}({ret_pct:+.1f}%)  持仓={len(positions)}只  "
@@ -274,6 +310,9 @@ def main():
     parser.add_argument("--all", action="store_true", help="监控所有缓存的主板股票")
     parser.add_argument("--interval", type=float, default=30)
     parser.add_argument("--poll", type=float, default=5)
+    parser.add_argument("--no-sltp", action="store_true", help="禁用所有策略的止盈/止损")
+    parser.add_argument("--stop-loss", type=float, default=0.05, help="止损比例（默认 5%%）")
+    parser.add_argument("--take-profit", type=float, default=0.10, help="止盈比例（默认 10%%）")
     parser.add_argument("--list-strategies", action="store_true")
     args = parser.parse_args()
 
@@ -299,7 +338,10 @@ def main():
         name, cap = part.split(":")
         slots_config.append((name.strip(), float(cap), symbols))
 
-    trader = MultiPaperTrader(slots_config, args.poll)
+    trader = MultiPaperTrader(slots_config, args.poll,
+                             use_sltp_default=not args.no_sltp,
+                             stop_loss_pct=args.stop_loss,
+                             take_profit_pct=args.take_profit)
     trader.run(args.interval)
 
 

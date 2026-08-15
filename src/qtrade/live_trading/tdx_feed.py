@@ -166,24 +166,30 @@ class TdxQuoteFeed(RealtimeDataFeed):
             time.sleep(self.poll_interval)
 
     def _fetch_quotes(self) -> dict[str, Tick]:
-        """批量拉取通达信实时行情。"""
+        """批量拉取通达信实时行情（按市场分组，每批最多 80 只）。"""
         if not self._api or not self._symbols:
             return {}
 
-        # 按市场分组，分组批量查询
-        ticks = {}
+        grouped: dict[int, list[str]] = {}
         for symbol in self._symbols:
-            try:
-                market, code = _normalize_tdx(symbol)
-                # pytdx quotes 返回 [(market, code, ...46 fields...), ...]
-                # 批量查询比单只查询快得多
-                quotes = self._api.get_security_quotes(market, code)
-                if quotes and len(quotes) > 0:
-                    tick = self._parse_quote(quotes[0])
-                    if tick:
-                        ticks[tick.symbol] = tick
-            except Exception:
-                continue
+            market, code = _normalize_tdx(symbol)
+            grouped.setdefault(market, []).append(code)
+
+        ticks = {}
+        for market, codes in grouped.items():
+            for i in range(0, len(codes), 80):
+                batch = codes[i:i + 80]
+                try:
+                    # pytdx 原生批量接口：传入 [(market, code), ...]
+                    quotes = self._api.get_security_quotes([(market, code) for code in batch])
+                    if not quotes:
+                        continue
+                    for raw in quotes:
+                        tick = self._parse_quote(raw)
+                        if tick:
+                            ticks[tick.symbol] = tick
+                except Exception as e:
+                    logger.warning("TDX batch quote failed for market {}: {}", market, e)
 
         return ticks
 

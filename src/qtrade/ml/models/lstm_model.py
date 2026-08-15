@@ -25,6 +25,7 @@ class LSTMModel(BaseModel):
         self.learning_rate = config.get("learning_rate", 0.001)
         self._model = None
         self._scaler = None
+        self._input_size = None
 
     def _build_model(self, input_size: int):
         import torch
@@ -70,6 +71,7 @@ class LSTMModel(BaseModel):
             return
 
         input_size = X.shape[1]
+        self._input_size = input_size
         self._model = self._build_model(input_size)
         optimizer = torch.optim.Adam(self._model.parameters(), lr=self.learning_rate)
         criterion = nn.CrossEntropyLoss()
@@ -112,15 +114,22 @@ class LSTMModel(BaseModel):
 
     def save(self, path: Path) -> None:
         import torch
-        state = {"model_state": self._model.state_dict() if self._model else None,
-                 "scaler": self._scaler, "config": self._config}
+        state = {
+            "model_state": self._model.state_dict() if self._model else None,
+            "scaler": self._scaler,
+            "config": dict(self._config),
+            "input_size": self._input_size,
+        }
         torch.save(state, path)
 
     def load(self, path: Path) -> None:
         import torch
         state = torch.load(path, weights_only=False)
-        self._scaler = state["scaler"]
-        input_size = state.get("config", {}).get("input_size", 13)
+        self._scaler = state.get("scaler")
+        input_size = state.get("input_size") or state.get("config", {}).get("input_size")
+        if not input_size:
+            raise ValueError("Saved LSTM state is missing 'input_size'")
+        self._input_size = input_size
         self._model = self._build_model(input_size)
-        if state["model_state"]:
+        if state.get("model_state"):
             self._model.load_state_dict(state["model_state"])
