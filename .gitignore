@@ -14,6 +14,9 @@ electron/node_modules/
 *.log
 stderr.log
 ai_paper_state.json
+auto_paper_state.json
+auto_paper_state.json.tmp
+*.engine.lock
 
 # ---- 大型数据产物（可由程序重新生成）----
 strategy_compare.json
@@ -67,3 +70,17 @@ results/short_term/
 # ---- 旧版桌面终端（远程根目录已有新版 qtrade-desktop）----
 src/qtrade/desktop/
 src/qtrade/desktop_legacy/
+
+# ---- vendored deepseek-harness-quant (external base, fetch separately) ----
+third_party/
+
+# ---- generated data / runtime state ----
+data/cache/*.db
+data/cache/*.db-*
+data/factorpool/
+output/
+report/
+logs/
+auto_paper_state.db
+auto_paper_meta.json
+*.engine.lock

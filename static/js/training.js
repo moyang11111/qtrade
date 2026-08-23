@@ -218,7 +218,7 @@
     candleSeries.setMarkers(marks.map((m, i) => ({
       time: m.time,
       position: m.type === 'buy' ? 'belowBar' : 'aboveBar',
-      color: m.type === 'buy' ? '#00D4AA' : '#FF4060',
+      color: m.type === 'buy' ? '#EB5757' : '#27AE60',
       shape: m.type === 'buy' ? 'arrowUp' : 'arrowDown',
       text: `${i + 1}${m.type === 'buy' ? '买' : '卖'}@${m.price}`,
     })));
@@ -306,7 +306,7 @@
     candleSeries.setData(warm.map(b => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })));
     volumeSeries.setData(warm.map(b => ({
       time: b.time, value: b.volume,
-      color: b.close >= b.open ? 'rgba(0,212,170,0.35)' : 'rgba(255,64,96,0.35)',
+      color: b.close >= b.open ? 'rgba(39,174,96,0.35)' : 'rgba(235,87,87,0.35)',
     })));
     futureCandleSeries.setData([]);
     updateIndicators(warm);
@@ -331,7 +331,7 @@
     })));
     volumeSeries.setData(shown.map(b => ({
       time: b.time, value: b.volume,
-      color: b.close >= b.open ? 'rgba(0,212,170,0.35)' : 'rgba(255,64,96,0.35)',
+      color: b.close >= b.open ? 'rgba(39,174,96,0.35)' : 'rgba(235,87,87,0.35)',
     })));
     updateIndicators(shown);
     // 保持固定K线间距：新根从右侧空位出现，不缩放；全部揭示后才 fitContent
@@ -440,14 +440,14 @@
     if (chart) return;
     chart = LightweightCharts.createChart(els.chart, {
       layout: {
-        background: { type: 'solid', color: '#0B0E14' },
-        textColor: '#6A7285',
+        background: { type: 'solid', color: '#131316' },
+        textColor: '#A1A1AA',
       },
-      grid: { vertLines: { color: '#1A1F2B' }, horzLines: { color: '#1A1F2B' } },
+      grid: { vertLines: { color: '#1c1c22' }, horzLines: { color: '#1c1c22' } },
       crosshair: { mode: 1 },
-      rightPriceScale: { borderColor: '#2A2F3A' },
+      rightPriceScale: { borderColor: '#2a2a30' },
       timeScale: {
-        borderColor: '#2A2F3A', timeVisible: true, secondsVisible: false,
+        borderColor: '#2a2a30', timeVisible: true, secondsVisible: false,
         barSpacing: 8,          // 固定K线间距，避免比例忽宽忽窄
         minBarSpacing: 3,
       },
@@ -455,18 +455,18 @@
       autoSize: true,           // 跟随容器自适应，窗口变化时比例不歪
     });
     candleSeries = chart.addCandlestickSeries({
-      upColor: '#00D4AA', downColor: '#FF4060',
-      borderUpColor: '#00D4AA', borderDownColor: '#FF4060',
-      wickUpColor: '#00D4AA', wickDownColor: '#FF4060',
+      upColor: '#EB5757', downColor: '#27AE60',
+      borderUpColor: '#EB5757', borderDownColor: '#27AE60',
+      wickUpColor: '#EB5757', wickDownColor: '#27AE60',
     });
     futureCandleSeries = chart.addCandlestickSeries({
-      upColor: '#F59E0B', downColor: '#F97316',
-      borderUpColor: '#F59E0B', borderDownColor: '#F97316',
-      wickUpColor: '#F59E0B', wickDownColor: '#F97316',
+      upColor: '#F2C94C', downColor: '#2D9CDB',
+      borderUpColor: '#F2C94C', borderDownColor: '#2D9CDB',
+      wickUpColor: '#F2C94C', wickDownColor: '#2D9CDB',
     });
 
     // MA 均线（暗色风格，与主图一致）
-    const maColors = { ma5: '#F0C000', ma10: '#3B82F6', ma20: '#A78BFA', ma60: '#6A7285' };
+    const maColors = { ma5: '#F2C94C', ma10: '#5E6AD2', ma20: '#8B5CF6', ma60: '#A1A1AA' };
     maSeries = {};
     for (const [k, color] of Object.entries(maColors)) {
       maSeries[k] = chart.addLineSeries({
@@ -476,9 +476,9 @@
 
     // BOLL 布林带
     bollSeries = {
-      up: chart.addLineSeries({ color: 'rgba(255,64,96,0.6)', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }),
-      mid: chart.addLineSeries({ color: 'rgba(240,192,0,0.6)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }),
-      low: chart.addLineSeries({ color: 'rgba(0,212,170,0.6)', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }),
+      up: chart.addLineSeries({ color: 'rgba(235,87,87,0.6)', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }),
+      mid: chart.addLineSeries({ color: 'rgba(242,201,76,0.6)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }),
+      low: chart.addLineSeries({ color: 'rgba(39,174,96,0.6)', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }),
     };
 
     volumeSeries = chart.addHistogramSeries({
@@ -533,7 +533,7 @@
     })));
     volumeSeries.setData(bars.map(b => ({
       time: b.time, value: b.volume,
-      color: b.close >= b.open ? 'rgba(0,212,170,0.35)' : 'rgba(255,64,96,0.35)',
+      color: b.close >= b.open ? 'rgba(39,174,96,0.35)' : 'rgba(235,87,87,0.35)',
     })));
     futureCandleSeries.setData([]);
     updateIndicators(bars);
@@ -551,7 +551,7 @@
     })));
     volumeSeries.setData(all.map(b => ({
       time: b.time, value: b.volume,
-      color: b.close >= b.open ? 'rgba(0,212,170,0.35)' : 'rgba(255,64,96,0.35)',
+      color: b.close >= b.open ? 'rgba(39,174,96,0.35)' : 'rgba(235,87,87,0.35)',
     })));
     updateIndicators(all);
     chart.timeScale().fitContent();

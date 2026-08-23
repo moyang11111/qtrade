@@ -34,14 +34,17 @@
     indicatorToggles: $('indicatorToggles'),
     clock: $('clock'),
     signalLines: $('signalLines'),
-    aiViews: $('aiViews'),
-    tabContent: $('tabContent'),
     backtestModal: $('backtestModal'),
     btResult: $('btResult'),
     // 报价
     qName: $('qName'), qOpen: $('qOpen'), qHigh: $('qHigh'), qLow: $('qLow'),
     qH60: $('qH60'), qL60: $('qL60'), qVol: $('qVol'),
     qTurnover: $('qTurnover'), qTime: $('qTime'),
+    // 决策台页面
+    pageFactors: $('pageFactors'), pageRisk: $('pageRisk'),
+    factorSym: $('factorSym'), factorError: $('factorError'),
+    factorTable: $('factorTable') ? $('factorTable').querySelector('tbody') : null,
+    riskBody: $('riskBody'), riskError: $('riskError'),
   };
 
   // ======================== 日志 ========================
@@ -49,7 +52,6 @@
     const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false });
     logs.unshift(`[${ts}] ${msg}`);
     if (logs.length > 200) logs.pop();
-    if ($('tabContent').dataset.tab === 'log') renderTab('log');
   }
 
   // ======================== 股票列表 ========================
@@ -186,50 +188,8 @@
       els.symName.textContent = (info && info.name) ? `${info.name} ${symbol}` : symbol;
       updateQuote(info);
       updateSignals(info);
-      updateAiViews(symbol);       // DSA AI 观点
     } catch (e) {
       log(`⚠ 加载 ${symbol} 失败: ${e.message}`);
-    }
-  }
-
-  // ======================== DSA AI 观点 ========================
-  async function updateAiViews(symbol) {
-    try {
-      const d = await API.getAiViews(symbol, 3);
-      if (d.available && d.views && d.views.length > 0) {
-        // 有 DSA AI 观点 → 展示
-        els.aiViews.innerHTML = d.views.map(v => {
-          const up = v.action === 'buy' || v.action === 'add';
-          const dn = v.action === 'sell' || v.action === 'reduce';
-          const color = up ? 'var(--green)' : (dn ? 'var(--red)' : 'var(--text-secondary)');
-          const icon = up ? 'BUY' : (dn ? 'SELL' : '-');
-          return `<div class="signal-line">
-            <span style="color:${color};font-weight:600;">${icon} ${v.action_label}</span>
-            <span class="muted"> score ${v.score} | ${v.horizon || ''}</span><br>
-            <span class="muted" style="font-size:10px;">${(v.reason||'').slice(0,100)}</span>
-            ${v.target_price ? `<br><span class="muted" style="font-size:10px;">target ${v.target_price}${v.stop_loss ? ' | stop '+v.stop_loss : ''}</span>` : ''}
-          </div>`;
-        }).join('');
-        return;
-      }
-      // 无 AI 观点 → 自动跑内置 DSA 技术分析
-      els.aiViews.innerHTML = '<div class="signal-line muted">DSA 分析中...</div>';
-      const r = await API.analyzeDSA(symbol);
-      if (r.error) { els.aiViews.innerHTML = '<div class="signal-line muted">DSA 分析失败</div>'; return; }
-      const sigColor = (r.buy_signal||'').includes('BUY') ? 'var(--up)' :
-                        (r.buy_signal||'').includes('SELL') ? 'var(--down)' : 'var(--signal)';
-      els.aiViews.innerHTML = `
-        <div style="font-size:13px;font-weight:700;color:${sigColor};margin-bottom:2px">
-          ${r.buy_signal} (${r.signal_score}/100)
-        </div>
-        <div class="signal-line">${r.trend_status} | MA ${r.ma_alignment}</div>
-        <div class="signal-line">MACD ${r.macd_status} | RSI ${r.rsi_status}</div>
-        ${r.signal_reasons.length ? `<div class="signal-line bull">+ ${r.signal_reasons.slice(0,2).join('; ')}</div>` : ''}
-        ${r.risk_factors.length ? `<div class="signal-line bear">- ${r.risk_factors.slice(0,2).join('; ')}</div>` : ''}
-        <div class="signal-line" style="font-size:9px;color:var(--text-dim);margin-top:2px">auto DSA analyze</div>
-      `;
-    } catch (e) {
-      els.aiViews.innerHTML = '<div class="signal-line muted">AI 观点加载失败</div>';
     }
   }
 
@@ -246,7 +206,7 @@
     els.symPrice.style.color = color;
     els.symChg.textContent =
       `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}  ${chgPct >= 0 ? '+' : ''}${chgPct.toFixed(2)}%`;
-    els.symChg.style.background = isUp ? 'rgba(63,185,80,0.15)' : 'rgba(248,81,73,0.15)';
+    els.symChg.style.background = isUp ? 'rgba(235,87,87,0.16)' : 'rgba(39,174,96,0.16)';
     els.symChg.style.color = color;
 
     els.qName.textContent = info.name || '——';
@@ -405,23 +365,11 @@
     `;
   }
 
-  // ======================== 底部标签页 ========================
-  function switchTab(name) {
-    $('tabContent').dataset.tab = name;
-    document.querySelectorAll('.tab-btn').forEach(b => {
-      b.classList.toggle('active', b.dataset.tab === name);
-    });
-    renderTab(name);
-  }
+  // ======================== 底部标签页（已移除底部终端窗）=======================
+  function switchTab(name) { /* 底部面板已删除，保留空实现避免报错 */ }
+  function renderTab(name) { /* 底部面板已删除 */ }
 
-  function renderTab(name) {
-    if (name === 'trades') return renderTradesTab();
-    if (name === 'equity') return renderEquityTab();
-    if (name === 'ai') return renderAiTab();
-    if (name === 'log') return renderLogTab();
-  }
-
-  // ======================== AI 模拟盘 ========================
+  // ======================== AI 模拟盘（旧底部标签遗留，保留定义但不渲染）=======================
   let aiPaperState = null;
 
   async function renderAiTab() {
@@ -462,7 +410,7 @@
         <span style="width:70px;text-align:right;">${t.qty}股</span>
         <span style="flex:1;color:var(--text-muted);">${t.reason || ''}</span>${pnl}
       </div>`;
-    }).join('') || '<div class="muted">暂无交易（点击「同步 AI 信号」按 DSA 观点建仓）</div>';
+    }).join('') || '<div class="muted">暂无交易（点击「同步 AI 信号」按 AI 信号建仓）</div>';
 
     els.tabContent.innerHTML = `
       <div style="margin-bottom:6px;">
@@ -479,7 +427,7 @@
       ${tradeRows}
     `;
     window.__aiPaperSync = async () => {
-      try { aiPaperState = await API.getAiPaper('sync'); renderAiPaper(); log('✅ 已按 DSA 最新信号调仓'); }
+      try { aiPaperState = await API.getAiPaper('sync'); renderAiPaper(); log('✅ 已按 AI 信号调仓'); }
       catch (e) { log(`⚠ 同步失败: ${e.message}`); }
     };
     window.__aiPaperMark = async () => {
@@ -546,7 +494,7 @@
       </div>
       <svg width="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="max-width:720px;">
         <polyline points="${points}" fill="none"
-          stroke="${end >= start ? '#00D4AA' : '#FF4060'}" stroke-width="1.5" />
+          stroke="${end >= start ? '#EB5757' : '#27AE60'}" stroke-width="1.5" />
       </svg>
     `;
   }
@@ -555,6 +503,123 @@
     els.tabContent.innerHTML = logs.map(l =>
       `<div class="trade-row"><span class="muted" style="width:70px;">${l.split(']')[0]}]</span><span>${l.split(']').slice(1).join(']')}</span></div>`
     ).join('') || '<div class="muted">暂无日志</div>';
+  }
+
+  // ======================== 决策台页面 ========================
+  const FACTOR_LABELS = {
+    composite_score: '合成打分', std20: '20日波动', downside_vol: '下行波动',
+    reversal20: '20日反转', mom20: '动量20', o2c: '开收比', amihud: '非流动性',
+    max_ret20: '20日最大涨', skew20: '20日偏度', amp20: '平均振幅',
+    volume_ratio: '量能比', limup_ex_5: '近5涨停', pullback: '60日回撤',
+    ma_alignment: '均线多头', rsi_revert: 'RSI超卖',
+    macd_hist: 'MACD柱', roc20: 'ROC20', wpr14: 'W%R14', cci20: 'CCI20',
+    obv_trend: 'OBV趋势', kdj_k: 'KDJ-K', ma200_up: '站上MA200',
+    lowvol_60: '60日波动', mom_120: '120日动量', near_high_250: '接近52周高',
+    new_high_250: '52周新高', consec_limit_up: '连续涨停', consec_limit_down: '连续跌停',
+    limit_up_flag: '涨停标记', limit_down_flag: '跌停标记',
+  };
+  const FACTOR_DESC = {
+    composite_score: '滚动z-score加权，正=偏多 负=偏空', std20: '收益波动，越低越稳',
+    downside_vol: '仅下跌日波动', reversal20: '过去跌越多反弹预期越高',
+    mom20: '20日动量', o2c: '开→收收益的10日均值', amihud: '非流动性（越高越差）',
+    max_ret20: '近20日最大单日涨幅', skew20: '收益偏度', amp20: '振幅越低越稳',
+    volume_ratio: '当日量/20日均量', limup_ex_5: '近5日涨停次数',
+    pullback: '距60日高点回撤', ma_alignment: 'MA5>10>20>60 排列度', rsi_revert: 'RSI离50下方越远越超卖',
+    macd_hist: 'DIF-DEA 动能', roc20: '20日变动率（短期反转）', wpr14: '威廉指标（高位超买偏空）',
+    cci20: '顺势指标', obv_trend: 'OBV 相对21日均值趋势', kdj_k: 'KDJ K 值（趋势）',
+    ma200_up: '站上200日均线', lowvol_60: '60日波动（低波正用）', mom_120: '120日动量（反转）',
+    near_high_250: '收盘距52周高点（越接近0越强）', new_high_250: '创52周新高标记',
+    consec_limit_up: '连续涨停天数', consec_limit_down: '连续跌停天数',
+    limit_up_flag: '当日涨停', limit_down_flag: '当日跌停',
+  };
+  function setRailActive(page) {
+    document.querySelectorAll('.deck-item').forEach(b =>
+      b.classList.toggle('active', b.dataset.page === page));
+  }
+  function hideAllOverlays() {
+    ['trainingOverlay', 'autoPaperOverlay', 'pageFactors', 'pageRisk',
+     'pagePortal', 'pagePitch', 'pageControl', 'pageFactorBoard'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.hidden = true;
+    });
+  }
+  function showEmbedPage(id, page) {
+    hideAllOverlays();
+    const el = document.getElementById(id);
+    if (el) el.hidden = false;
+    setRailActive(page);
+  }
+  function showMarketPage() {
+    hideAllOverlays();
+    setRailActive('market');
+  }
+  async function openFactorPage() {
+    hideAllOverlays();
+    els.pageFactors.hidden = false;
+    setRailActive('factors');
+    const sym = state.activeSymbol || (state.allSymbols.length ? state.allSymbols[0] : null);
+    els.factorSym.textContent = sym ? `🧬 ${sym}` : '🧬 未选股';
+    els.factorError.hidden = true;
+    if (!els.factorTable) return;
+    els.factorTable.innerHTML = '<tr><td colspan="3" class="auto-empty">加载中...</td></tr>';
+    if (!sym) return;
+    try {
+      const f = await API.getFactors(sym);
+      if (f.error) throw new Error(f.error);
+      const rows = Object.entries(f)
+        .filter(([k]) => !['symbol', 'error'].includes(k))
+        .map(([k, v]) => {
+          const val = (v === null || v === undefined) ? '--' : (typeof v === 'number' ? v.toFixed(4) : v);
+          return `<tr><td class="mono">${FACTOR_LABELS[k] || k}</td><td class="num">${val}</td><td class="muted">${FACTOR_DESC[k] || ''}</td></tr>`;
+        }).join('');
+      els.factorTable.innerHTML = rows || '<tr><td colspan="3" class="auto-empty">暂无因子</td></tr>';
+    } catch (e) {
+      els.factorError.textContent = `因子加载失败: ${e.message}`;
+      els.factorError.hidden = false;
+      els.factorTable.innerHTML = '';
+    }
+  }
+  async function openRiskPage() {
+    hideAllOverlays();
+    els.pageRisk.hidden = false;
+    setRailActive('risk');
+    els.riskBody.innerHTML = '<div class="muted">加载中...</div>';
+    els.riskError.hidden = true;
+    try {
+      const st = await API.getAutoPaper('status');
+      const r = st.risk || {};
+      const pool = st.forward_pool || [];
+      const rows = pool.slice().reverse().map(p => `
+        <div class="trade-row">
+          <span class="mono" style="width:70px;">${p.symbol}</span>
+          <span style="width:96px;">入 ${p.entry_date}</span>
+          <span style="width:96px;">出 ${p.exit_date}</span>
+          <span style="width:80px;">持 ${p.hold_days != null ? p.hold_days : '--'}天</span>
+          <span style="width:90px;text-align:right;color:${p.pnl_pct >= 0 ? 'var(--up)' : 'var(--down)'}">${p.pnl_pct >= 0 ? '+' : ''}${p.pnl_pct}%</span>
+        </div>`).join('');
+      const famRows = Object.entries(r.family_exposure || {}).map(([k, v]) =>
+        `<div class="trade-row"><span>${k}</span><span class="num">${v} 仓</span></div>`).join('');
+      els.riskBody.innerHTML = `
+        <section class="auto-card auto-card-wide">
+          <div class="auto-card-title">🛡 风控门禁</div>
+          <div class="trade-row"><span>最大持仓</span><span class="num">${r.max_positions}</span></div>
+          <div class="trade-row"><span>单轮最大新开仓</span><span class="num">${r.max_new_per_cycle}</span></div>
+          <div class="trade-row"><span>回撤暂停阈值</span><span class="num">${r.loss_pause_pct}%</span></div>
+          <div class="trade-row"><span>当前收益</span><span class="num" style="color:${(r.current_pnl_pct || 0) >= 0 ? 'var(--up)' : 'var(--down)'}">${r.current_pnl_pct}%</span></div>
+          <div class="trade-row"><span>L0 择时门控</span><span class="num">宽度 ${r.l0_breadth != null ? (r.l0_breadth * 100).toFixed(1) + '%' : '--'}（阈值 ${(r.l0_breadth_min * 100).toFixed(0)}%）${r.l0_gate ? ' ✅ 通过' : ' ⛔ 关闭'}</span></div>
+        </section>
+        <section class="auto-card auto-card-wide">
+          <div class="auto-card-title">🧬 单因子暴露（上限 ${r.max_family_positions} 仓/族）</div>
+          ${famRows || '<div class="muted">暂无持仓</div>'}
+        </section>
+        <section class="auto-card auto-card-wide">
+          <div class="auto-card-title">📚 远期验证池（V1/5/20/60，共 ${pool.length} 笔）</div>
+          ${rows || '<div class="muted">暂无已平仓记录</div>'}
+        </section>`;
+    } catch (e) {
+      els.riskError.textContent = `加载失败: ${e.message}`;
+      els.riskError.hidden = false;
+    }
   }
 
   // ======================== 时钟 ========================
@@ -571,14 +636,32 @@
     // 搜索
     els.searchInput.addEventListener('input', renderStockList);
 
-    // 工具栏按钮
+    // 工具栏按钮（训练营/自动模拟盘/回测已收敛到左侧导航，仅留刷新）
     $('btnRefresh').addEventListener('click', refreshAll);
-    $('btnTraining').addEventListener('click', () => {
-      if (window.Training) window.Training.open();
-    });
-    $('btnBacktest').addEventListener('click', openBacktest);
     $('btnQuickBacktest').addEventListener('click', openBacktest);
-    $('btnDSAAnalyze').addEventListener('click', runDSAAnalysis);
+
+    // 决策台侧边导航
+    document.querySelectorAll('.deck-item').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const page = btn.dataset.page;
+        if (page === 'market') showMarketPage();
+        else if (page === 'portal') showEmbedPage('pagePortal', 'portal');
+        else if (page === 'pitch') showEmbedPage('pagePitch', 'pitch');
+        else if (page === 'control') showEmbedPage('pageControl', 'control');
+        else if (page === 'factorboard') showEmbedPage('pageFactorBoard', 'factorboard');
+        else if (page === 'factors') openFactorPage();
+        else if (page === 'risk') openRiskPage();
+        else if (page === 'backtest') { hideAllOverlays(); openBacktest(); }
+        else if (page === 'training') { hideAllOverlays(); if (window.Training) window.Training.open(); }
+        else if (page === 'autopaper') { hideAllOverlays(); if (window.AutoPaper) window.AutoPaper.open(); }
+      });
+    });
+    const fClose = $('btnFactorClose'); if (fClose) fClose.addEventListener('click', showMarketPage);
+    const rClose = $('btnRiskClose'); if (rClose) rClose.addEventListener('click', showMarketPage);
+    const pClose = $('btnPortalClose'); if (pClose) pClose.addEventListener('click', showMarketPage);
+    const ptClose = $('btnPitchClose'); if (ptClose) ptClose.addEventListener('click', showMarketPage);
+    const cClose = $('btnControlClose'); if (cClose) cClose.addEventListener('click', showMarketPage);
+    const fbClose = $('btnFactorBoardClose'); if (fbClose) fbClose.addEventListener('click', showMarketPage);
     $('btnWatchlist').addEventListener('click', () => {
       if (state.activeSymbol) toggleWatchlist(state.activeSymbol);
     });
@@ -616,37 +699,6 @@
 
     // 窗口缩放时自适应图表
     window.addEventListener('resize', () => chartManager.resize());
-  }
-
-  async function runDSAAnalysis() {
-    if (!state.activeSymbol) { alert('请先选择一只股票'); return; }
-    const btn = $('btnDSAAnalyze');
-    const resultEl = $('dsaResult');
-    btn.textContent = '分析中...'; btn.disabled = true;
-    resultEl.innerHTML = '<div class="signal-line muted">正在调用 DSA 引擎...</div>';
-    try {
-      const data = await API.analyzeDSA(state.activeSymbol);
-      if (data.error) { resultEl.innerHTML = `<div class="signal-line" style="color:var(--red)">${data.error}</div>`; return; }
-      const sigColor = data.buy_signal.includes('BUY') ? 'var(--up)' :
-                        data.buy_signal.includes('SELL') ? 'var(--down)' : 'var(--signal)';
-      resultEl.innerHTML = `
-        <div style="font-size:14px;font-weight:700;color:${sigColor};margin-bottom:4px">
-          ${data.buy_signal} (${data.signal_score}/100)
-        </div>
-        <div class="signal-line">趋势: ${data.trend_status} | 强度: ${data.trend_strength.toFixed(1)}</div>
-        <div class="signal-line">MA: ${data.ma5.toFixed(2)} / ${data.ma10.toFixed(2)} / ${data.ma20.toFixed(2)} / ${data.ma60.toFixed(2)}</div>
-        <div class="signal-line">MACD: ${data.macd_status} | DIF=${data.macd_dif.toFixed(3)} DEA=${data.macd_dea.toFixed(3)}</div>
-        <div class="signal-line">RSI: ${data.rsi_6.toFixed(1)} / ${data.rsi_12.toFixed(1)} / ${data.rsi_24.toFixed(1)} (${data.rsi_status})</div>
-        <div class="signal-line">量: ${data.volume_status} | 量比5日=${data.volume_ratio_5d.toFixed(2)}</div>
-        ${data.signal_reasons.length ? `<div class="signal-line bull">+ ${data.signal_reasons.join(', ')}</div>` : ''}
-        ${data.risk_factors.length ? `<div class="signal-line bear">- ${data.risk_factors.join(', ')}</div>` : ''}
-        <div class="signal-line" style="font-size:10px;color:var(--text-dim)">由 DSA StockTrendAnalyzer 引擎分析</div>
-      `;
-    } catch (e) {
-      resultEl.innerHTML = `<div class="signal-line" style="color:var(--red)">分析失败: ${e.message}</div>`;
-    } finally {
-      btn.textContent = '运行 DSA 分析'; btn.disabled = false;
-    }
   }
 
   async function refreshAll() {

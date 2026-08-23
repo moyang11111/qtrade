@@ -35,6 +35,11 @@ const API = (() => {
       return get(`/api/indicators/${encodeURIComponent(symbol)}`);
     },
 
+    /** 获取最新 A 股量价因子（首批移植 deepseek-harness-quant） */
+    getFactors(symbol) {
+      return get(`/api/factors/${encodeURIComponent(symbol)}`);
+    },
+
     /** 运行回测 */
     runBacktest({ symbol, strategy, capital, commission, stopLoss, takeProfit }) {
       return get('/api/backtest', {
@@ -47,20 +52,16 @@ const API = (() => {
       });
     },
 
-    /** DSA AI 观点（symbol 为空返回全部） */
-    getAiViews(symbol = null, limit = 20) {
-      const path = symbol ? `/api/ai/views/${encodeURIComponent(symbol)}` : '/api/ai/views';
-      return get(path, { limit });
-    },
-
     /** AI 信号模拟盘：action = status | sync | mark */
     getAiPaper(action = 'status') {
       return get('/api/ai/paper', { action });
     },
 
-    /** DSA 技术分析（调用 DSA 引擎） */
-    analyzeDSA(symbol) {
-      return get(`/api/dsa/analyze/${encodeURIComponent(symbol)}`);
+    /** 自动模拟盘：action = status | run | toggle | reset | setmode */
+    getAutoPaper(action = 'status', mode = null) {
+      const params = { action };
+      if (mode) params.mode = mode;
+      return get('/api/auto/paper', params);
     },
 
     /** K线训练营：抽一道看图猜涨跌题（已脱敏） */

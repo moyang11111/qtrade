@@ -24,12 +24,17 @@
       "preload.js",
       "../static/**",
       "../server.py",
+      "../paper_trading/**",
       "../qtrade.ico"
     ],
     "extraResources": [
       {
         "from": "../server.py",
         "to": "server.py"
+      },
+      {
+        "from": "../paper_trading",
+        "to": "paper_trading"
       }
     ],
     "win": {

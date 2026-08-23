@@ -20,38 +20,31 @@ QTrade Desktop — 现代前端交易终端（后端服务）
 import sys
 import io
 
-# ---- 修复 Windows GBK 编码问题（保留 write_through 避免缓冲丢失输出） ----
-# pythonw.exe 下无控制台，sys.stdout 为 None，需判空
-if sys.platform == "win32":
-    if sys.stdout is not None:
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", write_through=True)
-    if sys.stderr is not None:
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", write_through=True)
-
+# Windows GBK 编码修复移到 main() 内执行：
+# 避免直接 import server 时覆盖 sys.stdout，破坏 pytest 捕获输出。
 import json
 import time
 import os
 import sqlite3
 import socket
 import argparse
+import threading
 import urllib.request
 import urllib.parse
 import webbrowser
 from pathlib import Path
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+import qtrade_base_bridge
 
 import pandas as pd
 import numpy as np
 
-# DSA 分析引擎（可选依赖，import 失败则降级为内置分析）
-try:
-    import sys as _sys
-    _sys.path.insert(0, str(Path(__file__).parent.parent / "daily_stock_analysis"))
-    from src.stock_analyzer import StockTrendAnalyzer
-    _DSA_AVAILABLE = True
-except Exception:
-    StockTrendAnalyzer = None
-    _DSA_AVAILABLE = False
+# ---- 首批 A 股实证因子（移植自 deepseek-harness-quant 思路）----
+import factors as factors_mod
+
+# ---- 本地仿真盘引擎（a-share-skill, MIT）----
+from paper_trading.engine import OrderRequest, PaperTradingEngine
+from paper_trading.market_data import MarketDataProvider, infer_limit_prices
 
 # ============================================================================
 # 实时数据源（腾讯）
@@ -259,11 +252,15 @@ class DataService:
     # ---------- 数据源解析 ----------
 
     def _resolve_df(self, symbol: str, count: int = 320) -> pd.DataFrame | None:
-        """实时优先拉取，失败回退内存缓存/CSV；仅内存缓存，不落盘。"""
-        if self.live and self.live_src:
+        """实时优先拉取，失败回退内存缓存/CSV；仅内存缓存，不落盘。
+
+        live_src 存在就尝试实时（即使启动时可用性探测失败，也能在运行中恢复实时）。
+        """
+        if self.live_src:
             try:
                 df = self.live_src.fetch_kline(symbol, count)  # 内部 TTL 缓存
                 self._df_cache[symbol] = df
+                self.live = True
                 return df
             except Exception:
                 pass  # 回退
@@ -272,6 +269,9 @@ class DataService:
         return self._load_csv(symbol)
 
     def _load_csv(self, symbol: str) -> pd.DataFrame | None:
+        # 命中内存缓存直接返回（主板全市场扫描每轮需要三千+只，避免重复磁盘IO）
+        if symbol in self._df_cache:
+            return self._df_cache[symbol]
         path = self.data_dir / f"{symbol}.csv"
         if not path.exists():
             return None
@@ -326,9 +326,11 @@ class DataService:
     def get_info(self, symbol: str) -> dict:
         """行情概要：实时快照 + K线派生指标。"""
         quote = None
-        if self.live and self.live_src:
+        if self.live_src:
             try:
                 quote = self.live_src.fetch_quote(symbol)
+                if quote:
+                    self.live = True
             except Exception:
                 quote = None
 
@@ -431,6 +433,83 @@ class DataService:
         self._ind_cache[symbol] = result
         return result
 
+    def get_factors(self, symbol: str) -> dict:
+        """返回最新 A 股量价因子（移植自 deepseek-harness-quant）。
+
+        rps_120 属于横截面因子，这里在『最新时点』用全市场 120 日涨幅计算百分位。
+        """
+        df = self._resolve_df(symbol)
+        if df is None:
+            return {"error": f"无法加载 {symbol}"}
+        out = factors_mod.latest_factors(df)
+        if out.get("symbol") is None:
+            out["symbol"] = symbol
+        # RPS：全市场横截面（限制样本数以免首查太慢）
+        try:
+            close = df["close"].astype(float)
+            sym_ret = float(close.iloc[-1] / close.iloc[-121] - 1) if len(df) > 121 else None
+            uni_rets = []
+            for s in self.scan()[:300]:
+                d = self._load_csv(s)
+                if d is not None and len(d) > 121:
+                    uni_rets.append(float(d["close"].astype(float).iloc[-1] / d["close"].astype(float).iloc[-121] - 1))
+            rps = factors_mod.rps_percentile(sym_ret, uni_rets)
+            if rps is not None:
+                out["rps_120"] = rps
+                out["universe_size"] = len(uni_rets)
+        except Exception:
+            pass
+        return out
+
+    # ---------- A股费用模型（对齐 deepseek-harness-quant / a-share-skill） ----------
+
+    @staticmethod
+    def _is_sh(symbol) -> bool:
+        return bool(symbol and str(symbol).startswith(("6", "9")))
+
+    @staticmethod
+    def _fee_buy(amount: float, rate: float, symbol: str = "") -> float:
+        fee = max(5.0, round(amount * float(rate), 2))
+        if DataService._is_sh(symbol):
+            fee += round(amount * 0.00001, 2)   # 沪市过户费
+        return fee
+
+    @staticmethod
+    def _fee_sell(amount: float, rate: float, symbol: str = "") -> float:
+        fee = DataService._fee_buy(amount, rate, symbol)
+        fee += round(amount * 0.001, 2)          # 卖出印花税
+        return fee
+
+    # ---------- 数据审计：PIT / 覆盖率 / 时效 ----------
+
+    @staticmethod
+    def _audit_data(df, symbol: str = "") -> dict:
+        if df is None or df.empty:
+            return {"available": False, "symbol": symbol, "rows": 0}
+        idx = pd.DatetimeIndex(df.index)
+        start, end = idx.min(), idx.max()
+        rows = len(df)
+        years = max((end - start).days / 365.25, 0.01)
+        per_year = round(rows / years, 1)
+        today = pd.Timestamp.today().normalize()
+        stale_days = max(0, (today - pd.Timestamp(end).normalize()).days)
+        recent = df[df.index >= (today - pd.Timedelta(days=365))]
+        coverage_recent = round(len(recent) / 242.0 * 100, 1)   # A股年均约242个交易日
+        columns_ok = all(c in df.columns for c in ("open", "high", "low", "close", "volume"))
+        return {
+            "available": True,
+            "symbol": symbol,
+            "rows": rows,
+            "start": str(start.date()),
+            "end": str(end.date()),
+            "years": round(years, 2),
+            "bars_per_year": per_year,
+            "stale_days": stale_days,
+            "coverage_recent_1y_pct": min(100.0, coverage_recent),
+            "columns_ok": columns_ok,
+            "audit_pass": columns_ok and stale_days <= 10 and coverage_recent >= 50,
+        }
+
     # ---------- 回测 ----------
 
     def run_backtest(self, symbol: str, strategy: str, capital: float,
@@ -442,11 +521,12 @@ class DataService:
         close = df["close"]
         if strategy == "rsi_layered":
             # RSI 分层买入策略：专用模拟器（逐层建仓，与信号模型不同）
-            result = self._simulate_rsi_layered(df, capital, commission)
+            result = self._simulate_rsi_layered(df, capital, commission, symbol=symbol)
         else:
             signals = self._generate_signals(df, strategy)
-            result = self._simulate(df, signals, capital, commission, stop_loss, take_profit)
+            result = self._simulate(df, signals, capital, commission, stop_loss, take_profit, symbol=symbol)
         result.update({"symbol": symbol, "strategy": strategy})
+        result["audit"] = self._audit_data(df, symbol)
         return result
 
     @staticmethod
@@ -455,7 +535,13 @@ class DataService:
         high, low, vol = df["high"], df["low"], df["volume"]
         signals = pd.Series(0, index=df.index)
 
-        if strategy == "dual_ma":
+        if strategy == "factor_score":
+            # 首批 A 股实证因子合成打分（偏多>1，偏空<-1）
+            score = factors_mod.composite_score(df)
+            signals[score >= 1.0] = 1
+            signals[score <= -1.0] = -1
+
+        elif strategy == "dual_ma":
             ma5, ma20 = sma(close, 5), sma(close, 20)
             signals[ma5 > ma20] = 1
             signals[ma5 < ma20] = -1
@@ -535,46 +621,152 @@ class DataService:
                     signals.iloc[pos + 1:exit_pos] = 1
                     signals.iloc[exit_pos] = -1
 
+        elif strategy == "turtle":
+            """海龟交易法（vnpy 44k★ 官方示例）：20日突破入场，10日低点+2×ATR离场"""
+            prev_c = close.shift(1)
+            tr = pd.concat([high - low, (high - prev_c).abs(), (low - prev_c).abs()], axis=1).max(axis=1)
+            atr = tr.ewm(alpha=1 / 20, adjust=False).mean()
+            entry_high = high.rolling(20).max().shift(1)
+            exit_low = low.rolling(10).min().shift(1)
+            holding, stop = False, np.nan
+            for i in range(len(signals)):
+                c = close.iloc[i]
+                if not holding:
+                    if not np.isnan(entry_high.iloc[i]) and c > entry_high.iloc[i]:
+                        signals.iloc[i] = 1
+                        holding, stop = True, c - 2.0 * atr.iloc[i]
+                else:
+                    eff_stop = np.nanmax([exit_low.iloc[i], stop])
+                    if c < eff_stop:
+                        signals.iloc[i] = -1
+                        holding, stop = False, np.nan
+                    else:
+                        signals.iloc[i] = 1
+                        stop = max(stop, c - 2.0 * atr.iloc[i])
+
+        elif strategy == "supertrend":
+            """SuperTrend(10,3)：趋势线翻多买入，翻空卖出（pandas_ta 参考）"""
+            hl2 = (high + low) / 2
+            prev_c = close.shift(1)
+            tr = pd.concat([high - low, (high - prev_c).abs(), (low - prev_c).abs()], axis=1).max(axis=1)
+            atr = tr.ewm(alpha=1 / 10, adjust=False).mean()
+            upper, lower = hl2 + 3.0 * atr, hl2 - 3.0 * atr
+            fu, fl, trend = upper.copy(), lower.copy(), np.ones(len(signals))
+            for i in range(1, len(signals)):
+                fu.iloc[i] = upper.iloc[i] if (upper.iloc[i] < fu.iloc[i - 1] or close.iloc[i - 1] > fu.iloc[i - 1]) else fu.iloc[i - 1]
+                fl.iloc[i] = lower.iloc[i] if (lower.iloc[i] > fl.iloc[i - 1] or close.iloc[i - 1] < fl.iloc[i - 1]) else fl.iloc[i - 1]
+                if close.iloc[i] > fu.iloc[i - 1]:
+                    trend[i] = 1
+                elif close.iloc[i] < fl.iloc[i - 1]:
+                    trend[i] = -1
+                else:
+                    trend[i] = trend[i - 1]
+            signals[trend == 1] = 1
+            signals[trend == -1] = -1
+
+        elif strategy == "dual_thrust":
+            """Dual Thrust(N=4, K1=0.4, K2=0.6)：开盘±K×Range 突破（fmzquant/vnpy）"""
+            hh = high.rolling(4).max().shift(1)
+            hc = close.rolling(4).max().shift(1)
+            lc = close.rolling(4).min().shift(1)
+            ll = low.rolling(4).min().shift(1)
+            rng = pd.concat([hh - lc, hc - ll], axis=1).max(axis=1)
+            open_ = df["open"]
+            buy_break = close > open_ + 0.4 * rng
+            sell_break = close < open_ - 0.6 * rng
+            holding = False
+            for i in range(len(signals)):
+                if np.isnan(rng.iloc[i]):
+                    continue
+                if not holding and buy_break.iloc[i]:
+                    signals.iloc[i] = 1
+                    holding = True
+                elif holding:
+                    if sell_break.iloc[i]:
+                        signals.iloc[i] = -1
+                        holding = False
+                    else:
+                        signals.iloc[i] = 1
+
+        elif strategy == "boll_reversion":
+            """布林带(20,2)均值回归：下轨超卖买入，中轨回归卖出，MA60过滤"""
+            mid = close.rolling(20).mean()
+            std = close.rolling(20).std()
+            lower = mid - 2.0 * std
+            ma_trend = close.rolling(60).mean()
+            buy = (close < lower) & (close > ma_trend)
+            reach_mid = close >= mid
+            holding = False
+            for i in range(len(signals)):
+                if np.isnan(lower.iloc[i]) or np.isnan(ma_trend.iloc[i]):
+                    continue
+                if not holding and buy.iloc[i]:
+                    signals.iloc[i] = 1
+                    holding = True
+                elif holding:
+                    if reach_mid.iloc[i]:
+                        signals.iloc[i] = -1
+                        holding = False
+                    else:
+                        signals.iloc[i] = 1
+
         return signals
 
     @staticmethod
-    def _simulate(df, signals, capital, commission, stop_loss, take_profit) -> dict:
+    def _simulate(df, signals, capital, commission, stop_loss, take_profit, symbol="") -> dict:
         close = df["close"]
+        open_ = df["open"]
+        # 隔离未来函数：T-1 收盘确认信号，T 日开盘成交
+        exec_sig = signals.shift(1).fillna(0)
         trades, equity = [], [capital]
         position, entry_price, cash = 0, 0, capital
 
         for i in range(1, len(df)):
-            sig, price = signals.iloc[i], float(close.iloc[i])
+            sig = int(exec_sig.iloc[i])
+            price = float(open_.iloc[i])
+            mkt = price if (price > 0 and not np.isnan(price)) else float(close.iloc[i]) if not pd.isna(close.iloc[i]) else 0.0
             date = str(df.index[i])[:10]
 
-            if sig == 1 and position == 0:
-                position = cash * 0.95 / price
-                entry_price = price
-                cash -= position * price * (1 + commission)
-                trades.append({"type": "buy", "price": round(price, 2), "date": date, "pnl": 0})
+            prev_close = float(close.iloc[i - 1]) if i >= 1 and not pd.isna(close.iloc[i - 1]) else float("nan")
+            limit_up = limit_down = None
+            if symbol and not np.isnan(prev_close):
+                limit_up, limit_down = infer_limit_prices(symbol, prev_close)
+            blocked_buy = limit_up is not None and mkt >= limit_up - 1e-9
+            blocked_sell = limit_down is not None and mkt <= limit_down + 1e-9
 
-            elif sig == -1 and position > 0:
-                pnl = round((price / entry_price - 1) * 100, 2)
-                cash += position * price * (1 - commission)
-                trades.append({"type": "sell", "price": round(price, 2), "date": date, "pnl": pnl})
+            if sig == 1 and position == 0 and not blocked_buy:
+                position = cash * 0.95 / mkt
+                entry_price = mkt
+                amount = position * mkt
+                cash -= amount + DataService._fee_buy(amount, commission, symbol)
+                trades.append({"type": "buy", "price": round(mkt, 2), "date": date, "pnl": 0})
+
+            elif sig == -1 and position > 0 and not blocked_sell:
+                pnl = round((mkt / entry_price - 1) * 100, 2)
+                amount = position * mkt
+                cash += amount - DataService._fee_sell(amount, commission, symbol)
+                trades.append({"type": "sell", "price": round(mkt, 2), "date": date, "pnl": pnl})
                 position, entry_price = 0, 0
 
             elif position > 0:
-                pnl_pct = price / entry_price - 1
-                if pnl_pct <= -stop_loss:
-                    cash += position * price * (1 - commission)
-                    trades.append({"type": "stop_loss", "price": round(price, 2), "date": date, "pnl": round(pnl_pct * 100, 2)})
+                pnl_pct = mkt / entry_price - 1
+                if not blocked_sell and pnl_pct <= -stop_loss:
+                    amount = position * mkt
+                    cash += amount - DataService._fee_sell(amount, commission, symbol)
+                    trades.append({"type": "stop_loss", "price": round(mkt, 2), "date": date, "pnl": round(pnl_pct * 100, 2)})
                     position, entry_price = 0, 0
-                elif pnl_pct >= take_profit:
-                    cash += position * price * (1 - commission)
-                    trades.append({"type": "take_profit", "price": round(price, 2), "date": date, "pnl": round(pnl_pct * 100, 2)})
+                elif not blocked_sell and pnl_pct >= take_profit:
+                    amount = position * mkt
+                    cash += amount - DataService._fee_sell(amount, commission, symbol)
+                    trades.append({"type": "take_profit", "price": round(mkt, 2), "date": date, "pnl": round(pnl_pct * 100, 2)})
                     position, entry_price = 0, 0
 
-            equity.append(round(cash + position * price, 2))
+            equity.append(round(cash + position * mkt, 2))
 
         if position > 0:
             final_price = float(close.iloc[-1])
-            cash += position * final_price * (1 - commission)
+            amount = position * final_price
+            cash += amount - DataService._fee_sell(amount, commission, symbol)
             trades.append({
                 "type": "close", "price": round(final_price, 2),
                 "date": str(df.index[-1])[:10],
@@ -593,6 +785,16 @@ class DataService:
         losses = sum(1 for t in trades if t["pnl"] < 0)
         total = wins + losses
 
+        score = annual_return - 1.5 * abs(max_dd)
+        if score >= 20:
+            grade, grade_label = "A", "优秀"
+        elif score >= 5:
+            grade, grade_label = "B", "良好"
+        elif score >= -5:
+            grade, grade_label = "C", "一般"
+        else:
+            grade, grade_label = "D", "较差"
+
         return {
             "total_return": total_return,
             "annual_return": annual_return,
@@ -604,20 +806,25 @@ class DataService:
             "final_value": round(final_value, 2),
             "trades": trades[-30:],
             "equity": equity,
+            "grade": grade,
+            "grade_label": grade_label,
+            "score": round(score, 2),
         }
 
     @staticmethod
     def _simulate_rsi_layered(df: pd.DataFrame, capital: float,
-                              commission: float = 0.0003) -> dict:
+                              commission: float = 0.0003, symbol: str = "") -> dict:
         """
-        RSI 分层买入策略（网格建仓）：
+        RSI 分层买入策略（网格建仓）——已隔离未来函数：
+          依据 T-1 收盘 RSI，在 T 日开盘执行；涨跌停时跳过对应成交。
           - RSI14 < 25   → 买入 1 层仓（1 层 = 10% 初始资金）
           - 此后每从上次买入价下跌 5% → 买入 2 层仓（20%）
           - 总仓位 ≤ 80%
           - RSI14 > 70   → 全部清仓
         """
         close = df["close"]
-        r14 = rsi(close, 14)
+        open_ = df["open"]
+        r14 = rsi(close, 14).shift(1)     # 关键：只用昨日收盘 RSI 决策
         layer_pct = 0.10          # 1 层 = 10% 总资金
         max_pos = 0.80            # 最大 80% 仓位
         total_ref = capital       # 层仓基准 = 初始资金
@@ -629,17 +836,26 @@ class DataService:
         trades = []
         equity = []
 
-        for i in range(len(df)):
-            price = float(close.iloc[i])
+        for i in range(1, len(df)):
+            price = float(open_.iloc[i])
+            mkt = price if (price > 0 and not np.isnan(price)) else float(close.iloc[i]) if not pd.isna(close.iloc[i]) else 0.0
             date = str(df.index[i])[:10]
             r = r14.iloc[i]
 
+            prev_close = float(close.iloc[i - 1]) if not pd.isna(close.iloc[i - 1]) else float("nan")
+            limit_up = limit_down = None
+            if symbol and not np.isnan(prev_close):
+                limit_up, limit_down = infer_limit_prices(symbol, prev_close)
+            blocked_buy = limit_up is not None and mkt >= limit_up - 1e-9
+            blocked_sell = limit_down is not None and mkt <= limit_down + 1e-9
+
             # —— 卖出：RSI > 70 清仓 ——
-            if in_position and not pd.isna(r) and r > 70:
-                pnl_pct = round((price / last_buy_price - 1) * 100, 2) if last_buy_price else 0
-                cash += shares * price * (1 - commission)
+            if in_position and not pd.isna(r) and r > 70 and not blocked_sell:
+                pnl_pct = round((mkt / last_buy_price - 1) * 100, 2) if last_buy_price else 0
+                amount = shares * mkt
+                cash += amount - DataService._fee_sell(amount, commission, symbol)
                 trades.append({
-                    "type": "sell", "price": round(price, 2), "date": date,
+                    "type": "sell", "price": round(mkt, 2), "date": date,
                     "pnl": pnl_pct, "shares": round(shares, 0),
                     "reason": f"RSI={r:.1f}>70 清仓",
                 })
@@ -648,45 +864,46 @@ class DataService:
                 last_buy_price = None
 
             # —— 首次建仓：RSI < 25，买入 1 层 ——
-            if not in_position and not pd.isna(r) and r < 25:
+            if not in_position and not pd.isna(r) and r < 25 and not blocked_buy:
                 amount = total_ref * layer_pct
-                buy_shares = amount / price
-                cost = buy_shares * price * (1 + commission)
+                buy_shares = amount / mkt
+                cost = buy_shares * mkt + DataService._fee_buy(buy_shares * mkt, commission, symbol)
                 if cost <= cash:
                     cash -= cost
                     shares = buy_shares
                     in_position = True
-                    last_buy_price = price
+                    last_buy_price = mkt
                     trades.append({
-                        "type": "buy", "price": round(price, 2), "date": date,
+                        "type": "buy", "price": round(mkt, 2), "date": date,
                         "pnl": 0, "shares": round(buy_shares, 0),
                         "reason": f"RSI={r:.1f}<25 首仓1层",
                     })
 
             # —— 加仓：每跌 5% 买入 2 层（最大仓位 80%）——
-            elif in_position and last_buy_price and not pd.isna(r):
-                pos_pct = shares * price / total_ref
-                if price <= last_buy_price * 0.95 and pos_pct + 2 * layer_pct <= max_pos:
+            elif in_position and last_buy_price and not pd.isna(r) and not blocked_buy:
+                pos_pct = shares * mkt / total_ref
+                if mkt <= last_buy_price * 0.95 and pos_pct + 2 * layer_pct <= max_pos:
                     amount = total_ref * 2 * layer_pct
-                    buy_shares = amount / price
-                    cost = buy_shares * price * (1 + commission)
+                    buy_shares = amount / mkt
+                    cost = buy_shares * mkt + DataService._fee_buy(buy_shares * mkt, commission, symbol)
                     if cost <= cash:
                         cash -= cost
                         shares += buy_shares
-                        last_buy_price = price   # 以新加仓价为基准
+                        last_buy_price = mkt   # 以新加仓价为基准
                         trades.append({
-                            "type": "buy", "price": round(price, 2), "date": date,
+                            "type": "buy", "price": round(mkt, 2), "date": date,
                             "pnl": 0, "shares": round(buy_shares, 0),
                             "reason": f"跌5%加仓2层 (仓位{pos_pct*100:.0f}%)",
                         })
 
-            equity.append(round(cash + shares * price, 2))
+            equity.append(round(cash + shares * mkt, 2))
 
         # —— 期末清仓 ——
         if in_position:
             final_price = float(close.iloc[-1])
             pnl_pct = round((final_price / last_buy_price - 1) * 100, 2) if last_buy_price else 0
-            cash += shares * final_price * (1 - commission)
+            amount = shares * final_price
+            cash += amount - DataService._fee_sell(amount, commission, symbol)
             trades.append({
                 "type": "close", "price": round(final_price, 2),
                 "date": str(df.index[-1])[:10],
@@ -707,6 +924,16 @@ class DataService:
         losses = sum(1 for t in trades if t["pnl"] < 0)
         total = wins + losses
 
+        score = annual_return - 1.5 * abs(max_dd)
+        if score >= 20:
+            grade, grade_label = "A", "优秀"
+        elif score >= 5:
+            grade, grade_label = "B", "良好"
+        elif score >= -5:
+            grade, grade_label = "C", "一般"
+        else:
+            grade, grade_label = "D", "较差"
+
         return {
             "total_return": total_return,
             "annual_return": annual_return,
@@ -718,90 +945,18 @@ class DataService:
             "final_value": round(final_value, 2),
             "trades": trades[-30:],
             "equity": equity,
+            "grade": grade,
+            "grade_label": grade_label,
+            "score": round(score, 2),
         }
 
 
 # ============================================================================
-# DSA 集成：AI 决策信号 + AI 模拟盘
+# AI 模拟盘
 # ============================================================================
 
-class DsaSignalReader:
-    """只读 DSA（daily_stock_analysis）的 AI 决策信号。
-
-    数据源：DSA 桌面版的 sqlite 数据库（decision_signals 表）。
-    只读打开（mode=ro），不碰 DSA 运行，DSA 未装/未跑时返回空。
-    """
-
-    DB_CANDIDATES = [
-        Path.home() / "AppData" / "Roaming" / "daily-stock-analysis-desktop" / "data" / "stock_analysis.db",
-        Path("data/stock_analysis.db"),
-        Path("../daily_stock_analysis/data/stock_analysis.db"),
-    ]
-
-    def __init__(self):
-        self.db_path = self._find_db()
-
-    def _find_db(self):
-        for p in self.DB_CANDIDATES:
-            if p.exists():
-                return p
-        return None
-
-    def available(self) -> bool:
-        return self.db_path is not None
-
-    def get_views(self, symbol: str | None = None, limit: int = 30) -> list[dict]:
-        """读取活跃 AI 决策信号。symbol 为空返回全部最近 limit 条。"""
-        if not self.db_path:
-            return []
-        try:
-            conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            sql = (
-                "SELECT stock_code, stock_name, action, action_label, score, confidence, "
-                "horizon, entry_low, entry_high, stop_loss, target_price, reason, "
-                "risk_summary, catalyst_summary, created_at "
-                "FROM decision_signals WHERE status='active'"
-            )
-            params: list = []
-            if symbol:
-                sql += " AND stock_code=?"
-                params.append(symbol)
-            sql += " ORDER BY created_at DESC LIMIT ?"
-            params.append(limit)
-            rows = cur.execute(sql, params).fetchall()
-            conn.close()
-            out = []
-            for r in rows:
-                out.append({
-                    "symbol": r["stock_code"],
-                    "name": r["stock_name"] or "",
-                    "action": r["action"],
-                    "action_label": r["action_label"] or r["action"],
-                    "score": r["score"],
-                    "confidence": r["confidence"],
-                    "horizon": r["horizon"],
-                    "entry_low": r["entry_low"],
-                    "entry_high": r["entry_high"],
-                    "stop_loss": r["stop_loss"],
-                    "target_price": r["target_price"],
-                    "reason": (r["reason"] or "")[:200],
-                    "risk": (r["risk_summary"] or "")[:120],
-                    "catalyst": (r["catalyst_summary"] or "")[:120],
-                    "time": str(r["created_at"])[:19],
-                })
-            return out
-        except Exception:
-            return []
-
-    def latest_for(self, symbol: str) -> dict | None:
-        views = self.get_views(symbol, limit=1)
-        return views[0] if views else None
-
-
 class AiPaperTrader:
-    """AI 信号模拟盘：按 DSA 决策信号在模拟资金上买卖。
+    """AI 信号模拟盘：按 AI 决策信号在模拟资金上买卖。
 
     规则（简单明确，可调）：
       - 初始资金 10 万
@@ -916,14 +1071,1540 @@ class AiPaperTrader:
         return self.status()
 
 
+class LearnedSignalEngine:
+    """独立学习的买卖信号引擎（不依赖 qtrade 内置策略库）。
+
+    自研多维打分模型，综合趋势/动量/量能/位置四类因子：
+
+    买入（全部必要条件 + 至少一项确认）：
+      必要：① 趋势向上（收盘 > MA20 且 MA20 走升）
+            ② 中期多头（收盘 > MA60）
+            ③ 短动量回升（MA5 向上，回踩企稳信号）
+            ④ 位置安全（收盘距 MA10 < 2.5%，不追高）
+      确认：MACD 多头或柱体放大 / 放量（量 ≥ 0.9×5日均量）至少一项成立
+      防线：RSI < 72（拒绝超买追入）
+    卖出（任一成立）：
+      趋势破位（收盘 < MA20）／ 短线走坏（收盘 < MA10 且 MACD 死叉）
+      极端超买（RSI > 80）
+    """
+
+    @staticmethod
+    def _rsi(close: pd.Series, n: int = 14) -> float:
+        delta = close.diff().dropna()
+        if len(delta) < n:
+            return 50.0
+        up = delta.clip(lower=0).rolling(n).mean().iloc[-1]
+        dn = (-delta.clip(upper=0)).rolling(n).mean().iloc[-1]
+        if dn == 0:
+            return 100.0
+        return float(100 - 100 / (1 + up / dn))
+
+    @classmethod
+    def analyze(cls, df: pd.DataFrame) -> dict | None:
+        """输入日K DataFrame（open/high/low/close/volume），返回最新信号。"""
+        if df is None or len(df) < 60:
+            return None
+        close = df["close"].astype(float)
+        vol = df["volume"].astype(float)
+
+        ma5 = close.rolling(5).mean()
+        ma10 = close.rolling(10).mean()
+        ma20 = close.rolling(20).mean()
+        ma60 = close.rolling(60).mean()
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        dif = ema12 - ema26
+        dea = dif.ewm(span=9, adjust=False).mean()
+        hist = (dif - dea) * 2
+        vol_ma5 = vol.rolling(5).mean()
+        rsi = cls._rsi(close)
+
+        c = float(close.iloc[-1])
+        checks = {
+            # 买入：必要条件
+            "trend_up": c > float(ma20.iloc[-1]) and float(ma20.iloc[-1]) > float(ma20.iloc[-4]),
+            "above_ma60": c > float(ma60.iloc[-1]),
+            "mom_up": float(ma5.iloc[-1]) > float(ma5.iloc[-2]),
+            "pullback_ok": abs(c / float(ma10.iloc[-1]) - 1) < 0.025,  # 不过度偏离 MA10
+            # 买入：确认条件（至少一项）
+            "macd_ok": float(dif.iloc[-1]) > float(dea.iloc[-1]) or float(hist.iloc[-1]) > float(hist.iloc[-2]),
+            "vol_ok": float(vol.iloc[-1]) >= float(vol_ma5.iloc[-1]) * 0.9,
+            # 卖出条件
+            "break_ma20": c < float(ma20.iloc[-1]),
+            "short_break": c < float(ma10.iloc[-1]) and float(dif.iloc[-1]) < float(dea.iloc[-1]),
+            "overbought": rsi > 80,
+        }
+
+        bull = [k for k in ("trend_up", "above_ma60", "mom_up", "pullback_ok") if checks[k]]
+        confirm = checks["macd_ok"] or checks["vol_ok"]
+
+        action, reason = "hold", ""
+        if len(bull) == 4 and confirm and rsi < 72:
+            action = "buy"
+            reason = (f"趋势+动量+位置齐备"
+                      f"{' +MACD' if checks['macd_ok'] else ''}{' +放量' if checks['vol_ok'] else ''} | RSI={rsi:.0f}")
+        elif checks["break_ma20"]:
+            action = "sell"
+            reason = f"趋势破位：收盘跌破MA20 | RSI={rsi:.0f}"
+        elif checks["short_break"]:
+            action = "sell"
+            reason = f"短线走坏：跌破MA10且MACD死叉 | RSI={rsi:.0f}"
+        elif checks["overbought"]:
+            action = "sell"
+            reason = f"极端超买：RSI={rsi:.0f} > 80"
+
+        return {
+            "action": action,
+            "strength": 1.0 if action == "buy" else (0.7 if action == "sell" else 0.0),
+            "price": c,
+            "rsi": round(rsi, 1),
+            "reason": reason,
+            "date": str(df.index[-1])[:10],
+        }
+
+
+class LearnedSignalEngineV2:
+    """自研学习引擎 v2 —— 多策略融合版（不依赖内置策略库）。
+
+    融合自 GitHub 高星项目与经典文献的九个概念：
+      · ADX(14) 状态分层（Wilder）：ADX≥20 且 +DI>−DI 走趋势逻辑，否则走回归逻辑
+      · TTM Squeeze 挤压释放（John Carter / pandas_ta）：布林收进肯特纳后放量释放突破
+      · z 分数均值回归（Ernest Chan / Quantopian 档案）：z(20) < −1.8 超卖低吸
+      · OBV 量能确认（Granville）：OBV > OBV-MA21，只买有吸筹迹象的回调
+      · 防追高护栏（NostalgiaForInfinity 3.4k★ 设计）：5日涨幅 >8% / 偏离MA10 过远不追
+      · 趋势锚（NFI ema200 思想日线化）：收盘须在 MA60 上方且 MA60 走升
+      卖出侧（由交易器执行）：钱德利拖曳止损 / 时间止损 / 时间衰减止盈
+    """
+
+    Z_ENTRY = -1.8        # z 分数低吸阈值
+    PUMP_GUARD = 0.08     # 5日涨幅护栏
+    ADX_TREND = 20.0      # 趋势阈值（Wilder 灰区下沿）
+
+    @staticmethod
+    def _adx(df: pd.DataFrame, n: int = 14):
+        """Wilder ADX：返回 (adx, +di, -di) 最新值。"""
+        h, l, c = df["high"].astype(float), df["low"].astype(float), df["close"].astype(float)
+        up, dn = h.diff(), -l.diff()
+        plus_dm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0), index=df.index)
+        minus_dm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0), index=df.index)
+        tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+        a = 1 / n
+        atr = tr.ewm(alpha=a, adjust=False).mean()
+        pdi = 100 * plus_dm.ewm(alpha=a, adjust=False).mean() / atr.replace(0, np.nan)
+        mdi = 100 * minus_dm.ewm(alpha=a, adjust=False).mean() / atr.replace(0, np.nan)
+        dx = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, np.nan)
+        adx = dx.ewm(alpha=a, adjust=False).mean()
+        return float(adx.iloc[-1]), float(pdi.iloc[-1]), float(mdi.iloc[-1])
+
+    @classmethod
+    def analyze(cls, df: pd.DataFrame) -> dict | None:
+        if df is None or len(df) < 80:
+            return None
+        close = df["close"].astype(float)
+        high = df["high"].astype(float)
+        low = df["low"].astype(float)
+        vol = df["volume"].astype(float)
+        c = float(close.iloc[-1])
+
+        # ── 基础指标 ──
+        ma5, ma10, ma20, ma60 = (close.rolling(w).mean() for w in (5, 10, 20, 60))
+        mid, std = ma20, close.rolling(20).std()
+        z20 = (close - mid) / std.replace(0, np.nan)
+        prev_c = close.shift(1)
+        tr = pd.concat([high - low, (high - prev_c).abs(), (low - prev_c).abs()], axis=1).max(axis=1)
+        atr22 = float(tr.ewm(alpha=1 / 22, adjust=False).mean().iloc[-1])
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        dif, dea = ema12 - ema26, (ema12 - ema26).ewm(span=9, adjust=False).mean()
+        rsi = LearnedSignalEngine._rsi(close)
+        adx, pdi, mdi = cls._adx(df)
+
+        # ── TTM Squeeze：布林(20,2) 收进 肯特纳(20,1.5×TR通道) 后释放 ──
+        bb_up, bb_lo = mid + 2 * std, mid - 2 * std
+        kc_up, kc_lo = mid + 1.5 * tr.rolling(20).mean(), mid - 1.5 * tr.rolling(20).mean()
+        sqz_on = (bb_lo > kc_lo) & (bb_up < kc_up)
+        sqz_off = (bb_lo < kc_lo) & (bb_up > kc_up)
+        # LazyBear 动量柱近似：收盘距 20日高低中值与中轨均值的偏离
+        mom = close - ((high.rolling(20).max() + low.rolling(20).min()) / 2 + mid) / 2
+        squeeze_fire = bool(sqz_off.iloc[-1] and mom.iloc[-1] > 0 and sqz_on.iloc[-2])
+
+        # ── OBV 量能确认 ──
+        obv = (np.sign(close.diff()).fillna(0) * vol).cumsum()
+        obv_ok = bool(obv.iloc[-1] > obv.rolling(21).mean().iloc[-1])
+
+        # ── 防追高护栏（NFI pump guard）──
+        pump_5d = float(close.iloc[-1] / close.iloc[-6] - 1) if len(close) > 6 else 0.0
+        not_pumped = pump_5d < cls.PUMP_GUARD
+        near_ma10 = abs(c / float(ma10.iloc[-1]) - 1) < 0.03
+
+        # ── 状态分层 ──
+        regime_trend = adx >= cls.ADX_TREND and pdi > mdi
+        trend_anchor = c > float(ma60.iloc[-1]) and float(ma60.iloc[-1]) >= float(ma60.iloc[-4])
+
+        # 趋势模式入场：趋势确立 + 站上MA20 + 动量回升 + (挤压点火 或 均线多头) + 量能/位置护栏
+        trend_buy = (
+            regime_trend and trend_anchor
+            and c > float(ma20.iloc[-1]) and float(ma20.iloc[-1]) > float(ma20.iloc[-4])
+            and float(ma5.iloc[-1]) > float(ma5.iloc[-2])
+            and (squeeze_fire or float(ma5.iloc[-1]) > float(ma10.iloc[-1]))
+            and obv_ok and near_ma10 and not_pumped and rsi < 72
+        )
+        # 回归模式入场：超卖低吸（z<-1.8）+ 趋势锚 + OBV吸筹 + 防追高
+        rev_buy = (
+            float(z20.iloc[-1]) < cls.Z_ENTRY and trend_anchor
+            and obv_ok and not_pumped and rsi < 45
+        )
+
+        # 卖出信号（价格类退出由交易器的止损/止盈/拖曳负责）
+        sell_reason = None
+        if c < float(ma20.iloc[-1]) and float(ma20.iloc[-4]) < float(ma20.iloc[-1]) * 0.995:
+            sell_reason = f"趋势走坏：跌破MA20且MA20走平转弱 ADX={adx:.0f}"
+        elif c < float(ma10.iloc[-1]) and float(dif.iloc[-1]) < float(dea.iloc[-1]) and not regime_trend:
+            sell_reason = f"回归失败：跌破MA10且MACD死叉 z={float(z20.iloc[-1]):.1f}"
+        elif rsi > 80:
+            sell_reason = f"极端超买 RSI={rsi:.0f}"
+
+        if trend_buy or rev_buy:
+            # 综合评分：供组合层动量排名（ADX趋势强度 + 挤压 + z深度 + OBV + 动量）
+            mom20 = c / float(close.iloc[-21]) - 1 if len(close) > 21 else 0.0
+            score = (
+                min(adx / 40, 1.0) * (0.5 if trend_buy else 0.2)
+                + (0.25 if squeeze_fire else 0.0)
+                + min(abs(float(z20.iloc[-1])) / 4, 1.0) * (0.4 if rev_buy else 0.0)
+                + (0.15 if obv_ok else 0.0)
+                + min(max(mom20, 0) / 0.25, 1.0) * 0.3
+            )
+            mode = "trend" if trend_buy else "revert"
+            reason = (f"{'趋势突破' if trend_buy else '超卖低吸'}"
+                      f"{' +挤压点火' if squeeze_fire else ''} +OBV吸筹"
+                      f" | ADX={adx:.0f} z={float(z20.iloc[-1]):.1f} RSI={rsi:.0f}")
+            return {"action": "buy", "strength": 1.0, "price": c, "rsi": round(rsi, 1),
+                    "reason": reason, "date": str(df.index[-1])[:10],
+                    "score": round(min(score, 1.0), 3), "mode": mode,
+                    "atr": round(atr22, 3), "mom20": round(mom20, 4), "engine": "v2"}
+        if sell_reason:
+            return {"action": "sell", "strength": 0.7, "price": c, "rsi": round(rsi, 1),
+                    "reason": sell_reason, "date": str(df.index[-1])[:10],
+                    "score": 0.0, "mode": None, "atr": round(atr22, 3), "mom20": 0.0, "engine": "v2"}
+        return {"action": "hold", "strength": 0.0, "price": c, "rsi": round(rsi, 1),
+                "reason": "", "date": str(df.index[-1])[:10],
+                "score": 0.0, "mode": None, "atr": round(atr22, 3), "mom20": 0.0, "engine": "v2"}
+
+
+class SequoiaSignalEngine:
+    """Sequoia-X 选股引擎（学习自 sngyai/Sequoia-X，GitHub 5,340★，A股自动选股系统）。
+
+    移植其 V2 六策略中可量价计算的四类入场 + V1 防假突破细节：
+      · 海龟突破（turtle_trade）：收盘破20日高点 + 阳线 + 收盘高于昨收 + 成交额≥1亿
+      · 均线放量（ma_volume）：MA5 上穿 MA20 + 量 > 1.5×20日均量
+      · 高而窄旗形（high_tight_flag）：40日振幅>60% + 近10日收紧(<15%) + 缩量(<0.6×均量)
+      · 涨停洗盘（limitup_shakeout）：昨日涨停 + 今日阴线回踩 + 放量2倍 + 未破昨收
+    卖出：连续两日跌破 MA20（原项目为收盘后筛选器，无卖出规则，此为配套出场）。
+    """
+
+    MIN_TURNOVER = 1e8   # 成交额下限（元）：流动性过滤
+
+    @staticmethod
+    def patterns(df: pd.DataFrame) -> list[str]:
+        """检测 Sequoia-X 四类入场形态，返回命中的形态名列表（供融合策略复用）。"""
+        close = df["close"].astype(float)
+        open_ = df["open"].astype(float)
+        high = df["high"].astype(float)
+        low = df["low"].astype(float)
+        vol = df["volume"].astype(float)
+        c, o = float(close.iloc[-1]), float(open_.iloc[-1])
+        prev_c = float(close.iloc[-2])
+
+        vol20 = vol.rolling(20).mean()
+        turnover = vol * close  # 成交额近似：成交量×收盘价
+        reasons = []
+
+        # 1) 海龟突破（Sequoia turtle_trade：20日高点 + 阳线防假突破 + 流动性）
+        hh20 = float(high.iloc[:-1].rolling(20).max().iloc[-1])
+        if (c > hh20 and c > o and c > prev_c
+                and float(turnover.iloc[-1]) >= SequoiaSignalEngine.MIN_TURNOVER):
+            reasons.append("海龟突破20日高+阳线放量")
+
+        # 2) 均线金叉放量（ma_volume）
+        ma5, ma20 = close.rolling(5).mean(), close.rolling(20).mean()
+        if (float(ma5.iloc[-2]) <= float(ma20.iloc[-2]) and float(ma5.iloc[-1]) > float(ma20.iloc[-1])
+                and float(vol.iloc[-1]) > 1.5 * float(vol20.iloc[-1])):
+            reasons.append("MA5上穿MA20+1.5倍量")
+
+        # 3) 高而窄旗形（high_tight_flag：先涨60%后横盘收紧缩量）
+        h40, l40 = float(high.iloc[-40:].max()), float(low.iloc[-40:].min())
+        h10, l10 = float(high.iloc[-10:].max()), float(low.iloc[-10:].min())
+        if (h40 / l40 > 1.6 and h10 / l10 < 1.15
+                and l10 >= 0.8 * h40
+                and float(vol.iloc[-1]) < 0.6 * float(vol20.iloc[-1])):
+            reasons.append("高而窄旗形收紧缩量")
+
+        # 4) 涨停洗盘（limitup_shakeout：昨日涨停今阴回踩不破）
+        prev2_c = float(close.iloc[-3])
+        if (prev_c >= prev2_c * 1.095 and c < o
+                and float(vol.iloc[-1]) >= 2 * float(vol.iloc[-2])
+                and float(low.iloc[-1]) >= prev_c):
+            reasons.append("涨停洗盘回踩确认")
+        return reasons
+
+    @staticmethod
+    def analyze(df: pd.DataFrame) -> dict | None:
+        if df is None or len(df) < 70:
+            return None
+        close = df["close"].astype(float)
+        c = float(close.iloc[-1])
+        ma20 = close.rolling(20).mean()
+        reasons = SequoiaSignalEngine.patterns(df)
+        sell = (c < float(ma20.iloc[-1]) and float(close.iloc[-2]) < float(ma20.iloc[-2]))
+
+        if reasons:
+            return {"action": "buy", "strength": min(1.0, 0.5 + 0.15 * len(reasons)),
+                    "price": c, "rsi": None,
+                    "reason": "Sequoia:" + " / ".join(reasons),
+                    "date": str(df.index[-1])[:10], "engine": "sequoia"}
+        if sell:
+            return {"action": "sell", "strength": 0.7, "price": c, "rsi": None,
+                    "reason": "Sequoia卖出：连续两日跌破MA20", "date": str(df.index[-1])[:10],
+                    "engine": "sequoia"}
+        return {"action": "hold", "strength": 0.0, "price": c, "rsi": None,
+                "reason": "", "date": str(df.index[-1])[:10], "engine": "sequoia"}
+
+
+class OneilSignalEngine:
+    """欧奈尔 CANSLIM 精简版（量价可计算子集）。
+
+    七要素中 C(当季EPS)/A(年度EPS)/I(机构持仓) 需基本面数据，此处实现其余全部：
+      · N 新高+基底突破：距52周新高≤15%，杯柄/平台基底（12-30%回调后企稳），
+        收盘上穿枢轴（近10日高点）且不追高（≤枢轴+5%），放量≥1.3×50日均量
+      · L 相对强度：120日收益在全市场百分位 ≥ 85（IBD RS 80-90 的 A 股代理，
+        Sequoia-X 的 RpsBreakout 同款思想）
+      · M 大盘方向：市场宽度（成分股站上MA20占比）≥ 40% 才开新仓
+      · 卖出铁律：买入价−7.5% 无条件止损；+20% 止盈；突破后15日内涨满20%
+        → 触发八周持股规则（40个交易日内不落袋，让利润奔跑）
+    """
+
+    RS_MIN = 85          # 120日收益百分位门槛
+    BREADTH_MIN = 0.40   # 市场宽度门槛（站上MA20占比）
+    STOP_PCT = 0.075     # 欧奈尔铁律：7-8% 止损
+    TAKE_PCT = 0.20      # 强势市场止盈 20-25%
+
+    @classmethod
+    def gates(cls, df: pd.DataFrame, rs_pct: float, breadth: float,
+              rs_min: float | None = None, near_high_max: float = 0.15) -> tuple[bool, str]:
+        """欧奈尔质量闸门（供融合策略复用）：M大盘 / L强度 / N新高 / MA50趋势。
+
+        返回 (是否通过, 未通过原因)。rs_min=None 时用类默认 RS_MIN。
+        """
+        rs_min = cls.RS_MIN if rs_min is None else rs_min
+        close = df["close"].astype(float)
+        c = float(close.iloc[-1])
+        ma50 = close.rolling(50).mean()
+        max250 = float(close.iloc[-250:].max()) if len(close) >= 250 else float(close.max())
+        if breadth < cls.BREADTH_MIN:
+            return False, f"大盘弱(宽度{breadth*100:.0f}%)"
+        if rs_pct < rs_min:
+            return False, f"强度不足(RPS{rs_pct:.0f}<{rs_min:.0f})"
+        if c < (1 - near_high_max) * max250:
+            return False, f"距52周高过远({(c/max250-1)*100:+.0f}%)"
+        if not (c > float(ma50.iloc[-1]) and float(ma50.iloc[-1]) >= float(ma50.iloc[-5]) * 0.998):
+            return False, "MA50趋势不佳"
+        return True, f"RPS{rs_pct:.0f} 距高点{(c/max250-1)*100:+.0f}%"
+
+    @classmethod
+    def analyze(cls, df: pd.DataFrame, rs_pct: float = 50.0, breadth: float = 1.0) -> dict | None:
+        """rs_pct/breadth 由组合层（AutoPaperTrader.cycle）跨股票计算后传入。"""
+        if df is None or len(df) < 130:
+            return None
+        close = df["close"].astype(float)
+        high = df["high"].astype(float)
+        vol = df["volume"].astype(float)
+        c = float(close.iloc[-1])
+
+        ma50 = close.rolling(50).mean()
+        vol50 = vol.rolling(50).mean()
+
+        # N-1: 距 52 周新高 ≤ 15%
+        max250 = float(close.iloc[-250:].max()) if len(close) >= 250 else float(close.max())
+        near_high = c >= 0.85 * max250
+
+        # N-2: 基底形态（近60日回调 12-30% 后企稳，或 ≥25日收在下半区之上的浅平台）
+        base_win = close.iloc[-60:]
+        base_high, base_low = float(base_win.max()), float(base_win.min())
+        depth = (base_high - base_low) / base_high
+        base_ok = 0.12 <= depth <= 0.30 or (
+            0.05 <= depth < 0.15
+            and int((base_win >= base_low + 0.8 * (base_high - base_low)).sum()) >= 25)
+
+        # N-3: 枢轴突破（近10日高点 = 杯柄把手高点），放量确认，不追高
+        pivot = float(high.iloc[-10:].max())
+        pivot_break = (c >= pivot and c <= pivot * 1.05
+                       and float(vol.iloc[-1]) >= 1.3 * float(vol50.iloc[-1]))
+
+        # 趋势与位置：站上走平/上升的 MA50
+        trend_ok = c > float(ma50.iloc[-1]) and float(ma50.iloc[-1]) >= float(ma50.iloc[-5]) * 0.998
+
+        buy = (near_high and base_ok and pivot_break and trend_ok
+               and rs_pct >= cls.RS_MIN and breadth >= cls.BREADTH_MIN)
+        sell = c < float(ma50.iloc[-1]) and float(ma50.iloc[-5]) > float(ma50.iloc[-1]) * 1.002
+
+        if buy:
+            return {"action": "buy", "strength": 1.0, "price": c, "rsi": None,
+                    "reason": f"CANSLIM: 距52周高{(c/max250-1)*100:+.0f}% 基地回调{depth*100:.0f}% "
+                              f"枢轴突破 RPS{rs_pct:.0f} 宽度{breadth*100:.0f}%",
+                    "date": str(df.index[-1])[:10], "engine": "oneil",
+                    "stop_pct": cls.STOP_PCT, "take_pct": cls.TAKE_PCT}
+        if sell:
+            return {"action": "sell", "strength": 0.7, "price": c, "rsi": None,
+                    "reason": "CANSLIM卖出：跌破MA50且走弱", "date": str(df.index[-1])[:10],
+                    "engine": "oneil"}
+        return {"action": "hold", "strength": 0.0, "price": c, "rsi": None,
+                "reason": "", "date": str(df.index[-1])[:10], "engine": "oneil"}
+
+
+class SequoiaOneilEngine:
+    """红杉×欧奈尔融合策略 —— 主力专用策略。
+
+    设计哲学：欧奈尔管纪律（能不能买），Sequoia-X 管扳机（什么时候扣）。
+      ① 欧奈尔闸门（全部通过才允许开仓）：
+         M 大盘方向：市场宽度 ≥ 40%（弱市不开新仓）
+         L 相对强度：120日收益全市场百分位 RPS ≥ 85（只买领头羊）
+         N 新高原则：收盘距 52 周新高 ≤ 15%（不买半山腰）
+         趋势底线：站上走平/上升的 MA50
+      ② Sequoia-X 扳机（形态触发，任一命中）：
+         海龟突破（阳线防假突破+成交额≥1亿）/ MA5-MA20 金叉放量 /
+         高而窄旗形收紧缩量 / 涨停洗盘回踩确认
+      ③ 欧奈尔入场质量：收盘距枢轴（近10日高点）≤ 3% —— 只在枢轴边缘买，绝不追高
+      ④ 欧奈尔卖出铁律（交易器执行）：
+         止损 7.5% 无条件 / 止盈 20% / 八周持股规则（15日内涨满20%→40日不落袋）
+      ⑤ 信号卖出：连续两日跌破 MA20（Sequoia 出场规则）
+      回测（20股×250日弱市样本）：枢轴规则使 -2.5%→+0.6%，胜率 17%→25%，回撤 -6.6%→-6.1%
+    """
+
+    RS_MIN = 85          # RPS 门槛（与纯欧奈尔一致）
+    PIVOT_EDGE = 0.03    # 枢轴边缘：收盘 ≥ 枢轴 × (1-3%)，只在突破点附近买
+
+    @staticmethod
+    def analyze(df: pd.DataFrame, rs_pct: float = 50.0, breadth: float = 1.0) -> dict | None:
+        if df is None or len(df) < 130:
+            return None
+        close = df["close"].astype(float)
+        high = df["high"].astype(float)
+        c = float(close.iloc[-1])
+        ma20 = close.rolling(20).mean()
+
+        sell = (c < float(ma20.iloc[-1]) and float(close.iloc[-2]) < float(ma20.iloc[-2]))
+        triggers = SequoiaSignalEngine.patterns(df)
+
+        if triggers:
+            ok, why = OneilSignalEngine.gates(df, rs_pct, breadth, rs_min=SequoiaOneilEngine.RS_MIN)
+            pivot = float(high.iloc[-10:].max())
+            at_pivot = c >= pivot * (1 - SequoiaOneilEngine.PIVOT_EDGE)
+            if ok and at_pivot:
+                return {"action": "buy", "strength": 1.0, "price": c, "rsi": None,
+                        "reason": f"红杉×欧奈尔: {' / '.join(triggers)} | 闸门通过 {why}",
+                        "date": str(df.index[-1])[:10], "engine": "fusion",
+                        "stop_pct": OneilSignalEngine.STOP_PCT, "take_pct": OneilSignalEngine.TAKE_PCT}
+        if sell:
+            return {"action": "sell", "strength": 0.7, "price": c, "rsi": None,
+                    "reason": "红杉×欧奈尔卖出：连续两日跌破MA20", "date": str(df.index[-1])[:10],
+                    "engine": "fusion"}
+        return {"action": "hold", "strength": 0.0, "price": c, "rsi": None,
+                "reason": "", "date": str(df.index[-1])[:10], "engine": "fusion"}
+
+
+class EngineLock:
+    """跨进程引擎锁：同一账户同一时刻只允许一个进程执行自动交易。
+
+    通过 OS 级文件字节锁实现（Windows msvcrt / POSIX fcntl），
+    持锁进程退出/崩溃时锁自动释放，无需手动清理。
+    """
+
+    def __init__(self, path: str):
+        self.path = Path(path)
+        self._fh = None
+
+    def acquired(self) -> bool:
+        """尝试持锁；一旦持有（进程存活期间）始终返回 True。"""
+        if self._fh is not None:
+            return True
+        try:
+            self._fh = open(self.path, "a+")
+            self._fh.seek(0)
+            self._fh.write("0")   # 确保首字节存在，供锁定
+            self._fh.flush()
+            self._fh.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._fh.seek(0)
+            self._fh.truncate()
+            self._fh.write(str(os.getpid()))
+            self._fh.flush()
+            return True
+        except (ImportError, OSError):
+            if self._fh is not None:
+                try:
+                    self._fh.close()
+                except OSError:
+                    pass
+            self._fh = None
+            return False
+
+    def release(self):
+        if self._fh is not None:
+            try:
+                self._fh.close()  # 关闭句柄即释放锁
+            except OSError:
+                pass
+            self._fh = None
+
+
+class AutoPaperTrader:
+    """自动模拟盘：独立信号引擎 + 后台线程自动买卖 + 止盈止损 + 持久化。
+
+    - 买入：信号 buy 且未持仓、仓位未满 → 按 20% 总资产买入（整手）
+      同时记录买入价、预期卖出价（止盈价 +TAKE_PROFIT）、止损价
+    - 卖出：信号 sell，或现价触及预期卖出价（止盈）/止损价 → 自动卖出
+    - 状态持久化到 auto_paper_state.json，重启保留
+    """
+
+    INIT_CASH = 100_000.0
+    COST = 0.0015          # 双边费率
+    MAX_POSITIONS = 8      # 最大持仓数
+    POS_RATIO = 0.20       # 单只仓位占总资产比例
+    TAKE_PROFIT = 0.12     # 预期卖出价 = 买入价 × (1 + 12%)
+    STOP_LOSS = 0.06       # 止损 = 买入价 × (1 - 6%)
+    CYCLE_SECONDS = 60     # 自动交易轮询间隔
+    UNIVERSE_LIMIT = None  # 股票池：全主板扫描（沪60/深00），不再限制 60 只
+
+    # 信号源：sequoia_oneil=红杉×欧奈尔融合（主力专用，默认）；
+    # 其余保留可切换：learned_v2 多策略融合 / oneil 纯欧奈尔 / sequoia 纯红杉 / 经典策略
+    SIGNAL_MODES = {
+        "sequoia_oneil": "红杉×欧奈尔融合(主力)",
+        "learned_v2": "自研引擎v2(多策略融合)",
+        "learned": "自研学习引擎v1",
+        "oneil": "欧奈尔CANSLIM精简版",
+        "sequoia": "Sequoia-X选股(5.3k★)",
+        "turtle": "海龟交易法(vnpy)",
+        "supertrend": "SuperTrend",
+        "dual_thrust": "Dual Thrust",
+        "boll_reversion": "布林均值回归",
+    }
+    # v2 组合层参数：每轮最多新开仓数 / 拖曳止损倍数 / 时间止损天数 / 衰减止盈
+    V2_BUYS_PER_CYCLE = 2
+    V2_CHANDELIER = 3.0      # 钱德利退出：峰值收盘 − 3×ATR(22)
+    V2_TIME_STOP = 12        # 持有超12个交易日仍未盈利 → 时间止损
+    V2_DECAY_TP_BARS = 15    # 持有超15个交易日且浮盈≥4% → 衰减止盈落袋
+    V2_DECAY_TP_PCT = 0.04
+    # 欧奈尔八周持股规则：15日内涨满 20% → 40个交易日内不落袋
+    ONEIL_HOLD_TRIGGER = 0.20
+    # v2 市场宽度闸门（O'Neil M 要素）：宽度低于阈值时不开新仓（回测 +3.5%→+5.0%，回撤 -7.2%→-5.8%）
+    V2_BREADTH_GATE = 0.35
+
+    def __init__(self, state_file: str = "auto_paper_state.json"):
+        self.state_file = Path(state_file)
+        self.lock = threading.RLock()
+        self.engine_lock = EngineLock(str(self.state_file) + ".engine.lock")
+        self.state = self._load()
+        self.state.setdefault("signal_mode", "sequoia_oneil")
+
+    # ---------- 持久化 ----------
+
+    def _load(self) -> dict:
+        if self.state_file.exists():
+            try:
+                return json.loads(self.state_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return {
+            "cash": self.INIT_CASH, "positions": {}, "trades": [],
+            "equity_hist": [], "running": True, "last_run": None,
+            "last_error": None, "_sig_date": {}, "signal_mode": "sequoia_oneil",
+        }
+
+    def _save(self):
+        """原子写入：先写临时文件再替换，保证其他进程读取时不读到半截。"""
+        st = dict(self.state)
+        st["_sig_date"] = self.state.get("_sig_date", {})
+        tmp = self.state_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, self.state_file)
+
+    # ---------- 交易动作 ----------
+
+    def _trade(self, side: str, sym: str, qty: int, price: float, reason: str, pos: dict | None):
+        st = self.state
+        cash = float(st["cash"])
+        rec = {"symbol": sym, "side": side, "price": round(price, 2), "qty": qty,
+               "time": time.strftime("%Y-%m-%d %H:%M:%S"), "reason": reason}
+        if side == "BUY":
+            cost = qty * price * (1 + self.COST)
+            cash -= cost
+            rec["cost"] = round(cost, 2)
+        else:
+            revenue = qty * price * (1 - self.COST)
+            cash += revenue
+            rec["revenue"] = round(revenue, 2)
+            if pos:
+                pnl_pct = (price / pos["buy_price"] - 1) * 100
+                rec["pnl_pct"] = round(pnl_pct, 2)
+                rec["pnl"] = round((price - pos["buy_price"]) * qty, 2)
+        st["cash"] = round(cash, 2)
+        st["trades"] = ([rec] + st["trades"])[:1000]
+
+    def _buy(self, sym: str, price: float, sig: dict):
+        st = self.state
+        total = float(st["cash"]) + sum(p["qty"] * p.get("last_price", p["buy_price"]) for p in st["positions"].values())
+        budget = total * self.POS_RATIO
+        qty = int(budget / (price * (1 + self.COST))) // 100 * 100
+        if qty < 100 or price * qty * (1 + self.COST) > float(st["cash"]):
+            return
+        pos = {
+            "qty": qty,
+            "buy_price": round(price, 2),
+            "avg_cost": round(price, 2),
+            # 预期卖出价（止盈）与止损：默认 12%/-6%，信号可携带专属规则（如欧奈尔 20%/-7.5%）
+            "target_price": round(price * (1 + sig.get("take_pct", self.TAKE_PROFIT)), 2),
+            "stop_price": round(price * (1 - sig.get("stop_pct", self.STOP_LOSS)), 2),
+            "buy_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "buy_date": sig.get("date") or time.strftime("%Y-%m-%d"),
+            "buy_reason": sig["reason"],
+            "last_price": round(price, 2),
+        }
+        if sig.get("engine") == "v2":
+            # v2 专属：入场模式 / ATR / 持有天数与峰值（拖曳止损原料）
+            pos.update({"mode": sig.get("mode"), "atr": sig.get("atr", 0),
+                        "bars": 0, "last_date": sig.get("date"), "peak_close": round(price, 2)})
+        if sig.get("engine") == "oneil" or sig.get("engine") == "fusion":
+            # 欧奈尔/融合专属：持有天数（八周持股规则原料，hold_until: None未触发/0期满）
+            pos.update({"bars": 0, "last_date": sig.get("date"), "hold_until": None})
+        st["positions"][sym] = pos
+        self._trade("BUY", sym, qty, price, sig["reason"], None)
+
+    def _sell(self, sym: str, price: float, reason: str):
+        pos = self.state["positions"].pop(sym, None)
+        if pos:
+            self._trade("SELL", sym, pos["qty"], price, reason, pos)
+
+    # ---------- 自动交易主循环 ----------
+
+    @staticmethod
+    def _mainboard_scan(service, symbols: list[str], rs_min: float) -> tuple[dict, float, list[str]]:
+        """主板全市场扫描：全主板 RPS(120日)百分位 + 市场宽度 + 便宜预筛。
+
+        只读本地 CSV 缓存（_load_csv 带内存缓存），numpy 向量化快筛（~毫秒级/千只），
+        绝不触发实时拉取。预筛条件与欧奈尔闸门同参（距52周高≤15%、MA50趋势、RPS），
+        幸存者再交完整引擎精析。返回 (rs_map, breadth, 候选列表)。
+        """
+        closes, highs, lows, opens, vols, rets, above = {}, {}, {}, {}, {}, {}, []
+        for sym in symbols:
+            d = service._load_csv(sym)
+            if d is None or len(d) < 130:
+                continue
+            closes[sym] = d["close"].values.astype(float)
+            highs[sym] = d["high"].values.astype(float)
+            lows[sym] = d["low"].values.astype(float)
+            opens[sym] = d["open"].values.astype(float)
+            vols[sym] = d["volume"].values.astype(float)
+            arr = closes[sym]
+            rets[sym] = arr[-1] / arr[-121] - 1 if len(arr) > 121 else 0.0
+            if arr[-1] > arr[-20:].mean():
+                above.append(sym)
+        if not rets:
+            return {}, 1.0, []
+        import bisect
+        ordered = sorted(rets.values())
+        n = len(ordered)
+        rs_map = {s: (bisect.bisect_left(ordered, r) / n) * 100 for s, r in rets.items()}
+        breadth = len(above) / len(rets)
+
+        def _fast_filter(sym: str) -> bool:
+            """numpy 快筛：欧奈尔三关 + Sequoia 形态当天命中 + 枢轴边缘（引擎语义的快速超集）。"""
+            arr = closes[sym]
+            last = arr[-1]
+            max250 = arr[-250:].max() if len(arr) >= 250 else arr.max()
+            if last < 0.85 * max250:
+                return False
+            ma50, ma50_prev = arr[-50:].mean(), arr[-54:-49].mean()
+            if not (last > ma50 and ma50 >= ma50_prev * 0.998):
+                return False
+            if rs_map[sym] < rs_min:
+                return False
+            # 高点枢轴边缘（近10日高点 × 0.97）
+            d = highs[sym]
+            if last < d[-10:].max() * 0.97:
+                return False
+            # Sequoia 四形态之一当天命中（与 patterns() 同参数的 numpy 版）
+            o, h, l, v, c = opens[sym], highs[sym], lows[sym], vols[sym], arr
+            vol20 = v[-20:].mean()
+            turtle = (c[-1] > h[-21:-1].max() and c[-1] > o[-1] and c[-1] > c[-2]
+                      and v[-1] * c[-1] >= SequoiaSignalEngine.MIN_TURNOVER)
+            ma5_now, ma5_prev = c[-5:].mean(), c[-6:-1].mean()
+            ma20_now, ma20_prev = c[-20:].mean(), c[-21:-1].mean()
+            goldcross = (ma5_prev <= ma20_prev and ma5_now > ma20_now
+                         and v[-1] > 1.5 * vol20)
+            h40, l40 = h[-40:].max(), l[-40:].min()
+            h10, l10 = h[-10:].max(), l[-10:].min()
+            htf = (h40 / l40 > 1.6 and h10 / l10 < 1.15 and l10 >= 0.8 * h40
+                   and v[-1] < 0.6 * vol20)
+            shakeout = (c[-2] >= c[-3] * 1.095 and c[-1] < o[-1]
+                        and v[-1] >= 2 * v[-2] and l[-1] >= c[-2])
+            return turtle or goldcross or htf or shakeout
+
+        candidates = [s for s in closes if _fast_filter(s)]
+        return rs_map, breadth, candidates
+
+    def _signal_for(self, df, rs_pct: float = 50.0, breadth: float = 1.0) -> dict | None:
+        """按当前信号源计算某股最新信号。rs_pct/breadth 供欧奈尔 L/M 要素使用。"""
+        mode = self.state.get("signal_mode", "sequoia_oneil")
+        if mode == "learned":
+            return LearnedSignalEngine.analyze(df)
+        if mode == "learned_v2":
+            return LearnedSignalEngineV2.analyze(df)
+        if mode == "sequoia":
+            return SequoiaSignalEngine.analyze(df)
+        if mode == "oneil":
+            return OneilSignalEngine.analyze(df, rs_pct=rs_pct, breadth=breadth)
+        if mode == "sequoia_oneil":
+            return SequoiaOneilEngine.analyze(df, rs_pct=rs_pct, breadth=breadth)
+        # 经典策略：走 server 回测同一套信号生成，取最后一根K线的信号
+        sig = DataService._generate_signals(df, mode)
+        if sig is None or len(sig) == 0:
+            return None
+        last = int(sig.iloc[-1])
+        action = "buy" if last == 1 else ("sell" if last == -1 else "hold")
+        return {
+            "action": action,
+            "strength": 1.0 if action != "hold" else 0.0,
+            "price": float(df["close"].iloc[-1]),
+            "rsi": None,
+            "reason": f"{self.SIGNAL_MODES.get(mode, mode)} 信号" if action != "hold" else "",
+            "date": str(df.index[-1])[:10],
+        }
+
+    def cycle(self, service) -> dict:
+        """执行一轮：估值 → 止盈止损/信号卖出 → 信号买入。
+
+        多进程共存（后台服务 + 桌面窗口）时，只有拿到引擎锁的进程真正交易；
+        其余进程只读状态。每轮先从磁盘热加载，保证 UI 端的重置/暂停/切信号源即时生效。
+        """
+        with self.lock:
+            self.state = self._load()
+            if not self.engine_lock.acquired():
+                return self.status()   # 非持锁进程：只读最新状态
+            st = self.state
+            if not st.get("running", True):
+                return self.status()   # 已暂停：不交易只报状态
+            st["last_error"] = None
+            try:
+                sig_dates = st.setdefault("_sig_date", {})
+                mode = st.get("signal_mode", "sequoia_oneil")
+                is_v2 = mode == "learned_v2"
+                is_oneil = mode == "oneil"
+                is_fusion = mode == "sequoia_oneil"
+
+                rs_map, breadth = {}, 1.0
+                # 股票池统一为全主板（沪60/深00），不再截断前 60 只
+                mainboard = [s for s in service.scan() if s[:2] in ("60", "00")]
+                st["_universe_n"] = len(mainboard)
+                if is_fusion or is_oneil:
+                    # 主板全市场：RS百分位与宽度都用全主板口径；
+                    # 便宜预筛（新高/MA50/RPS）后只对幸存者做完整分析
+                    rs_map, breadth, symbols = self._mainboard_scan(
+                        service, mainboard,
+                        rs_min=SequoiaOneilEngine.RS_MIN if is_fusion else OneilSignalEngine.RS_MIN)
+                else:
+                    symbols = mainboard
+                    if is_v2:
+                        # v2 市场宽度闸门（借自 O'Neil M 要素）：全主板口径计算
+                        above = []
+                        for sym in symbols:
+                            d = service._load_csv(sym)
+                            if d is None or len(d) < 25:
+                                continue
+                            c = d["close"].astype(float)
+                            above.append(float(c.iloc[-1]) > float(c.rolling(20).mean().iloc[-1]))
+                        if above:
+                            breadth = sum(above) / len(above)
+
+                # 1) 估值 + 止盈止损/拖曳止损/时间退出/信号卖出
+                for sym, pos in list(st["positions"].items()):
+                    df = service._resolve_df(sym)
+                    sig = self._signal_for(df, rs_pct=rs_map.get(sym, 50.0), breadth=breadth)
+                    price = sig["price"] if sig else (pos.get("last_price") or pos["buy_price"])
+                    entry = pos["buy_price"]
+                    last = pos.get("last_price") or entry
+                    price_anomaly = False
+                    # 主板单日涨跌停 ±10%，这里用 ±20% 做数据异常保护，
+                    # 防止实时源返回错价导致“刚买就莫名止损/卖出”
+                    if last > 0 and abs(price / last - 1) > 0.20:
+                        st["last_error"] = f"{sym} 价格异常 {last:.2f}->{price:.2f}，跳过该持仓本轮"
+                        price = last
+                        price_anomaly = True
+                    pos["last_price"] = round(price, 2)
+                    pnl = price / entry - 1
+
+                    # A股 T+1：当日买入不可卖出（含止损/止盈/信号卖出）
+                    cur_date = (sig or {}).get("date")
+                    if not cur_date and df is not None and len(df) > 0:
+                        cur_date = str(df.index[-1])[:10]
+                    buy_date = pos.get("buy_date") or str(pos.get("buy_time", ""))[:10]
+                    if buy_date and cur_date and buy_date == cur_date:
+                        continue
+
+                    if is_v2 and "bars" in pos:
+                        # 新交易日 +1；峰值收盘更新；钱德利拖曳止损只升不降
+                        if sig and sig.get("date") and sig["date"] != pos.get("last_date"):
+                            pos["bars"] = pos.get("bars", 0) + 1
+                            pos["last_date"] = sig["date"]
+                        pos["peak_close"] = max(pos.get("peak_close", price), price)
+                        atr = pos.get("atr") or 0
+                        if atr > 0:
+                            chandelier = pos["peak_close"] - self.V2_CHANDELIER * atr
+                            if chandelier > pos["stop_price"]:
+                                pos["stop_price"] = round(chandelier, 2)
+                        # 时间衰减止盈：持仓久、有浮盈 → 降低目标落袋
+                        if pos.get("bars", 0) >= self.V2_DECAY_TP_BARS and pnl >= self.V2_DECAY_TP_PCT:
+                            pos["target_price"] = round(price, 2)
+
+                    if (is_oneil or is_fusion) and "bars" in pos:
+                        # 欧奈尔八周持股规则：15日内涨满20% → 40日内不落袋（利润奔跑）
+                        if sig and sig.get("date") and sig["date"] != pos.get("last_date"):
+                            pos["bars"] = pos.get("bars", 0) + 1
+                            pos["last_date"] = sig["date"]
+                        if (not pos.get("hold_until") and pos.get("bars", 0) <= 15
+                                and pnl >= self.ONEIL_HOLD_TRIGGER):
+                            pos["hold_until"] = pos["bars"] + 40
+                        if pos.get("hold_until") and pos["bars"] < pos["hold_until"]:
+                            pos["target_price"] = round(entry * 10, 2)  # 持股期内不设止盈
+                        elif pos.get("hold_until") and pos["bars"] >= pos["hold_until"]:
+                            pos["target_price"] = round(price, 2)      # 期满落袋
+                            pos["hold_until"] = 0
+
+                    if price >= pos["target_price"]:
+                        why = "八周持股期满落袋" if (is_oneil or is_fusion) and pos.get("hold_until") == 0 and "bars" in pos else \
+                              f"止盈：触及预期卖出价 {pos['target_price']}"
+                        self._sell(sym, price, why)
+                        continue
+                    if price <= pos["stop_price"]:
+                        why = "止损：跌破拖曳止损线" if is_v2 and pos.get("peak_close", 0) > entry * 1.05 else \
+                              f"止损：跌破 {pos['stop_price']}"
+                        self._sell(sym, price, why)
+                        continue
+                    if is_v2 and pos.get("bars", 0) >= self.V2_TIME_STOP and pnl < 0:
+                        self._sell(sym, price, f"时间止损：持有{pos['bars']}日未盈利")
+                        continue
+                    if sig and not price_anomaly and sig["action"] == "sell" and sig["date"] != sig_dates.get(sym):
+                        self._sell(sym, price, f"信号卖出：{sig['reason']}")
+
+                # 2) 信号买入（同一根日K只处理一次；v2 按评分排名+宽度闸门，每轮只买最优的 N 只）
+                if is_v2:
+                    candidates = []
+                    gate_ok = breadth >= self.V2_BREADTH_GATE
+                    for sym in symbols:
+                        if sym in st["positions"] or len(st["positions"]) + len(candidates) >= self.MAX_POSITIONS:
+                            continue
+                        df = service._load_csv(sym)
+                        sig = self._signal_for(df)
+                        if not sig or sig["date"] == sig_dates.get(sym):
+                            continue
+                        if sig["action"] == "buy":
+                            candidates.append((sym, sig))
+                    candidates.sort(key=lambda x: -(x[1].get("score") or 0))
+                    if not gate_ok:
+                        candidates = []  # 市场宽度不足（弱市）：本轮不开新仓，持仓退出规则照常
+                    for sym, sig in candidates[:self.V2_BUYS_PER_CYCLE]:
+                        sig_dates[sym] = sig["date"]
+                        self._buy(sym, sig["price"], sig)
+                        if len(st["positions"]) >= self.MAX_POSITIONS:
+                            break
+                else:
+                    # 弱市短路：宽度不达标时欧奈尔/融合引擎必然拒绝所有新仓，跳过精析
+                    breadth_ok = breadth >= OneilSignalEngine.BREADTH_MIN
+                    for sym in symbols:
+                        if len(st["positions"]) >= self.MAX_POSITIONS:
+                            break
+                        if sym in st["positions"]:
+                            continue
+                        if (is_fusion or is_oneil) and not breadth_ok:
+                            break  # 全市场禁止开仓，无需逐只分析
+                        # 全主板扫描统一用本地CSV日K（避免实时拉取几千只）
+                        df = service._load_csv(sym)
+                        sig = self._signal_for(df, rs_pct=rs_map.get(sym, 50.0), breadth=breadth)
+                        if not sig:
+                            continue
+                        if sig["date"] == sig_dates.get(sym):
+                            continue
+                        sig_dates[sym] = sig["date"]
+                        if sig["action"] == "buy":
+                            self._buy(sym, sig["price"], sig)
+
+                # 3) 资金曲线
+                status = self.status()
+                st["equity_hist"] = (st["equity_hist"] + [
+                    {"time": time.strftime("%Y-%m-%d %H:%M"), "total": status["total"]}
+                ])[-500:]
+                st["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                self._save()
+                return status
+            except Exception as e:
+                st["last_error"] = str(e)
+                self._save()
+                return self.status()
+
+    # ---------- 状态 ----------
+
+    def status(self, service=None) -> dict:
+        with self.lock:
+            if not self.engine_lock.acquired():
+                # 其他进程（通常是后台交易服务）在驱动交易，读磁盘最新状态
+                self.state = self._load()
+            st = self.state
+            cash = float(st["cash"])
+            positions = st["positions"]
+            mv = cash
+            pos_list = []
+            for sym, pos in positions.items():
+                price = pos.get("last_price", pos["buy_price"])
+                # 查看状态时顺带刷新持仓现价（最多 8 只，开销很小），让界面接近实时
+                if service is not None:
+                    try:
+                        df = service._resolve_df(sym)
+                        if df is not None and len(df) > 0:
+                            live = float(df["close"].astype(float).iloc[-1])
+                            last = pos.get("last_price") or pos["buy_price"]
+                            # 同样做 ±20% 异常保护，避免界面显示错价
+                            if last <= 0 or abs(live / last - 1) <= 0.20:
+                                price = live
+                    except Exception:
+                        pass
+                val = pos["qty"] * price
+                mv += val
+                pos_list.append({
+                    "symbol": sym,
+                    "qty": pos["qty"],
+                    "buy_price": pos["buy_price"],            # 买入价
+                    "avg_cost": pos["avg_cost"],
+                    "target_price": pos["target_price"],      # 预期卖出价（止盈）
+                    "stop_price": pos["stop_price"],          # 止损价
+                    "last_price": round(price, 2),
+                    "value": round(val, 2),
+                    "pnl": round((price - pos["buy_price"]) * pos["qty"], 2),
+                    "pnl_pct": round((price / pos["buy_price"] - 1) * 100, 2),
+                    "target_pct": self.TAKE_PROFIT * 100,
+                    "stop_pct": -self.STOP_LOSS * 100,
+                    "buy_time": pos.get("buy_time", ""),
+                    "buy_reason": pos.get("buy_reason", ""),
+                })
+            pos_list.sort(key=lambda p: -p["value"])
+            return {
+                "cash": round(cash, 2),
+                "market_value": round(mv - cash, 2),
+                "total": round(mv, 2),
+                "pnl": round(mv - self.INIT_CASH, 2),
+                "pnl_pct": round((mv / self.INIT_CASH - 1) * 100, 2),
+                "initial": self.INIT_CASH,
+                "positions": pos_list,
+                "position_count": len(pos_list),
+                "max_positions": self.MAX_POSITIONS,
+                "trades": st["trades"][:200],
+                "equity_hist": st["equity_hist"][-120:],
+                "running": st.get("running", True),
+                "last_run": st.get("last_run"),
+                "last_error": st.get("last_error"),
+                "cycle_seconds": self.CYCLE_SECONDS,
+                "signal_mode": st.get("signal_mode", "sequoia_oneil"),
+                "signal_mode_label": self.SIGNAL_MODES.get(st.get("signal_mode", "sequoia_oneil"), "sequoia_oneil"),
+                "signal_modes": [{"mode": k, "label": v} for k, v in self.SIGNAL_MODES.items()],
+                "engine_owner": self.engine_lock.acquired(),
+                "universe_size": st.get("_universe_n", 0),
+                "rules": {
+                    "pos_ratio": self.POS_RATIO, "take_profit": self.TAKE_PROFIT,
+                    "stop_loss": self.STOP_LOSS, "cost": self.COST,
+                },
+            }
+
+    def toggle(self, service=None) -> dict:
+        with self.lock:
+            self.state = self._load()
+            self.state["running"] = not self.state.get("running", True)
+            self._save()
+            return self.status(service)
+
+    def set_mode(self, mode: str, service=None) -> dict:
+        """切换信号源：learned / turtle / supertrend / dual_thrust / boll_reversion。"""
+        with self.lock:
+            if mode not in self.SIGNAL_MODES:
+                raise ValueError(f"未知信号源: {mode}，可选: {', '.join(self.SIGNAL_MODES)}")
+            self.state = self._load()
+            self.state["signal_mode"] = mode
+            self.state["_sig_date"] = {}  # 换信号源后允许立即重新评估
+            self._save()
+            return self.status(service)
+
+    def reset(self, service=None) -> dict:
+        with self.lock:
+            signal_mode = self._load().get("signal_mode", "learned_v2")
+            self.state = {"cash": self.INIT_CASH, "positions": {}, "trades": [],
+                          "equity_hist": [], "running": True, "last_run": None,
+                          "last_error": None, "_sig_date": {}, "signal_mode": signal_mode}
+            self._save()
+            return self.status(service)
+
+
+class EngineAutoPaperTrader:
+    """自动模拟盘：基于 vended a-share-skill PaperTradingEngine（SQLite 账本）。
+
+    - 账本 / 撮合 / T+1 / 涨跌停 / 手续费：PaperTradingEngine（MIT）
+    - 信号决策：复用 AutoPaperTrader 的信号引擎
+    - 元数据（running / signal_mode / last_run / positions_meta）存 auto_paper_meta.json
+    """
+
+    SIGNAL_MODES = AutoPaperTrader.SIGNAL_MODES
+    CYCLE_SECONDS = AutoPaperTrader.CYCLE_SECONDS
+    INIT_CASH = AutoPaperTrader.INIT_CASH
+    ACCOUNT_ID = "default"
+    MAX_MOVE_GUARD = 0.20   # 主板 ±10% 涨跌停，用 ±20% 挡错价
+    MAX_NEW_PER_CYCLE = 3   # 单轮最大新开仓数
+    LOSS_PAUSE_PCT = -0.15  # 总资产回撤超过 15% 时暂停新开仓
+    MAX_FORWARD_RECORDS = 300  # 远期验证池最大记录数
+    L0_BREADTH_MIN = 0.40   # L0 择时门控：全市场宽度（站上MA20占比）低于该值不开新仓
+    MAX_FAMILY_POSITIONS = 4  # 单因子族最大仓位数（单因子暴露控制）
+
+    def __init__(self):
+        self.meta_file = Path("auto_paper_meta.json")
+        self.db_file = Path("auto_paper_state.db")
+        self.engine_lock = EngineLock(str(self.db_file) + ".engine.lock")
+        self.state = self._default_meta()
+        self._signals = AutoPaperTrader()
+        self.engine = PaperTradingEngine(str(self.db_file), market_data=MarketDataProvider(SERVICE))
+        self._load_meta()
+        try:
+            self.engine.get_account(self.ACCOUNT_ID)
+        except Exception:
+            self.engine.create_account(self.ACCOUNT_ID, self.INIT_CASH)
+        try:
+            self._migrate_legacy()
+        except Exception as e:
+            # 迁移失败不能阻塞启动，保留报错供查看
+            self.state["last_error"] = f"旧数据迁移失败（不影响新账本）: {e}"
+
+    # ---------- 元数据 ----------
+
+    def _default_meta(self) -> dict:
+        return {
+            "cash": self.INIT_CASH,
+            "running": True,
+            "signal_mode": "sequoia_oneil",
+            "last_run": None,
+            "last_error": None,
+            "_sig_date": {},
+            "_universe_n": 0,
+            "positions_meta": {},
+            "forward_pool": [],
+            "l0_breadth": None,
+            "l0_gate": True,
+            "family_exposure": {},
+        }
+
+    def _load_meta(self):
+        default = self._default_meta()
+        try:
+            data = json.loads(self.meta_file.read_text(encoding="utf-8"))
+            default.update(data if isinstance(data, dict) else {})
+        except Exception:
+            pass
+        self.state = default
+
+    def _save_meta(self):
+        self.meta_file.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # ---------- 存量迁移 ----------
+
+    def _migrate_legacy(self):
+        legacy = Path("auto_paper_state.json")
+        if not legacy.exists():
+            return
+        with self.engine._connect() as conn:
+            n = conn.execute("SELECT COUNT(*) AS c FROM position_lots").fetchone()["c"]
+            if n:
+                return
+            try:
+                data = json.loads(legacy.read_text(encoding="utf-8"))
+            except Exception:
+                return
+        self.state["signal_mode"] = data.get("signal_mode", self.state["signal_mode"])
+        self.state["running"] = bool(data.get("running", True))
+        self.state["last_run"] = data.get("last_run")
+        self.state["_universe_n"] = data.get("_universe_n", 0)
+        cash = float(data.get("cash", self.INIT_CASH))
+        import uuid as _uuid
+
+        with self.engine._connect() as conn:
+            for sym, pos in (data.get("positions") or {}).items():
+                d = pos.get("buy_date") or str(pos.get("buy_time", ""))[:10] or "2000-01-01"
+                conn.execute(
+                    "INSERT INTO position_lots(lot_id, account_id, symbol, acquired_date, qty, remaining_qty, cost_price, created_at) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                    (_uuid.uuid4().hex[:16], self.ACCOUNT_ID, sym, d, int(pos["qty"]), int(pos["qty"]), float(pos["buy_price"]), pos.get("buy_time") or time.strftime("%Y-%m-%d %H:%M:%S")),
+                )
+                self.state["positions_meta"][sym] = {
+                    "buy_price": float(pos["buy_price"]),
+                    "buy_date": d,
+                    "buy_time": pos.get("buy_time", ""),
+                    "buy_reason": pos.get("buy_reason", ""),
+                    "target_price": pos.get("target_price"),
+                    "stop_price": pos.get("stop_price"),
+                }
+            for i, t in enumerate((data.get("trades") or [])[:1000]):
+                side = str(t.get("side", "buy")).lower()
+                price = float(t.get("price") or 0)
+                qty = int(t.get("qty") or 0)
+                amount = round(price * qty, 2)
+                tid = _uuid.uuid4().hex[:16]
+                conn.execute(
+                    "INSERT INTO trades(trade_id, order_id, account_id, symbol, side, price, qty, amount, commission, tax, created_at) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (tid, tid, self.ACCOUNT_ID, t.get("symbol", ""), side, price, qty, amount,
+                     round(float(t.get("cost") or amount * 0.0015), 2), 0.0, t.get("time", time.strftime("%Y-%m-%d %H:%M:%S"))),
+                )
+            conn.execute("UPDATE accounts SET initial_cash = ?, cash = ?, updated_at = ? WHERE account_id = ?",
+                         (self.INIT_CASH, cash, time.strftime("%Y-%m-%d %H:%M:%S"), self.ACCOUNT_ID))
+        self._save_meta()
+
+    # ---------- 状态 ----------
+
+    def _trade_note(self, order_id) -> str:
+        if not order_id:
+            return ""
+        try:
+            with self.engine._connect() as conn:
+                row = conn.execute("SELECT note FROM orders WHERE order_id = ?", (order_id,)).fetchone()
+            return row["note"] if row else ""
+        except Exception:
+            return ""
+
+    def _snapshots_hist(self) -> list:
+        try:
+            with self.engine._connect() as conn:
+                rows = conn.execute(
+                    "SELECT snapshot_time AS t, net_asset AS total FROM account_snapshots "
+                    "WHERE account_id = ? ORDER BY snapshot_time ASC",
+                    (self.ACCOUNT_ID,),
+                ).fetchall()
+            return [{"time": r["t"], "total": r["total"]} for r in rows][-120:]
+        except Exception:
+            return []
+
+    def status(self, service=None) -> dict:
+        self._load_meta()
+        try:
+            acc = self.engine.get_account(self.ACCOUNT_ID)
+        except Exception:
+            self.engine.create_account(self.ACCOUNT_ID, self.INIT_CASH)
+            acc = self.engine.get_account(self.ACCOUNT_ID)
+
+        pos_meta = self.state.get("positions_meta", {})
+        pos_list = []
+        for p in (acc.get("positions") or []):
+            m = pos_meta.get(p["symbol"], {})
+            buy_price = float(m.get("buy_price") or p.get("avg_cost") or 0)
+            last = float(p.get("last_price") or buy_price)
+            target = float(m.get("target_price") or (buy_price * (1 + self._signals.TAKE_PROFIT) if buy_price else 0))
+            stop = float(m.get("stop_price") or (buy_price * (1 - self._signals.STOP_LOSS) if buy_price else 0))
+            pnl = round((last - buy_price) * int(p["qty"]), 2) if buy_price else 0.0
+            pnl_pct = round((last / buy_price - 1) * 100, 2) if buy_price else 0.0
+            pos_list.append({
+                "symbol": p["symbol"], "qty": int(p["qty"]),
+                "buy_price": round(buy_price, 2), "avg_cost": round(buy_price, 4),
+                "target_price": round(target, 2), "stop_price": round(stop, 2),
+                "last_price": round(last, 2), "value": round(last * int(p["qty"]), 2),
+                "pnl": pnl, "pnl_pct": pnl_pct,
+                "target_pct": self._signals.TAKE_PROFIT * 100,
+                "stop_pct": -self._signals.STOP_LOSS * 100,
+                "buy_time": m.get("buy_time", ""), "buy_reason": m.get("buy_reason", ""),
+            })
+        pos_list.sort(key=lambda x: -x["value"])
+
+        trade_list = []
+        for t in (self.engine.list_trades(self.ACCOUNT_ID) or []):
+            trade_list.append({
+                "symbol": t["symbol"], "side": str(t["side"]).upper(),
+                "price": t["price"], "qty": t["qty"],
+                "time": t["created_at"], "reason": self._trade_note(t.get("order_id")),
+                "commission": t.get("commission"), "tax": t.get("tax"),
+                "pnl_pct": None, "pnl": None,
+            })
+
+        total = acc.get("net_asset") or 0.0
+        pnl = total - self.INIT_CASH
+        pnl_pct = round((total / self.INIT_CASH - 1) * 100, 2) if self.INIT_CASH else 0.0
+        st = self.state
+        return {
+            "cash": round(acc.get("cash") or 0.0, 2),
+            "market_value": round(acc.get("market_value") or 0.0, 2),
+            "total": round(total, 2),
+            "pnl": round(pnl, 2),
+            "pnl_pct": pnl_pct,
+            "initial": self.INIT_CASH,
+            "positions": pos_list,
+            "position_count": len(pos_list),
+            "max_positions": self._signals.MAX_POSITIONS,
+            "trades": trade_list[:200],
+            "equity_hist": self._snapshots_hist(),
+            "running": bool(st.get("running", True)),
+            "last_run": st.get("last_run"),
+            "last_error": st.get("last_error"),
+            "cycle_seconds": self.CYCLE_SECONDS,
+            "signal_mode": st.get("signal_mode", "sequoia_oneil"),
+            "signal_mode_label": self.SIGNAL_MODES.get(st.get("signal_mode", "sequoia_oneil"), "sequoia_oneil"),
+            "signal_modes": [{"mode": k, "label": v} for k, v in self.SIGNAL_MODES.items()],
+            "engine_owner": True,
+            "universe_size": st.get("_universe_n", 0),
+            "rules": {
+                "pos_ratio": self._signals.POS_RATIO, "take_profit": self._signals.TAKE_PROFIT,
+                "stop_loss": self._signals.STOP_LOSS, "cost": self._signals.COST,
+            },
+            "forward_pool": (st.get("forward_pool") or [])[-50:],
+            "risk": {
+                "max_positions": self._signals.MAX_POSITIONS,
+                "max_new_per_cycle": self.MAX_NEW_PER_CYCLE,
+                "loss_pause_pct": self.LOSS_PAUSE_PCT * 100,
+                "current_pnl_pct": round(((acc.get("net_asset") or 0) / self.INIT_CASH - 1) * 100, 2) if self.INIT_CASH else 0.0,
+                "l0_breadth": st.get("l0_breadth"),
+                "l0_gate": st.get("l0_gate", True),
+                "l0_breadth_min": self.L0_BREADTH_MIN,
+                "max_family_positions": self.MAX_FAMILY_POSITIONS,
+                "family_exposure": st.get("family_exposure", {}),
+            },
+        }
+
+    def toggle(self, service=None) -> dict:
+        self._load_meta()
+        self.state["running"] = not self.state.get("running", True)
+        self._save_meta()
+        return self.status(service)
+
+    def set_mode(self, mode: str, service=None) -> dict:
+        if mode not in self.SIGNAL_MODES:
+            raise ValueError(f"未知信号源: {mode}，可选: {', '.join(self.SIGNAL_MODES)}")
+        self._load_meta()
+        self.state["signal_mode"] = mode
+        self.state["_sig_date"] = {}
+        self._save_meta()
+        return self.status(service)
+
+    def reset(self, service=None) -> dict:
+        self._load_meta()
+        mode = self.state.get("signal_mode", "sequoia_oneil")
+        self.engine.reset_account(self.ACCOUNT_ID, self.INIT_CASH)
+        self.state = self._default_meta()
+        self.state["signal_mode"] = mode
+        self._save_meta()
+        return self.status(service)
+
+    # ---------- 信号 ----------
+
+    def _sig(self, df, rs_pct=50.0, breadth=1.0):
+        self._signals.state["signal_mode"] = self.state.get("signal_mode", "sequoia_oneil")
+        return self._signals._signal_for(df, rs_pct=rs_pct, breadth=breadth)
+
+    # ---------- 风控门禁 + 远期验证 ----------
+
+    def _risk_gate(self, acc) -> tuple:
+        """硬性风控：总资产回撤超阈值 → 暂停新开仓。返回 (是否通过, 原因)。"""
+        total = float(acc.get("net_asset") or 0)
+        pnl_pct = (total / self.INIT_CASH - 1) * 100 if self.INIT_CASH else 0.0
+        if pnl_pct <= self.LOSS_PAUSE_PCT * 100:
+            return False, f"总资产回撤 {pnl_pct:.1f}%，超过暂停新开仓阈值"
+        return True, ""
+
+    @staticmethod
+    def _factor_family(reason: str) -> str:
+        """按买入理由把持仓归入信号族（用于单因子暴露控制）。"""
+        r = reason or ""
+        if any(k in r for k in ("海龟", "突破", "新高", "攻关", "枢轴")):
+            return "breakout"      # 突破/新高
+        if any(k in r for k in ("MA5", "MA10", "均线", "金叉", "多头", "趋势")):
+            return "trend"         # 均线趋势
+        if any(k in r for k in ("RSI", "超卖", "反转", "回撤", "反弹", "低波", "lowvol")):
+            return "reversal"      # 反转/低波
+        if any(k in r for k in ("涨停", "洗盘", "连板")):
+            return "limitup"       # 涨停/情绪
+        if any(k in r for k in ("量", "缩量", "放量", "OBV")):
+            return "volume"        # 量价
+        return "other"
+
+    def _family_counts(self) -> dict:
+        from collections import Counter
+        cnt = Counter()
+        held = {p["symbol"] for p in self.engine.get_positions(self.ACCOUNT_ID)}
+        for sym in held:
+            meta = self.state["positions_meta"].get(sym, {})
+            cnt[self._factor_family(meta.get("buy_reason"))] += 1
+        return dict(cnt)
+
+    def _record_forward(self, sym, meta, entry, price, cur_date):
+        """把一笔已平仓交易写入远期验证池（五池：V1/5/20/60 由 hold_days 归纳）。"""
+        buy_date = meta.get("buy_date") or str(meta.get("buy_time", ""))[:10]
+        hold_days = None
+        if buy_date and cur_date:
+            try:
+                hold_days = max(0, (pd.Timestamp(cur_date) - pd.Timestamp(buy_date)).days)
+            except Exception:
+                hold_days = None
+        rec = {
+            "symbol": sym,
+            "entry_date": buy_date,
+            "entry_price": round(float(entry), 2),
+            "exit_date": cur_date,
+            "exit_price": round(float(price), 2),
+            "pnl_pct": round((float(price) / float(entry) - 1) * 100, 2) if entry else 0.0,
+            "hold_days": hold_days,
+            "horizons": [h for h in (1, 5, 20, 60) if hold_days is not None and hold_days >= h],
+        }
+        pool = self.state.setdefault("forward_pool", [])
+        pool.append(rec)
+        self.state["forward_pool"] = pool[-self.MAX_FORWARD_RECORDS:]
+
+    # ---------- 交易周期 ----------
+
+    def buy_from_decision(self, service, rec) -> dict:
+        """决策审批买入：把 Pitch 批准的 buy 合入统一模拟盘（同一账本，含 T+1/手续费/风控）。"""
+        self._load_meta()
+        if service is None:
+            return self.status(service)
+        sym = str(rec.get("code") or "").strip()
+        if not sym:
+            return {"ok": False, "error": "缺少 code"}
+        if not self.state.get("running", True):
+            return self.status(service)
+        if not self.engine_lock.acquired():
+            return self.status(service)
+        held = {p["symbol"] for p in self.engine.get_positions(self.ACCOUNT_ID)}
+        if sym in held:
+            return self.status(service)
+        if len(held) >= self._signals.MAX_POSITIONS:
+            self.state["last_error"] = f"决策买入 {sym} 失败：持仓已达上限 {self._signals.MAX_POSITIONS}"
+            self._save_meta()
+            return self.status(service)
+        # ★L0 择时门控：与策略买入一致，宽度低于阈值时决策买入也暂缓
+        if not self.state.get("l0_gate", True):
+            b = self.state.get("l0_breadth", 0.0)
+            self.state["last_error"] = (f"L0 择时门控：市场宽度 {b:.1%} < "
+                                        f"{self.L0_BREADTH_MIN:.0%}，决策买入暂缓")
+            self._save_meta()
+            return self.status(service)
+        try:
+            kline = service.get_kline(sym, limit=1)
+            price = float(kline[-1]["close"]) if kline else None
+        except Exception:
+            price = rec.get("price") or None
+        if not price or price <= 0:
+            self.state["last_error"] = f"决策买入 {sym} 失败：无有效价格"
+            self._save_meta()
+            return self.status(service)
+        acc = self.engine.get_account(self.ACCOUNT_ID)
+        cash = float(acc.get("cash") or 0) - float(acc.get("frozen_cash") or 0)
+        total = float(acc.get("net_asset") or 0)
+        budget = total * self._signals.POS_RATIO
+        cost_per = price * (1 + self._signals.COST)
+        qty = int(budget / cost_per) // 100 * 100
+        if qty * cost_per > cash + 1e-6:
+            qty = int(cash / cost_per) // 100 * 100
+        if qty < 100:
+            self.state["last_error"] = f"决策买入 {sym} 失败：现金不足或金额过小"
+            self._save_meta()
+            return self.status(service)
+        reason = f"决策买入：{rec.get('name') or rec.get('reason') or 'Pitch 审批'}"
+        try:
+            order = self.engine.trade_at_quote(self.ACCOUNT_ID, sym, "buy", qty, reason)
+            fill = float(order.get("avg_fill_price") or price)
+            self.state["positions_meta"][sym] = {
+                "buy_price": fill,
+                "buy_date": time.strftime("%Y-%m-%d"),
+                "buy_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "buy_reason": reason,
+                "target_price": round(fill * (1 + self._signals.TAKE_PROFIT), 2),
+                "stop_price": round(fill * (1 - self._signals.STOP_LOSS), 2),
+            }
+            self.state["family_exposure"] = self._family_counts()
+            self.engine.snapshot_accounts()
+            self.state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            self._save_meta()
+        except Exception as e:
+            self.state["last_error"] = f"决策买入 {sym} 失败: {e}"
+            self._save_meta()
+        return self.status(service)
+
+    def cycle(self, service) -> dict:
+        if service is None:
+            return self.status(service)
+        self._load_meta()
+        if not self.state.get("running", True):
+            return self.status(service)
+        # 跨进程互斥：只有拿到引擎锁的进程真正交易，其余只读（与旧版一致）
+        if not self.engine_lock.acquired():
+            return self.status(service)
+        self.state["last_error"] = None
+        mode = self.state.get("signal_mode", "sequoia_oneil")
+        self._signals.state["signal_mode"] = mode
+        is_fusion = mode == "sequoia_oneil"
+        is_oneil = mode == "oneil"
+        is_v2 = mode == "learned_v2"
+
+        # 股票池：全主板
+        mainboard = [s for s in service.scan() if s[:2] in ("60", "00")]
+        self.state["_universe_n"] = len(mainboard)
+        rs_map, breadth = {}, 1.0
+        if is_fusion or is_oneil:
+            rs_map, breadth, symbols = self._signals._mainboard_scan(
+                service, mainboard,
+                rs_min=SequoiaOneilEngine.RS_MIN if is_fusion else OneilSignalEngine.RS_MIN)
+        else:
+            symbols = mainboard
+            # 全市场宽度（站上 MA20 占比）——用于 L0 择时门控，所有信号源统一计算
+            above = []
+            for sym in symbols:
+                d = service._load_csv(sym)
+                if d is None or len(d) < 25:
+                    continue
+                c = d["close"].astype(float)
+                above.append(float(c.iloc[-1]) > float(c.rolling(20).mean().iloc[-1]))
+            if above:
+                breadth = sum(above) / len(above)
+
+        # L0 择时门控：宽度低于阈值时，本轮不开新仓（持仓卖出照常）
+        self.state["l0_breadth"] = round(breadth, 4)
+        self.state["l0_gate"] = bool(breadth >= self.L0_BREADTH_MIN)
+
+        def held_set():
+            return {p["symbol"] for p in self.engine.get_positions(self.ACCOUNT_ID)}
+
+        # 1) 卖出：止盈/止损/信号卖出（引擎负责 T+1 与涨跌停）
+        for sym, pos in list({p["symbol"]: p for p in self.engine.get_positions(self.ACCOUNT_ID)}.items()):
+            meta = self.state["positions_meta"].get(sym, {})
+            df = service._resolve_df(sym)
+            sig = self._sig(df, rs_pct=rs_map.get(sym, 50.0), breadth=breadth)
+            price = float(sig["price"]) if sig else float(pos.get("last_price") or 0)
+            entry = float(meta.get("buy_price") or pos.get("avg_cost") or 0)
+            last = float(meta.get("last", pos.get("last_price"))) or entry
+            anomaly = last > 0 and abs(price / last - 1) > self.MAX_MOVE_GUARD
+            if anomaly:
+                self.state["last_error"] = f"{sym} 价格异常 {last:.2f}->{price:.2f}，跳过该持仓本轮"
+                price = last
+            meta["last"] = price
+            cur_date = (sig or {}).get("date")
+            if not cur_date and df is not None and len(df) > 0:
+                cur_date = str(df.index[-1])[:10]
+            buy_date = meta.get("buy_date") or str(meta.get("buy_time", ""))[:10]
+            if anomaly or (buy_date and cur_date and buy_date == cur_date):
+                continue
+            target = float(meta.get("target_price") or (entry * (1 + self._signals.TAKE_PROFIT) if entry else 0))
+            stop = float(meta.get("stop_price") or (entry * (1 - self._signals.STOP_LOSS) if entry else 0))
+            reason = ""
+            if target and price >= target:
+                reason = f"止盈：触及 {target}"
+            elif stop and price <= stop:
+                reason = f"止损：跌破 {stop}"
+            elif sig and sig.get("action") == "sell" and sig.get("date") != self.state["_sig_date"].get(sym):
+                reason = f"信号卖出：{sig.get('reason', '')}"
+            if not reason:
+                continue
+            sellable = int(pos.get("sellable_qty") or 0)
+            qty = min(int(pos["qty"]), sellable)
+            if qty <= 0:
+                continue
+            try:
+                order = self.engine.trade_at_quote(self.ACCOUNT_ID, sym, "sell", qty, reason)
+                fill = float(order.get("avg_fill_price") or price)
+                self._record_forward(sym, meta, entry, fill, cur_date)
+            except Exception as e:
+                if "sellable" not in str(e).lower():
+                    self.state["last_error"] = f"卖出 {sym} 失败: {e}"
+
+        # 2) 买入：信号买入（含 L0 择时门控 + 单因子暴露控制 + 单轮新开仓上限）
+        acc0 = self.engine.get_account(self.ACCOUNT_ID)
+        risk_ok, risk_reason = self._risk_gate(acc0)
+        if risk_ok and not self.state.get("l0_gate", True):
+            risk_ok = False
+            l0_b = self.state.get("l0_breadth", 0.0)
+            risk_reason = f"L0 择时门控：市场宽度 {l0_b:.1%} < {self.L0_BREADTH_MIN:.0%}，暂缓新开仓"
+        new_buys = 0
+        for sym in symbols:
+            if not risk_ok:
+                self.state["last_error"] = risk_reason
+                break
+            if new_buys >= self.MAX_NEW_PER_CYCLE:
+                break
+            held = held_set()
+            if sym in held:
+                continue
+            if len(held) >= self._signals.MAX_POSITIONS:
+                break
+            df = service._load_csv(sym)
+            sig = self._sig(df, rs_pct=rs_map.get(sym, 50.0), breadth=breadth)
+            if not sig or sig.get("action") != "buy" or sig.get("date") == self.state["_sig_date"].get(sym):
+                continue
+            # 单因子暴露控制：同一信号族持仓数达到上限则跳过该买入
+            family = self._factor_family(sig.get("reason", ""))
+            if self._family_counts().get(family, 0) >= self.MAX_FAMILY_POSITIONS:
+                continue
+            acc = self.engine.get_account(self.ACCOUNT_ID)
+            cash = float(acc.get("cash") or 0) - float(acc.get("frozen_cash") or 0)
+            total = float(acc.get("net_asset") or 0)
+            budget = total * self._signals.POS_RATIO
+            price = float(sig.get("price") or 0)
+            cost_per = price * (1 + self._signals.COST)
+            if price <= 0 or cost_per <= 0:
+                continue
+            qty = int(budget / cost_per) // 100 * 100
+            if qty < 100 or qty * cost_per > cash + 1e-6:
+                continue
+            try:
+                order = self.engine.trade_at_quote(self.ACCOUNT_ID, sym, "buy", qty, sig.get("reason", ""))
+                fill_price = float(order.get("avg_fill_price") or price)
+                buy_date = sig.get("date") or time.strftime("%Y-%m-%d")
+                self.state["positions_meta"][sym] = {
+                    "buy_price": fill_price,
+                    "buy_date": buy_date,
+                    "buy_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "buy_reason": sig.get("reason", ""),
+                    "target_price": round(fill_price * (1 + sig.get("take_pct", self._signals.TAKE_PROFIT)), 2),
+                    "stop_price": round(fill_price * (1 - sig.get("stop_pct", self._signals.STOP_LOSS)), 2),
+                }
+                self.state["_sig_date"][sym] = sig.get("date")
+                new_buys += 1
+            except Exception as e:
+                err = str(e)
+                if "limit" not in err.lower():
+                    self.state["last_error"] = f"买入 {sym} 失败: {e}"
+
+        # 清除已平仓的 meta，并刷新单因子暴露统计
+        held_now = held_set()
+        for sym in list(self.state["positions_meta"]):
+            if sym not in held_now:
+                self.state["positions_meta"].pop(sym, None)
+        self.state["family_exposure"] = self._family_counts()
+
+        # 净值快照 + 保存
+        self.engine.snapshot_accounts()
+        self.state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        self._save_meta()
+        return self.status(service)
+
+
 # ============================================================================
 # HTTP 服务
 # ============================================================================
 
 SERVICE: DataService = None
 STATIC_DIR: Path = None
-DSA_READER: DsaSignalReader = None
 AI_PAPER: AiPaperTrader = None
+AUTO_PAPER: AutoPaperTrader = None
 
 
 class APIHandler(SimpleHTTPRequestHandler):
@@ -935,17 +2616,47 @@ class APIHandler(SimpleHTTPRequestHandler):
     def log_message(self, format, *args):  # 静默访问日志
         pass
 
+    # ---------- 复用 deepseek-harness-quant（门户/决策/控制台，同端口） ----------
+
+    def _base_dir(self) -> Path:
+        return qtrade_base_bridge.base_dir()
+
+    def _serve_base_file(self, fspath: Path):
+        return qtrade_base_bridge.serve_base_file(self, fspath)
+
+    def _base_live(self, sub: str):
+        return qtrade_base_bridge.live(self, sub)
+
+    def _try_base_deck(self, path: str) -> bool:
+        return qtrade_base_bridge.try_serve(self, path)
+
+    def _decide(self, rec):
+        return qtrade_base_bridge.decide(self, rec, auto_paper=AUTO_PAPER, service=SERVICE)
+
+    def _decide_bg_sync(self, base):
+        return qtrade_base_bridge.decide_bg_sync(base)
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        if qtrade_base_bridge.QtradeDeckHandler(self).handle_post(path):
+            return
+        self._json({"error": "unsupported POST method"}, status=404)
+
     # ---------- 路由 ----------
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path, query = parsed.path, urllib.parse.parse_qs(parsed.query)
+        # 复用 deepseek-harness-quant 门户/决策/控制台（同端口）
+        if self._try_base_deck(path):
+            return
         router = {
             "/api/health": self._health,
             "/api/symbols": self._symbols,
             "/api/backtest": self._backtest,
-            "/api/ai/views": self._ai_views,
             "/api/ai/paper": self._ai_paper,
+            "/api/auto/paper": self._auto_paper,
             "/api/training/next": self._training_next,
         }
         handler = router.get(path)
@@ -953,17 +2664,13 @@ class APIHandler(SimpleHTTPRequestHandler):
         if handler:
             return handler(query)
 
-        for prefix in ("/api/kline/", "/api/info/", "/api/indicators/"):
+        if path == "/api/factors/list":
+            return self._json(factors_mod.factor_inventory())
+
+        for prefix in ("/api/kline/", "/api/info/", "/api/indicators/", "/api/factors/"):
             if path.startswith(prefix):
                 symbol = path[len(prefix):]
                 return self._symbol_query(prefix.strip("/").split("/")[1], symbol, query)
-
-        if path.startswith("/api/ai/views/"):
-            return self._ai_views(query, symbol=path[len("/api/ai/views/"):])
-
-        if path.startswith("/api/dsa/analyze/"):
-            symbol = path[len("/api/dsa/analyze/"):]
-            return self._dsa_analyze(symbol, query)
 
         if path == "/" or path == "":
             self.path = "/index.html"
@@ -999,6 +2706,8 @@ class APIHandler(SimpleHTTPRequestHandler):
             data = SERVICE.get_info(symbol)
         elif kind == "indicators":
             data = SERVICE.get_indicators(symbol)
+        elif kind == "factors":
+            data = SERVICE.get_factors(symbol)
         else:
             return self._json({"error": "unknown kind"}, status=400)
 
@@ -1020,86 +2729,15 @@ class APIHandler(SimpleHTTPRequestHandler):
         result = SERVICE.run_backtest(symbol, strategy, capital, commission, stop_loss, take_profit)
         self._json(result)
 
-    # ---------- DSA 集成 ----------
-
-    def _dsa_analyze(self, symbol: str, query):
-        """调用 DSA StockTrendAnalyzer 分析单只股票。"""
-        if not _DSA_AVAILABLE:
-            return self._json({"error": "DSA 分析引擎不可用", "dsa_available": False}, status=500)
-
-        # 获取 K 线数据
-        kline_list = SERVICE.get_kline(symbol, limit=120)
-        if not kline_list:
-            return self._json({"error": f"未找到 {symbol} 的K线数据"}, status=404)
-
-        # 转为 DataFrame（保持小写列名，DSA 引擎需要）
-        df = pd.DataFrame(kline_list)
-        df["date"] = pd.to_datetime(df["time"], unit="s")
-        df.set_index("date", inplace=True)
-        df = df[["open", "high", "low", "close", "volume"]]
-
-        try:
-            analyzer = StockTrendAnalyzer()
-            result = analyzer.analyze(df, symbol)
-        except Exception as e:
-            return self._json({"error": f"DSA 分析失败: {e}"}, status=500)
-
-        # 转为可 JSON 序列化的 dict
-        self._json({
-            "dsa_available": True,
-            "symbol": symbol,
-            "trend_status": result.trend_status.name if hasattr(result.trend_status, 'name') else str(result.trend_status),
-            "trend_strength": result.trend_strength,
-            "ma_alignment": result.ma_alignment,
-            "ma5": result.ma5, "ma10": result.ma10, "ma20": result.ma20, "ma60": result.ma60,
-            "current_price": result.current_price,
-            "bias_ma5": result.bias_ma5, "bias_ma10": result.bias_ma10, "bias_ma20": result.bias_ma20,
-            "volume_status": result.volume_status.name if hasattr(result.volume_status, 'name') else str(result.volume_status),
-            "volume_ratio_5d": result.volume_ratio_5d,
-            "volume_trend": result.volume_trend,
-            "macd_dif": result.macd_dif, "macd_dea": result.macd_dea, "macd_bar": result.macd_bar,
-            "macd_status": result.macd_status.name if hasattr(result.macd_status, 'name') else str(result.macd_status),
-            "macd_signal": result.macd_signal,
-            "rsi_6": result.rsi_6, "rsi_12": result.rsi_12, "rsi_24": result.rsi_24,
-            "rsi_status": result.rsi_status.name if hasattr(result.rsi_status, 'name') else str(result.rsi_status),
-            "rsi_signal": result.rsi_signal,
-            "buy_signal": result.buy_signal.name if hasattr(result.buy_signal, 'name') else str(result.buy_signal),
-            "signal_score": result.signal_score,
-            "signal_reasons": result.signal_reasons,
-            "risk_factors": result.risk_factors,
-            "support_levels": result.support_levels,
-            "resistance_levels": result.resistance_levels,
-        })
-
-    def _ai_views(self, query, symbol: str | None = None):
-        """返回 DSA 的 AI 决策信号。"""
-        if DSA_READER is None:
-            return self._json({"error": "DSA 集成未初始化"}, status=500)
-        if not DSA_READER.available():
-            return self._json({
-                "available": False,
-                "error": "未找到 DSA 数据库（先运行 DSA 桌面版并分析几只股票）",
-                "views": [],
-            })
-        limit = int(query.get("limit", ["20"])[0])
-        views = DSA_READER.get_views(symbol=symbol, limit=limit)
-        self._json({
-            "available": True,
-            "db": str(DSA_READER.db_path),
-            "count": len(views),
-            "views": views,
-        })
-
     def _ai_paper(self, query):
         """AI 信号模拟盘：status=查看, sync=按信号调仓。"""
         if AI_PAPER is None:
             return self._json({"error": "AI 模拟盘未初始化"}, status=500)
         action = query.get("action", ["status"])[0]
 
-        if action == "sync" and DSA_READER is not None and DSA_READER.available():
-            signals = DSA_READER.get_views(limit=50)
-            price_fn = lambda sym: self._latest_close(sym)
-            status = AI_PAPER.sync(signals, price_fn)
+        if action == "sync":
+            # DSA 信号源已移除，AI 模拟盘保留查看/估值，不再同步外部 AI 信号
+            return self._json({"error": "DSA 信号已移除，AI 模拟盘暂不支持同步"}, status=400)
         elif action == "mark":
             price_fn = lambda sym: self._latest_close(sym)
             status = AI_PAPER.mark_prices(price_fn)
@@ -1111,6 +2749,29 @@ class APIHandler(SimpleHTTPRequestHandler):
         """取某股最新收盘价（实时优先，回退 CSV）。"""
         kline = SERVICE.get_kline(symbol, limit=3)
         return kline[-1]["close"] if kline else None
+
+    # ---------- 自动模拟盘 ----------
+
+    def _auto_paper(self, query):
+        """自动模拟盘：status=查看, run=立即跑一轮, toggle=启动/暂停, reset=清仓重置, setmode=切信号源。"""
+        if AUTO_PAPER is None:
+            return self._json({"error": "自动模拟盘未初始化"}, status=500)
+        action = query.get("action", ["status"])[0]
+
+        if action == "run":
+            status = AUTO_PAPER.cycle(SERVICE)
+        elif action == "toggle":
+            status = AUTO_PAPER.toggle(SERVICE)
+        elif action == "reset":
+            status = AUTO_PAPER.reset(SERVICE)
+        elif action == "setmode":
+            try:
+                status = AUTO_PAPER.set_mode(query.get("mode", ["sequoia_oneil"])[0], SERVICE)
+            except ValueError as e:
+                return self._json({"error": str(e)}, status=400)
+        else:
+            status = AUTO_PAPER.status(SERVICE)
+        self._json(status)
 
     # ---------- K线训练营 ----------
 
@@ -1247,31 +2908,74 @@ def port_in_use(port: int) -> bool:
             return False
 
 
+def _ensure_base_harness():
+    """Qtrade 启动时自动把底座 HARNESS(3081，带量化桥接插件)带上。已运行则跳过。"""
+    qtrade_base_bridge.ensure_harness()
+
+
+def _maybe_auto_update():
+    """Qtrade 启动时自动增量更新（一天最多一次；全量回填完成后才启用）。"""
+    qtrade_base_bridge.maybe_auto_update()
+
+
 def main():
     global SERVICE, STATIC_DIR
+
+    # ---- 修复 Windows GBK 编码问题（保留 write_through 避免缓冲丢失输出） ----
+    # pythonw.exe 下无控制台，sys.stdout 为 None，需判空。
+    # 只在真正运行服务时执行，避免 import 时破坏 pytest 输出捕获。
+    if sys.platform == "win32":
+        if sys.stdout is not None:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", write_through=True)
+        if sys.stderr is not None:
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", write_through=True)
 
     parser = argparse.ArgumentParser(description="QTrade Desktop Trading Terminal")
     parser.add_argument("--data-dir", default=None, help="股票数据 CSV 缓存目录（回退用）")
     parser.add_argument("--port", type=int, default=8765, help="HTTP 服务端口")
     parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
     parser.add_argument("--csv-only", action="store_true", help="只用本地 CSV，不连实时接口")
+    parser.add_argument("--single-instance", action="store_true",
+                        help="后台服务模式：端口被占用时直接退出（不换端口），防止重复进程")
     args = parser.parse_args()
 
     data_dir = find_data_dir(args.data_dir)
     live = not args.csv_only
 
+    # 后台服务模式：已有实例在跑就直接退出，防止重复进程
+    if args.single_instance and port_in_use(args.port):
+        print(f"ℹ️  端口 {args.port} 已有 QTrade 服务在运行，本实例退出（--single-instance）")
+        return
+
     SERVICE = DataService(data_dir, live=live)
     symbols = SERVICE.scan()
 
-    # DSA 集成初始化
-    global DSA_READER, AI_PAPER
-    DSA_READER = DsaSignalReader()
-    AI_PAPER = AiPaperTrader()
-    if DSA_READER.available():
-        print(f"🤖 DSA 集成: 已连接信号库 ({DSA_READER.db_path})")
-    else:
-        print("🤖 DSA 集成: 未找到 DSA 数据库（AI 观点功能暂不可用）")
+    # 自动带上底座 HARNESS(3081)
+    _ensure_base_harness()
 
+    # 自动增量更新（全量回填完成后才启动，一天最多一次）
+    _maybe_auto_update()
+
+    # 初始化
+    global AI_PAPER, AUTO_PAPER
+    AI_PAPER = AiPaperTrader()
+    AUTO_PAPER = EngineAutoPaperTrader()
+
+    # 自动模拟盘：后台线程定时按独立信号引擎自动买卖
+    def _auto_paper_loop():
+        time.sleep(3)  # 等待服务就绪
+        while True:
+            try:
+                AUTO_PAPER.cycle(SERVICE)
+            except Exception as e:
+                AUTO_PAPER.state["last_error"] = str(e)
+            time.sleep(AutoPaperTrader.CYCLE_SECONDS)
+
+    threading.Thread(target=_auto_paper_loop, daemon=True, name="auto-paper").start()
+    st = AUTO_PAPER.status()
+    print(f"⚙️  自动模拟盘: {'运行中' if st['running'] else '已暂停'}"
+          f" | 总资产 ¥{st['total']:,.0f} | 持仓 {st['position_count']}/{st['max_positions']}"
+          f" | 轮询 {AutoPaperTrader.CYCLE_SECONDS}s")
     # 实时模式探测
     if live:
         if TencentLiveSource.available():
@@ -1292,7 +2996,7 @@ def main():
             port += 1
             continue
         try:
-            server = HTTPServer(("127.0.0.1", port), APIHandler)
+            server = ThreadingHTTPServer(("127.0.0.1", port), APIHandler)
             break
         except OSError:
             port += 1

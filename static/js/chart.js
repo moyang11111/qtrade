@@ -30,28 +30,28 @@ const ChartManager = (() => {
     _init() {
       const c = LightweightCharts.createChart(this.container, {
         layout: {
-          background: { type: 'solid', color: '#0B0E14' },
-          textColor: '#6A7285',
+          background: { type: 'solid', color: '#131316' },
+          textColor: '#A1A1AA',
         },
         grid: {
-          vertLines: { color: '#1A1F2B' },
-          horzLines: { color: '#1A1F2B' },
+          vertLines: { color: '#1c1c22' },
+          horzLines: { color: '#1c1c22' },
         },
         crosshair: { mode: 1 },
-        rightPriceScale: { borderColor: '#2A2F3A' },
-        timeScale: { borderColor: '#2A2F3A', timeVisible: true, secondsVisible: false },
+        rightPriceScale: { borderColor: '#2a2a30' },
+        timeScale: { borderColor: '#2a2a30', timeVisible: true, secondsVisible: false },
         handleScroll: { vertTouchDrag: false },
       });
       this.chart = c;
 
-      // ---- Pane 0: K 线（翠绿涨/玫红跌） ----
+      // ---- Pane 0: K 线（A股习惯：红涨/绿跌） ----
       this.series.candle = c.addCandlestickSeries({
-        upColor: '#00D4AA',
-        downColor: '#FF4060',
-        borderUpColor: '#00D4AA',
-        borderDownColor: '#FF4060',
-        wickUpColor: '#00D4AA',
-        wickDownColor: '#FF4060',
+        upColor: '#EB5757',
+        downColor: '#27AE60',
+        borderUpColor: '#EB5757',
+        borderDownColor: '#27AE60',
+        wickUpColor: '#EB5757',
+        wickDownColor: '#27AE60',
       }, PANE_MAIN);
 
       // 成交量（overlay 在 Pane 0 底部）
@@ -66,7 +66,7 @@ const ChartManager = (() => {
       });
 
       // 均线（暗色数据密室风格）
-      const maColors = { ma5: '#F0C000', ma10: '#3B82F6', ma20: '#A78BFA', ma60: '#6A7285' };
+      const maColors = { ma5: '#F2C94C', ma10: '#5E6AD2', ma20: '#8B5CF6', ma60: '#A1A1AA' };
       this.series.ma = {};
       for (const [key, color] of Object.entries(maColors)) {
         this.series.ma[key] = c.addLineSeries({
@@ -79,27 +79,27 @@ const ChartManager = (() => {
 
       // 布林带
       this.series.boll = {
-        upper: c.addLineSeries({ color: '#FF4060', lineWidth: 1.5, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }, PANE_MAIN),
-        middle: c.addLineSeries({ color: '#F0C000', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }, PANE_MAIN),
-        lower: c.addLineSeries({ color: '#00D4AA', lineWidth: 1.5, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }, PANE_MAIN),
+        upper: c.addLineSeries({ color: '#EB5757', lineWidth: 1.5, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }, PANE_MAIN),
+        middle: c.addLineSeries({ color: '#F2C94C', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }, PANE_MAIN),
+        lower: c.addLineSeries({ color: '#27AE60', lineWidth: 1.5, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }, PANE_MAIN),
       };
 
       // ---- Pane 1: MACD ----
       this.series.macd = {
-        line: c.addLineSeries({ color: '#3B82F6', lineWidth: 1, priceLineVisible: false }, PANE_MACD),
-        signal: c.addLineSeries({ color: '#A78BFA', lineWidth: 1, priceLineVisible: false }, PANE_MACD),
+        line: c.addLineSeries({ color: '#5E6AD2', lineWidth: 1, priceLineVisible: false }, PANE_MACD),
+        signal: c.addLineSeries({ color: '#8B5CF6', lineWidth: 1, priceLineVisible: false }, PANE_MACD),
         histogram: c.addHistogramSeries({ priceLineVisible: false, lastValueVisible: false }, PANE_MACD),
       };
 
       // ---- Pane 2: RSI ----
-      this.series.rsi = c.addLineSeries({ color: '#F0C000', lineWidth: 1, priceLineVisible: false }, PANE_RSI);
+      this.series.rsi = c.addLineSeries({ color: '#F2C94C', lineWidth: 1, priceLineVisible: false }, PANE_RSI);
       // RSI 30/70 参考线
       const rsi70 = this.series.rsi.createPriceLine({
-        price: 70, color: 'rgba(255,64,96,0.5)',
+        price: 70, color: 'rgba(235,87,87,0.5)',
         lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '',
       });
       const rsi30 = this.series.rsi.createPriceLine({
-        price: 30, color: 'rgba(0,212,170,0.5)',
+        price: 30, color: 'rgba(39,174,96,0.5)',
         lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '',
       });
       this.rsiRefLines = [rsi70, rsi30];
@@ -119,7 +119,7 @@ const ChartManager = (() => {
       this.series.volume.setData(data.map(d => ({
         time: d.time,
         value: d.volume,
-        color: d.close >= d.open ? 'rgba(0,212,170,0.25)' : 'rgba(255,64,96,0.25)',
+        color: d.close >= d.open ? 'rgba(235,87,87,0.28)' : 'rgba(39,174,96,0.28)',
       })));
 
       this.chart.timeScale().fitContent();
@@ -161,7 +161,7 @@ const ChartManager = (() => {
         this.series.macd.histogram.setData(ind.macd.map(d => ({
           time: d.time,
           value: d.histogram,
-          color: d.histogram >= 0 ? 'rgba(0,212,170,0.4)' : 'rgba(255,64,96,0.4)',
+          color: d.histogram >= 0 ? 'rgba(235,87,87,0.45)' : 'rgba(39,174,96,0.45)',
         })));
       }
 

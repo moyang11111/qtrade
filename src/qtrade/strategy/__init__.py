@@ -23,6 +23,10 @@ from qtrade.strategy.rule.pullback_bb_mid import PullbackBBMidSignal
 from qtrade.strategy.rule.pullback_deep import PullbackDeepSignal
 from qtrade.strategy.rule.pullback_vol import PullbackVolSignal
 from qtrade.strategy.rule.pullback_20d import Pullback20DSignal
+from qtrade.strategy.rule.turtle import TurtleSignal
+from qtrade.strategy.rule.supertrend import SuperTrendSignal
+from qtrade.strategy.rule.dual_thrust import DualThrustSignal
+from qtrade.strategy.rule.boll_reversion import BollReversionSignal
 
 __all__ = [
     'SignalGenerator',
@@ -44,4 +48,8 @@ __all__ = [
     'PullbackDeepSignal',
     'PullbackVolSignal',
     'Pullback20DSignal',
+    'TurtleSignal',
+    'SuperTrendSignal',
+    'DualThrustSignal',
+    'BollReversionSignal',
 ]

@@ -101,7 +101,7 @@ python server.py --data-dir data/cache
 
 打开 http://127.0.0.1:8765
 
-也提供 PySide6 桌面版（`desktop_app.py`）与 Electron 壳（`electron/`）。
+桌面启动方式：直接运行 `server.py`（Web 终端），或使用 Electron 壳（`electron/`）。
 
 ### 桌面终端功能
 

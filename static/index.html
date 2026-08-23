@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>QTrade — A股量化交易终端</title>
-  <link rel="stylesheet" href="css/style.css?v=4">
+  <link rel="stylesheet" href="css/style.css?v=6">
   <!-- TradingView lightweight-charts (支持 panes) -->
   <script src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
@@ -13,13 +13,25 @@
 </head>
 <body>
 
+  <!-- ====== 决策台侧边导航 ====== -->
+  <nav class="deck-rail" id="deckRail">
+    <button class="deck-item" data-page="market" title="行情"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><span>行情</span></button>
+    <button class="deck-item" data-page="portal" title="门户"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg><span>门户</span></button>
+    <button class="deck-item" data-page="pitch" title="决策"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg><span>决策</span></button>
+    <button class="deck-item" data-page="control" title="控制台(HARNESS)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg><span>控制台</span></button>
+    <button class="deck-item" data-page="factors" title="因子库"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v6L4.5 18a2 2 0 0 0 1.8 3h11.4a2 2 0 0 0 1.8-3L14 8V2"/><path d="M8 2h8"/><path d="M7 14h10"/></svg><span>因子库</span></button>
+    <button class="deck-item" data-page="factorboard" title="因子仪表盘"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg><span>因子仪表</span></button>
+    <button class="deck-item" data-page="risk" title="风控/复盘"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z"/></svg><span>风控</span></button>
+    <button class="deck-item" data-page="backtest" title="回测"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg><span>回测</span></button>
+    <button class="deck-item" data-page="training" title="训练营"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10L12 5 2 10l10 5 10-5z"/><path d="M6 12v5c0 1.7 2.7 3 6 3s6-1.3 6-3v-5"/></svg><span>训练</span></button>
+    <button class="deck-item" data-page="autopaper" title="自动模拟盘"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>模拟盘</span></button>
+  </nav>
+
   <!-- ====== 工具栏 ====== -->
   <header class="toolbar">
-    <div class="logo">📊 Q<span>Trade</span></div>
+    <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Q<span>Trade</span></div>
     <input type="text" id="searchInput" placeholder="搜索股票代码...">
     <button class="btn" id="btnRefresh">🔄 刷新</button>
-    <button class="btn" id="btnTraining">🎯 训练营</button>
-    <button class="btn accent" id="btnBacktest">📈 回测</button>
     <span class="live-badge" id="liveBadge" hidden>● 实时</span>
     <div class="spacer"></div>
     <div class="clock" id="clock">--</div>
@@ -77,35 +89,9 @@
           <div class="signal-line muted">请选择股票</div>
         </div>
       </div>
-      <div class="card">
-        <h3>🤖 DSA AI 观点</h3>
-        <div id="aiViews">
-          <div class="signal-line muted">运行 DSA 桌面版并分析后显示</div>
-        </div>
-      </div>
-      <div class="card">
-        <h3>🔬 DSA 技术分析</h3>
-        <button class="btn wide" id="btnDSAAnalyze" style="margin-bottom:8px">运行 DSA 分析</button>
-        <div id="dsaResult">
-          <div class="signal-line muted">选中股票后点击上方按钮</div>
-        </div>
-      </div>
       <button class="btn accent wide" id="btnQuickBacktest">🚀 快速回测当前股票</button>
     </aside>
   </div>
-
-  <!-- ====== 底部面板 ====== -->
-  <footer class="bottom-panel">
-    <div class="tabs">
-      <div class="tab-btn active" data-tab="trades">📋 交易记录</div>
-      <div class="tab-btn" data-tab="equity">📊 资金曲线</div>
-      <div class="tab-btn" data-tab="ai">🤖 AI 模拟盘</div>
-      <div class="tab-btn" data-tab="log">📝 系统日志</div>
-    </div>
-    <div class="tab-content" id="tabContent">
-      <div class="muted">运行回测后将在此显示交易记录。</div>
-    </div>
-  </footer>
 
   <!-- ====== 回测对话框 ====== -->
   <div class="modal-overlay" id="backtestModal" hidden>
@@ -116,6 +102,7 @@
       <label for="btStrategy">策略</label>
       <select id="btStrategy">
         <option value="dual_ma">双均线 (dual_ma)</option>
+        <option value="factor_score">因子打分 (factor_score)</option>
         <option value="trend_5d">五日趋势 (trend_5d)</option>
         <option value="bollinger">布林带 (bollinger)</option>
         <option value="bb_rsi">布林+RSI (bb_rsi)</option>
@@ -125,6 +112,10 @@
         <option value="rsi_layered">RSI分层买入 (rsi_layered)</option>
         <option value="reversal_20">超跌反弹20日 (reversal_20)</option>
         <option value="reversal_combo">超跌反弹增强 (reversal_combo)</option>
+        <option value="turtle">海龟交易法 (turtle·vnpy)</option>
+        <option value="supertrend">超级趋势 (supertrend)</option>
+        <option value="dual_thrust">Dual Thrust 突破</option>
+        <option value="boll_reversion">布林均值回归 (boll_reversion)</option>
       </select>
       <div class="param-row">
         <div>
@@ -214,9 +205,193 @@
     <div class="training-result" id="trResult" hidden></div>
   </div>
 
+  <!-- ====== 自动模拟盘 ====== -->
+  <div class="auto-overlay" id="autoPaperOverlay" hidden>
+    <div class="auto-header">
+      <div class="auto-title">⚙️ 自动模拟盘</div>
+      <div class="auto-status" id="autoStatusBadge">加载中...</div>
+      <div class="auto-controls">
+        <label class="auto-label">信号源
+          <select id="autoSignalMode"></select>
+        </label>
+        <button class="btn" id="autoBtnToggle">▶ 启动自动交易</button>
+        <button class="btn" id="autoBtnRun">⚡ 立即跑一轮</button>
+        <button class="btn danger" id="autoBtnReset">🗑 清仓重置</button>
+        <button class="btn" id="autoBtnClose">✕ 关闭</button>
+      </div>
+    </div>
+
+    <div class="auto-error" id="autoError" hidden></div>
+    <div class="auto-metrics" id="autoMetrics">
+      <div class="auto-metric loading">
+        <div class="auto-metric-label">总资产</div>
+        <div class="auto-metric-value">--</div>
+      </div>
+      <div class="auto-metric loading">
+        <div class="auto-metric-label">累计收益</div>
+        <div class="auto-metric-value">--</div>
+      </div>
+      <div class="auto-metric loading">
+        <div class="auto-metric-label">现金</div>
+        <div class="auto-metric-value">--</div>
+      </div>
+      <div class="auto-metric loading">
+        <div class="auto-metric-label">持仓市值</div>
+        <div class="auto-metric-value">--</div>
+      </div>
+      <div class="auto-metric loading">
+        <div class="auto-metric-label">仓位</div>
+        <div class="auto-metric-value">--</div>
+      </div>
+      <div class="auto-metric loading">
+        <div class="auto-metric-label">股票池</div>
+        <div class="auto-metric-value">--</div>
+      </div>
+      <div class="auto-metric loading">
+        <div class="auto-metric-label">上次轮询</div>
+        <div class="auto-metric-value">--</div>
+      </div>
+      <div class="auto-metric loading">
+        <div class="auto-metric-label">运行状态</div>
+        <div class="auto-metric-value">--</div>
+      </div>
+    </div>
+
+    <div class="auto-body">
+      <section class="auto-card auto-card-wide">
+        <div class="auto-card-title">📦 当前持仓 <span id="autoPosCount"></span></div>
+        <div class="auto-table-wrap">
+          <table class="auto-table" id="autoPosTable">
+            <thead>
+              <tr>
+                <th>代码</th>
+                <th class="num">数量</th>
+                <th class="num">买入价</th>
+                <th class="num">现价</th>
+                <th class="num">目标价(止盈)</th>
+                <th class="num">止损价</th>
+                <th class="num">盈亏</th>
+                <th class="num">市值</th>
+                <th>买入时间</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="auto-card auto-card-wide">
+        <div class="auto-card-title">🕐 最近交易 <span id="autoTradeCount"></span></div>
+        <div class="auto-table-wrap">
+          <table class="auto-table" id="autoTradeTable">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>方向</th>
+                <th>代码</th>
+                <th class="num">价格</th>
+                <th class="num">数量</th>
+                <th class="num">盈亏</th>
+                <th>原因</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="auto-card auto-card-wide">
+        <div class="auto-card-title">📈 资金曲线</div>
+        <div class="auto-equity-wrap">
+          <svg id="autoEquityChart" viewBox="0 0 720 160" preserveAspectRatio="xMidYMid meet"></svg>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ====== 因子库页面 ====== -->
+  <div class="auto-overlay" id="pageFactors" hidden>
+    <div class="auto-header">
+      <div class="auto-title">🧬 因子库</div>
+      <div class="auto-status" id="factorSym">--</div>
+      <div class="auto-controls">
+        <button class="btn" id="btnFactorClose">✕ 返回行情</button>
+      </div>
+    </div>
+    <div class="auto-error" id="factorError" hidden></div>
+    <div class="auto-body">
+      <section class="auto-card auto-card-wide">
+        <div class="auto-card-title">首批 A 股量价因子（移植自 deepseek-harness-quant）</div>
+        <div class="auto-table-wrap">
+          <table class="auto-table" id="factorTable">
+            <thead><tr><th>因子</th><th>当前值</th><th>说明</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ====== 风控 / 远期验证页面 ====== -->
+  <div class="auto-overlay" id="pageRisk" hidden>
+    <div class="auto-header">
+      <div class="auto-title">🛡 风控 / 远期验证</div>
+      <div class="auto-status">自动模拟盘风控门禁</div>
+      <div class="auto-controls">
+        <button class="btn" id="btnRiskClose">✕ 返回行情</button>
+      </div>
+    </div>
+    <div class="auto-error" id="riskError" hidden></div>
+    <div class="auto-body" id="riskBody"></div>
+  </div>
+
+  <!-- ====== 门户（嵌入底座 deck）===== -->
+  <div class="auto-overlay" id="pagePortal" hidden>
+    <div class="auto-header">
+      <div class="auto-title">🏠 门户（deepseek-harness-quant）</div>
+      <div class="auto-status" id="portalHint">复用自 deepseek-harness-quant（同端口）</div>
+      <div class="auto-controls"><button class="btn" id="btnPortalClose">✕ 返回行情</button></div>
+    </div>
+    <iframe id="iframePortal" src="/portal" style="flex:1;border:0;background:#0a0a0b"></iframe>
+  </div>
+
+  <!-- ====== 决策 Pitch（嵌入底座 deck）===== -->
+  <div class="auto-overlay" id="pagePitch" hidden>
+    <div class="auto-header">
+      <div class="auto-title">🎛 决策（Pitch 审批）</div>
+      <div class="auto-status">复用自 deepseek-harness-quant（同端口）</div>
+      <div class="auto-controls"><button class="btn" id="btnPitchClose">✕ 返回行情</button></div>
+    </div>
+    <iframe id="iframePitch" src="/pitch" style="flex:1;border:0;background:#0a0a0b"></iframe>
+  </div>
+
+  <!-- ====== 因子仪表盘（嵌入底座 /factors）===== -->
+  <div class="auto-overlay" id="pageFactorBoard" hidden>
+    <div class="auto-header">
+      <div class="auto-title">📊 因子仪表盘（deepseek-harness-quant）</div>
+      <div class="auto-status">复用自底座（同端口）</div>
+      <div class="auto-controls"><button class="btn" id="btnFactorBoardClose">✕ 返回行情</button></div>
+    </div>
+    <iframe id="iframeFactorBoard" src="/factors" style="flex:1;border:0;background:#0a0a0b"></iframe>
+  </div>
+
+  <!-- ====== 控制台 HARNESS（嵌入底座 /control）===== -->
+  <div class="auto-overlay" id="pageControl" hidden>
+    <div class="auto-header">
+      <div class="auto-title">🤖 控制台（DeepSeek HARNESS）</div>
+      <div class="auto-status">底座量化对话控制台（V16 桥接）</div>
+      <div class="auto-controls">
+        <a class="btn" href="http://127.0.0.1:3080" target="_blank" rel="noopener" style="text-decoration:none">GUI ↗</a>
+        <button class="btn" id="btnControlClose">✕ 返回行情</button>
+      </div>
+    </div>
+    <iframe id="iframeControl" src="/control" style="flex:1;border:0;background:#0a0a0b"></iframe>
+  </div>
+
   <script src="js/api.js"></script>
   <script src="js/chart.js"></script>
   <script src="js/training.js"></script>
+  <script src="js/auto_paper.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
