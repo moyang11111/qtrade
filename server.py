@@ -513,7 +513,8 @@ class DataService:
     # ---------- 回测 ----------
 
     def run_backtest(self, symbol: str, strategy: str, capital: float,
-                     commission: float, stop_loss: float, take_profit: float) -> dict:
+                     commission: float, stop_loss: float, take_profit: float,
+                     factors: list | None = None, weights: dict | None = None) -> dict:
         df = self._resolve_df(symbol)
         if df is None:
             return {"error": f"无法加载 {symbol}"}
@@ -523,21 +524,22 @@ class DataService:
             # RSI 分层买入策略：专用模拟器（逐层建仓，与信号模型不同）
             result = self._simulate_rsi_layered(df, capital, commission, symbol=symbol)
         else:
-            signals = self._generate_signals(df, strategy)
+            signals = self._generate_signals(df, strategy, factors=factors, weights=weights)
             result = self._simulate(df, signals, capital, commission, stop_loss, take_profit, symbol=symbol)
         result.update({"symbol": symbol, "strategy": strategy})
         result["audit"] = self._audit_data(df, symbol)
         return result
 
     @staticmethod
-    def _generate_signals(df: pd.DataFrame, strategy: str) -> pd.Series:
+    def _generate_signals(df: pd.DataFrame, strategy: str,
+                          factors: list | None = None, weights: dict | None = None) -> pd.Series:
         close = df["close"]
         high, low, vol = df["high"], df["low"], df["volume"]
         signals = pd.Series(0, index=df.index)
 
-        if strategy == "factor_score":
+        if strategy in ("factor_score", "factor_score_custom"):
             # 首批 A 股实证因子合成打分（偏多>1，偏空<-1）
-            score = factors_mod.composite_score(df)
+            score = factors_mod.composite_score(df, factors=factors, weights=weights)
             signals[score >= 1.0] = 1
             signals[score <= -1.0] = -1
 
@@ -2723,10 +2725,20 @@ class APIHandler(SimpleHTTPRequestHandler):
             commission = float(query.get("commission", ["0.0003"])[0])
             stop_loss = float(query.get("stop_loss", ["0.05"])[0])
             take_profit = float(query.get("take_profit", ["0.15"])[0])
+            factors = None
+            weights = None
+            fs = query.get("factors", [None])[0]
+            ws = query.get("weights", [None])[0]
+            if fs:
+                factors = [x.strip() for x in fs.split(",") if x.strip()]
+                if ws:
+                    wl = [float(x) for x in ws.split(",") if x.strip()]
+                    weights = {k: wl[i] for i, k in enumerate(factors) if i < len(wl)}
         except ValueError:
             return self._json({"error": "invalid parameter"}, status=400)
 
-        result = SERVICE.run_backtest(symbol, strategy, capital, commission, stop_loss, take_profit)
+        result = SERVICE.run_backtest(symbol, strategy, capital, commission, stop_loss, take_profit,
+                                      factors=factors, weights=weights)
         self._json(result)
 
     def _ai_paper(self, query):

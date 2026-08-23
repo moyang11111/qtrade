@@ -116,7 +116,12 @@
         <option value="supertrend">超级趋势 (supertrend)</option>
         <option value="dual_thrust">Dual Thrust 突破</option>
         <option value="boll_reversion">布林均值回归 (boll_reversion)</option>
+        <option value="factor_score_custom">自定义因子回测 (factor_score_custom)</option>
       </select>
+      <div class="param-row" id="customFactorsRow" hidden style="margin-top:8px">
+        <input type="text" id="btFactors" placeholder="因子名（逗号分隔，如 std20,mom20,rsi_revert）" style="flex:2;min-width:0">
+        <input type="text" id="btWeights" placeholder="权重（逗号分隔，与因子对齐，如 -1,1,1）" style="flex:1;min-width:0">
+      </div>
       <div class="param-row">
         <div>
           <label for="btCapital">初始资金</label>

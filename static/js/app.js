@@ -305,6 +305,8 @@
     $('btSymbol').value = state.activeSymbol || '';
     els.btResult.hidden = true;
     els.backtestModal.hidden = false;
+    const cfRow = $('customFactorsRow');
+    if (cfRow && $('btStrategy')) cfRow.hidden = $('btStrategy').value !== 'factor_score_custom';
   }
 
   function closeBacktest() {
@@ -325,9 +327,12 @@
     els.btResult.innerHTML = '<div class="muted" style="text-align:center;padding:20px;">⏳ 正在运行回测...</div>';
 
     try {
-      const data = await API.runBacktest({
-        symbol, strategy, capital, commission, stopLoss, takeProfit,
-      });
+      const params = { symbol, strategy, capital, commission, stopLoss, takeProfit };
+      if (strategy === 'factor_score_custom') {
+        params.factors = $('btFactors').value.trim();
+        params.weights = $('btWeights').value.trim();
+      }
+      const data = await API.runBacktest(params);
 
       if (data.error) {
         els.btResult.innerHTML = `<div style="color:var(--red);">${data.error}</div>`;
@@ -679,6 +684,13 @@
     // 回测对话框
     $('btnCloseBacktest').addEventListener('click', closeBacktest);
     $('btnRunBacktest').addEventListener('click', runBacktest);
+    const btStrategy = $('btStrategy');
+    const updateCustomFactorsRow = () => {
+      const row = $('customFactorsRow');
+      if (row && btStrategy) row.hidden = btStrategy.value !== 'factor_score_custom';
+    };
+    btStrategy.addEventListener('change', updateCustomFactorsRow);
+    updateCustomFactorsRow();
     els.backtestModal.addEventListener('click', (e) => {
       if (e.target === els.backtestModal) closeBacktest();
     });

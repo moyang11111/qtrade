@@ -40,16 +40,19 @@ const API = (() => {
       return get(`/api/factors/${encodeURIComponent(symbol)}`);
     },
 
-    /** 运行回测 */
-    runBacktest({ symbol, strategy, capital, commission, stopLoss, takeProfit }) {
-      return get('/api/backtest', {
+    /** 运行回测（自定义因子回测可传 factors/weights） */
+    runBacktest({ symbol, strategy, capital, commission, stopLoss, takeProfit, factors, weights }) {
+      const params = {
         symbol,
         strategy,
         capital,
         commission,
         stop_loss: stopLoss,
         take_profit: takeProfit,
-      });
+      };
+      if (factors) params.factors = factors;
+      if (weights) params.weights = weights;
+      return get('/api/backtest', params);
     },
 
     /** AI 信号模拟盘：action = status | sync | mark */
