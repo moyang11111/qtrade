@@ -4,7 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>QTrade — A股量化交易终端</title>
-  <link rel="stylesheet" href="css/style.css?v=6">
+  <link rel="stylesheet" href="css/tokens.css?v=1">
+  <link rel="stylesheet" href="css/style.css?v=7">
   <!-- TradingView lightweight-charts (支持 panes) -->
   <script src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
@@ -18,7 +19,7 @@
     <button class="deck-item" data-page="market" title="行情"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><span>行情</span></button>
     <button class="deck-item" data-page="portal" title="门户"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg><span>门户</span></button>
     <button class="deck-item" data-page="pitch" title="决策"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg><span>决策</span></button>
-    <button class="deck-item" data-page="control" title="控制台(HARNESS)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg><span>控制台</span></button>
+    <button class="deck-item" data-page="control" title="控制台"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg><span>控制台</span></button>
     <button class="deck-item" data-page="factors" title="因子库"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v6L4.5 18a2 2 0 0 0 1.8 3h11.4a2 2 0 0 0 1.8-3L14 8V2"/><path d="M8 2h8"/><path d="M7 14h10"/></svg><span>因子库</span></button>
     <button class="deck-item" data-page="factorboard" title="因子仪表盘"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg><span>因子仪表</span></button>
     <button class="deck-item" data-page="risk" title="风控/复盘"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z"/></svg><span>风控</span></button>
@@ -326,7 +327,7 @@
     <div class="auto-error" id="factorError" hidden></div>
     <div class="auto-body">
       <section class="auto-card auto-card-wide">
-        <div class="auto-card-title">首批 A 股量价因子（移植自 deepseek-harness-quant）</div>
+        <div class="auto-card-title">首批 A 股量价因子</div>
         <div class="auto-table-wrap">
           <table class="auto-table" id="factorTable">
             <thead><tr><th>因子</th><th>当前值</th><th>说明</th></tr></thead>
@@ -350,47 +351,47 @@
     <div class="auto-body" id="riskBody"></div>
   </div>
 
-  <!-- ====== 门户（嵌入底座 deck）===== -->
-  <div class="auto-overlay" id="pagePortal" hidden>
+  <!-- ====== QTrade 门户（可选本地底座）===== -->
+  <div class="auto-overlay embedded-page" id="pagePortal" hidden>
     <div class="auto-header">
-      <div class="auto-title">🏠 门户（deepseek-harness-quant）</div>
-      <div class="auto-status" id="portalHint">复用自 deepseek-harness-quant（同端口）</div>
+      <div class="auto-title">🏠 QTrade 门户</div>
+      <div class="auto-status" id="portalHint">本地适配页面（同端口）</div>
       <div class="auto-controls"><button class="btn" id="btnPortalClose">✕ 返回行情</button></div>
     </div>
-    <iframe id="iframePortal" src="/portal" style="flex:1;border:0;background:#0a0a0b"></iframe>
+    <iframe id="iframePortal" class="embedded-deck-frame" src="/portal" title="QTrade 门户"></iframe>
   </div>
 
-  <!-- ====== 决策 Pitch（嵌入底座 deck）===== -->
-  <div class="auto-overlay" id="pagePitch" hidden>
+  <!-- ====== QTrade 决策台（可选本地底座）===== -->
+  <div class="auto-overlay embedded-page" id="pagePitch" hidden>
     <div class="auto-header">
-      <div class="auto-title">🎛 决策（Pitch 审批）</div>
-      <div class="auto-status">复用自 deepseek-harness-quant（同端口）</div>
+      <div class="auto-title">🎛 QTrade 决策</div>
+      <div class="auto-status">本地决策审批页面（同端口）</div>
       <div class="auto-controls"><button class="btn" id="btnPitchClose">✕ 返回行情</button></div>
     </div>
-    <iframe id="iframePitch" src="/pitch" style="flex:1;border:0;background:#0a0a0b"></iframe>
+    <iframe id="iframePitch" class="embedded-deck-frame" src="/pitch" title="QTrade 决策台"></iframe>
   </div>
 
-  <!-- ====== 因子仪表盘（嵌入底座 /factors）===== -->
-  <div class="auto-overlay" id="pageFactorBoard" hidden>
+  <!-- ====== QTrade 因子仪表盘（可选本地底座）===== -->
+  <div class="auto-overlay embedded-page" id="pageFactorBoard" hidden>
     <div class="auto-header">
-      <div class="auto-title">📊 因子仪表盘（deepseek-harness-quant）</div>
-      <div class="auto-status">复用自底座（同端口）</div>
+      <div class="auto-title">📊 QTrade 因子仪表盘</div>
+      <div class="auto-status">本地因子页面（同端口）</div>
       <div class="auto-controls"><button class="btn" id="btnFactorBoardClose">✕ 返回行情</button></div>
     </div>
-    <iframe id="iframeFactorBoard" src="/factors" style="flex:1;border:0;background:#0a0a0b"></iframe>
+    <iframe id="iframeFactorBoard" class="embedded-deck-frame" src="/factors" title="QTrade 因子仪表盘"></iframe>
   </div>
 
-  <!-- ====== 控制台 HARNESS（嵌入底座 /control）===== -->
-  <div class="auto-overlay" id="pageControl" hidden>
+  <!-- ====== QTrade 控制台（可选本地底座）===== -->
+  <div class="auto-overlay embedded-page" id="pageControl" hidden>
     <div class="auto-header">
-      <div class="auto-title">🤖 控制台（DeepSeek HARNESS）</div>
-      <div class="auto-status">底座量化对话控制台（V16 桥接）</div>
+      <div class="auto-title">🤖 QTrade 控制台</div>
+      <div class="auto-status">本地量化对话控制台</div>
       <div class="auto-controls">
-        <a class="btn" href="http://127.0.0.1:3080" target="_blank" rel="noopener" style="text-decoration:none">GUI ↗</a>
+        <a class="btn external-link" href="http://127.0.0.1:3080" target="_blank" rel="noopener">GUI ↗</a>
         <button class="btn" id="btnControlClose">✕ 返回行情</button>
       </div>
     </div>
-    <iframe id="iframeControl" src="/control" style="flex:1;border:0;background:#0a0a0b"></iframe>
+    <iframe id="iframeControl" class="embedded-deck-frame" src="/control" title="QTrade 控制台"></iframe>
   </div>
 
   <script src="js/api.js"></script>
