@@ -301,7 +301,32 @@ test('preload, package resources, and launcher are present and portable', () => 
     assert.ok(fs.existsSync(path.join(PROJECT_ROOT, relativePath)), relativePath);
   }
   assert.ok(packageJson.build.extraResources.some((entry) => entry.to === 'qtrade/static'));
-  assert.ok(packageJson.build.extraResources.some((entry) => entry.to === 'qtrade/paper_trading'));
+  const paperTradingEntry = packageJson.build.extraResources.find(
+    (entry) => entry.to === 'qtrade/paper_trading'
+  );
+  assert.deepEqual(paperTradingEntry, {
+    from: '../paper_trading',
+    to: 'qtrade/paper_trading',
+    filter: [
+      '**/*.py',
+      '!**/__pycache__/**',
+      '!**/*.pyc',
+    ],
+  });
+  assert.deepEqual(
+    paperTradingEntry.filter.filter((pattern) => !pattern.startsWith('!')),
+    ['**/*.py']
+  );
+  assert.ok(paperTradingEntry.filter.includes('!**/__pycache__/**'));
+  assert.ok(paperTradingEntry.filter.includes('!**/*.pyc'));
+  for (const relativePath of [
+    'paper_trading/__init__.py',
+    'paper_trading/engine.py',
+    'paper_trading/market_data.py',
+    'paper_trading/service.py',
+  ]) {
+    assert.ok(fs.existsSync(path.join(PROJECT_ROOT, relativePath)), relativePath);
+  }
 
   const launcher = fs.readFileSync(path.join(PROJECT_ROOT, 'qtrade_electron.bat'), 'utf8');
   assert.doesNotMatch(launcher, /C:\\Users\\ASUS/i);
