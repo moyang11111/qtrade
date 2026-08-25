@@ -36,6 +36,15 @@
         "to": "qtrade/qtrade_base_bridge.py"
       },
       {
+        "from": "../qtrade_adapters",
+        "to": "qtrade/qtrade_adapters",
+        "filter": [
+          "**/*.py",
+          "!**/__pycache__/**",
+          "!**/*.pyc"
+        ]
+      },
+      {
         "from": "../factors.py",
         "to": "qtrade/factors.py"
       },
