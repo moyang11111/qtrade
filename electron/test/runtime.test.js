@@ -255,6 +255,28 @@ test('preload, package resources, and launcher are present and portable', () => 
   const mainSource = fs.readFileSync(path.join(PROJECT_ROOT, 'electron', 'main.js'), 'utf8');
   assert.match(mainSource, /dialog\.showErrorBox/);
   assert.match(mainSource, /slice\(0, 240\)/);
+  const adapterEntry = packageJson.build.extraResources.find(
+    (entry) => entry.to === 'qtrade/qtrade_adapters'
+  );
+  assert.deepEqual(adapterEntry, {
+    from: '../qtrade_adapters',
+    to: 'qtrade/qtrade_adapters',
+    filter: [
+      '**/*.py',
+      '!**/__pycache__/**',
+      '!**/*.pyc',
+    ],
+  });
+  for (const relativePath of [
+    'qtrade_adapters/__init__.py',
+    'qtrade_adapters/deepseek_harness/__init__.py',
+    'qtrade_adapters/deepseek_harness/config.py',
+    'qtrade_adapters/deepseek_harness/handler.py',
+    'qtrade_adapters/deepseek_harness/decisions.py',
+    'qtrade_adapters/deepseek_harness/runtime.py',
+  ]) {
+    assert.ok(fs.existsSync(path.join(PROJECT_ROOT, relativePath)), relativePath);
+  }
   assert.ok(packageJson.build.extraResources.some((entry) => entry.to === 'qtrade/static'));
   assert.ok(packageJson.build.extraResources.some((entry) => entry.to === 'qtrade/paper_trading'));
 
