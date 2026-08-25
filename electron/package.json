@@ -45,6 +45,15 @@
         ]
       },
       {
+        "from": "../qtrade_factors",
+        "to": "qtrade/qtrade_factors",
+        "filter": [
+          "**/*.py",
+          "!**/__pycache__/**",
+          "!**/*.pyc"
+        ]
+      },
+      {
         "from": "../factors.py",
         "to": "qtrade/factors.py"
       },

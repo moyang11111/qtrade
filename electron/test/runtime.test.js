@@ -277,6 +277,29 @@ test('preload, package resources, and launcher are present and portable', () => 
   ]) {
     assert.ok(fs.existsSync(path.join(PROJECT_ROOT, relativePath)), relativePath);
   }
+  const factorEntry = packageJson.build.extraResources.find(
+    (entry) => entry.to === 'qtrade/qtrade_factors'
+  );
+  assert.deepEqual(factorEntry, {
+    from: '../qtrade_factors',
+    to: 'qtrade/qtrade_factors',
+    filter: [
+      '**/*.py',
+      '!**/__pycache__/**',
+      '!**/*.pyc',
+    ],
+  });
+  for (const relativePath of [
+    'qtrade_factors/__init__.py',
+    'qtrade_factors/common.py',
+    'qtrade_factors/price_volume.py',
+    'qtrade_factors/classic.py',
+    'qtrade_factors/empirical.py',
+    'qtrade_factors/registry.py',
+    'qtrade_factors/scoring.py',
+  ]) {
+    assert.ok(fs.existsSync(path.join(PROJECT_ROOT, relativePath)), relativePath);
+  }
   assert.ok(packageJson.build.extraResources.some((entry) => entry.to === 'qtrade/static'));
   assert.ok(packageJson.build.extraResources.some((entry) => entry.to === 'qtrade/paper_trading'));
 
