@@ -59,7 +59,12 @@
       },
       {
         "from": "../paper_trading",
-        "to": "qtrade/paper_trading"
+        "to": "qtrade/paper_trading",
+        "filter": [
+          "**/*.py",
+          "!**/__pycache__/**",
+          "!**/*.pyc"
+        ]
       },
       {
         "from": "../static",
