@@ -319,7 +319,10 @@ def test_batch_launcher_interpreter_discovery_and_failure_text():
 
 
 def test_batch_launcher_uses_crlf_without_lone_lf():
+    if os.name != "nt":
+        pytest.skip("Linux Git checkout may normalize the batch file to LF; CRLF is a Windows invariant")
     bat = Path(__file__).resolve().parents[1] / "scripts" / "daily_update_1830.bat"
     data = bat.read_bytes()
     assert b"\r\n" in data
     assert b"\n" not in data.replace(b"\r\n", b"")
+
