@@ -7,9 +7,12 @@
 ### 方式 1: 从源码安装（推荐）
 
 ```bash
-git clone https://github.com/qtrade/qtrade.git
+git clone https://github.com/moyang11111/qtrade.git
 cd qtrade
 pip install -e .          # 基础安装
+
+# 测试、Ruff、构建和确定性服务冒烟
+pip install -e ".[test]"
 
 # 或安装完整依赖
 pip install -e ".[all]"
@@ -20,6 +23,21 @@ pip install -e ".[all]"
 ```bash
 pip install -r requirements.txt
 ```
+
+### 质量门禁
+
+在安装 `.[test]` 后，可复现地运行项目质量门禁：
+
+```bash
+python -m pytest -q
+ruff check .
+ruff check tests/test_service_smoke.py tests/test_quality_gates.py --select E4,E7,E9,F
+python -m build --wheel --sdist
+python -m pytest -q tests/test_service_smoke.py
+```
+
+服务冒烟使用临时目录和最小本地 CSV，启动 `server.py --csv-only --no-browser --single-instance`，
+检查静态页、健康检查、股票列表和 K 线接口后清理子进程；不会连接实时行情，也不会交易。
 
 ### 方式 2: Docker 部署
 
@@ -91,6 +109,9 @@ python -m qtrade report --equity-csv results/equity.csv -o report.html
 # 项目根目录，默认端口 8765，自动打开浏览器
 python server.py --data-dir data/cache
 
+# 确定性离线模式：只读本地 CSV，不打开浏览器
+python server.py --data-dir data/cache --csv-only --no-browser --single-instance
+
 # 或双击 run.bat
 ```
 
@@ -103,6 +124,37 @@ uvicorn qtrade.api.main:app --host 0.0.0.0 --port 8000
 ```
 
 打开 http://localhost:8000/docs 查看接口文档。
+
+### 5. 配置可选底座
+
+`third_party/deepseek-harness-quant` 是需要单独准备的外部底座，仓库不会提交该目录。
+两个配置变量作用不同：`QTRADE_BASE_DIR` 仅供 `qtrade_base_bridge.py` 使用，指向包含
+`deck/` 子目录的 deepseek-harness-quant 根目录；`QTRADE_DECK_DIR` 仅供 `scripts/daily_update_1830.py` 使用，指向每日更新底座目录。
+
+桥接底座配置（`QTRADE_BASE_DIR`）：
+
+```bash
+# Linux/macOS
+export QTRADE_BASE_DIR=/path/to/deepseek-harness-quant
+
+# Windows PowerShell
+$env:QTRADE_BASE_DIR = "D:\path\to\deepseek-harness-quant"
+```
+
+每日更新底座配置（`QTRADE_DECK_DIR`）：
+
+```bash
+# Linux/macOS
+export QTRADE_DECK_DIR=/path/to/deepseek-harness-quant
+python scripts/daily_update_1830.py --deck-dir /path/to/deepseek-harness-quant --dry-run
+
+# Windows PowerShell
+$env:QTRADE_DECK_DIR = "D:\path\to\deepseek-harness-quant"
+python scripts/daily_update_1830.py --deck-dir "D:\path\to\deepseek-harness-quant" --dry-run
+```
+
+每日更新路径优先级为 CLI `--deck-dir` > `QTRADE_DECK_DIR` > 项目内默认 `third_party/` 路径。
+没有底座时，CSV 服务、测试和本地质量门禁仍可运行，但底座桥接接口不可用。
 
 ## 核心概念
 
