@@ -11,6 +11,9 @@ A 股量化交易框架 + 桌面交易终端：15 种内置策略，支持从数
 # 安装依赖（从 pyproject.toml 安装）
 pip install -e .
 
+# 安装测试、Ruff 和构建门禁依赖
+pip install -e ".[test]"
+
 # 或者使用 requirements.txt
 pip install -r requirements.txt
 
@@ -23,6 +26,24 @@ python scripts/paper_trading.py --symbols 002580,000066,002297
 # 龙虎榜回测
 python scripts/backtest_lhb_pullback.py
 ```
+
+## 质量门禁与本地 CSV 冒烟
+
+`test` extra 声明了全量测试、Ruff、包构建以及测试导入所需的 `pytdx`。在干净虚拟环境中运行：
+
+```bash
+python -m pip install -e ".[test]"
+python -m pytest -q
+ruff check .
+ruff check tests/test_service_smoke.py tests/test_quality_gates.py --select E4,E7,E9,F
+python -m build --wheel --sdist
+python -m pytest -q tests/test_service_smoke.py
+```
+
+服务冒烟会生成临时最小 CSV，启动 `server.py --csv-only --no-browser --single-instance`，
+并只访问本机动态端口的 `/`、`/api/health`、`/api/symbols` 和 K 线接口；不会访问实时行情或执行交易。
+Ruff 全仓门禁当前采用明确的 `E9` 语法基线，新增冒烟测试另行执行 `E4/E7/E9/F` 增量检查，
+以便逐步收紧历史代码的静态检查范围。
 
 ## 核心策略: Pullback20D
 
@@ -96,6 +117,9 @@ qtrade/
 # 项目根目录直接启动（自动打开浏览器）
 python server.py --data-dir data/cache
 
+# 离线本地 CSV 模式（不打开浏览器；适合脚本或服务检查）
+python server.py --data-dir data/cache --csv-only --no-browser --single-instance
+
 # 或双击 run.bat
 ```
 
@@ -134,6 +158,37 @@ python server.py --data-dir data/cache
 - **前端**：原生 HTML/CSS/JS
 - **图表**：TradingView lightweight-charts 4.2.1（CDN）
 - **K线颜色**：红涨绿跌（A 股习惯）
+
+## 可选 deepseek-harness-quant 底座
+
+`third_party/deepseek-harness-quant` 是外部底座，目录被仓库忽略，不随项目安装或提交提供。
+两个配置变量作用不同：`QTRADE_BASE_DIR` 仅供 `qtrade_base_bridge.py` 使用，指向包含
+`deck/` 子目录的 deepseek-harness-quant 根目录；`QTRADE_DECK_DIR` 仅供 `scripts/daily_update_1830.py` 使用，指向每日更新底座目录。
+
+桥接底座配置（`QTRADE_BASE_DIR`）：
+
+```bash
+# Linux/macOS
+export QTRADE_BASE_DIR=/path/to/deepseek-harness-quant
+
+# Windows PowerShell
+$env:QTRADE_BASE_DIR = "D:\path\to\deepseek-harness-quant"
+```
+
+每日更新底座配置（`QTRADE_DECK_DIR`）：
+
+```bash
+# Linux/macOS
+export QTRADE_DECK_DIR=/path/to/deepseek-harness-quant
+python scripts/daily_update_1830.py --deck-dir /path/to/deepseek-harness-quant --dry-run
+
+# Windows PowerShell
+$env:QTRADE_DECK_DIR = "D:\path\to\deepseek-harness-quant"
+python scripts/daily_update_1830.py --deck-dir "D:\path\to\deepseek-harness-quant" --dry-run
+```
+
+每日更新路径优先级为 CLI `--deck-dir` > `QTRADE_DECK_DIR` > 项目内默认 `third_party/` 路径。
+CLI/服务的本地 CSV 模式不依赖该底座；隔离冒烟测试会关闭自动底座启动和自动更新。
 
 ## License
 
