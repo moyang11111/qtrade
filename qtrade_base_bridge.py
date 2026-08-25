@@ -32,6 +32,7 @@ PAGES = {
     "/pitch": "pitch.html", "/pitch.html": "pitch.html",
     "/control": "control.html", "/control.html": "control.html",
     "/factors": "factors.html", "/factors.html": "factors.html",
+    "/etf": "etf.html", "/etf.html": "etf.html",
 }
 STATIC_FILES = {
     "/live_ticker.js": ("deck", "live_ticker.js"),
@@ -129,6 +130,32 @@ class QtradeDeckHandler:
             return self._serve_endpoints()
         if sub == "brief":
             return self._serve_brief()
+        if sub == "backtest_archive":
+            try:
+                from backtest.bt_report import list_archives
+                return self.reply_json({"ok": True, **list_archives()})
+            except Exception as e:
+                return self.reply_json({"ok": False, "error": str(e)}, 500)
+        if sub == "backtest_strategies":
+            try:
+                from backtest.bt_runner import list_strategies
+                return self.reply_json({"ok": True, "strategies": list_strategies()})
+            except Exception as e:
+                return self.reply_json({"ok": False, "error": str(e)}, 500)
+        if sub == "backtest_run":
+            try:
+                import urllib.parse as _up
+                q = _up.parse_qs(self.h.path.split("?", 1)[1] if "?" in self.h.path else "")
+                def _g(k, d): return (q.get(k) or [d])[0]
+                from backtest.bt_runner import run_backtest
+                r = run_backtest(strategy=_g("strategy", "tech3"),
+                                 topn=int(_g("topn", "5")),
+                                 stocks=int(_g("stocks", "300")),
+                                 start=_g("start", "2021-01-01"),
+                                 end=_g("end", "2025-12-31"))
+                return self.reply_json({"ok": True, **r})
+            except Exception as e:
+                return self.reply_json({"ok": False, "error": str(e)}, 500)
         import deck.live_api as la
         fn = getattr(la, "live_" + sub, None)
         if fn is None:
@@ -145,17 +172,27 @@ class QtradeDeckHandler:
         import urllib.request as _ur
         from concurrent.futures import ThreadPoolExecutor as _TPE
 
+        # 先预热重端点（避免冷缓存被误报超时）
+        for _name in ("live_holdings", "live_realtime", "live_portal_dash", "live_chain",
+                      "live_alerts", "live_calendar"):
+            try:
+                _fn = getattr(_la, _name, None)
+                if _fn:
+                    _fn()
+            except Exception:
+                pass
+
         def _probe(path):
             st = time.time()
             try:
-                with _ur.urlopen(f"http://127.0.0.1:{port}{path}", timeout=15) as r:
+                with _ur.urlopen(f"http://127.0.0.1:{port}{path}", timeout=30) as r:
                     return {"path": path, "status": r.status,
                             "ms": int((time.time() - st) * 1000), "ok": r.status == 200}
             except Exception as e:
                 return {"path": path, "status": 0, "ms": int((time.time() - st) * 1000),
                         "ok": False, "error": str(e)[:80]}
 
-        with _TPE(max_workers=8) as ex:
+        with _TPE(max_workers=10) as ex:
             results = list(ex.map(_probe, endpoints))
         ok = [r for r in results if r.get("ok")]
         return self.reply_json({"ok": True, "ts": time.strftime("%H:%M:%S"),
@@ -219,6 +256,32 @@ class QtradeDeckHandler:
             self.reply_json(json.loads(target.read_text(encoding="utf-8")) if target.exists() else [])
             return True
 
+        if path == "/api/tech_pitch":
+            self.serve_live("tech_pitch")
+            return True
+
+        if path == "/api/harness":
+            hs = base / "output" / "harness_state.json"
+            if hs.exists():
+                try:
+                    self.reply_json(json.loads(hs.read_text(encoding="utf-8")))
+                except Exception as e:
+                    self.reply_json({"ok": False, "error": f"harness_state.json 解析失败: {e}"}, 500)
+            else:
+                self.reply_json({"ok": False, "error": "HARNESS 快照未生成（output/harness_state.json 不存在）"})
+            return True
+
+        if path == "/api/etf_map":
+            f = base / "output" / "etf_map.json"
+            if f.exists():
+                try:
+                    self.reply_json(json.loads(f.read_text(encoding="utf-8")))
+                except Exception as e:
+                    self.reply_json({"ok": False, "error": f"etf_map.json 解析失败: {e}"}, 500)
+            else:
+                self.reply_json({"ok": False, "error": "etf_map.json 未生成，请运行 etf/etf_map.py"}, status=404)
+            return True
+
         if path.startswith(PROXY_PREFIX):
             return self._proxy_get(path)
 
@@ -256,7 +319,16 @@ class QtradeDeckHandler:
     def _proxy_get(self, path: str) -> bool:
         import urllib.request as _ur
         import urllib.error as _ue
-        tgt = f"http://127.0.0.1:{HARNESS_PORT}/" + path[len(PROXY_PREFIX):]
+        # 牛散插件未启用：本地直接返回空 JSON，避免 HARNESS 返回 HTML 导致前端解析失败
+        if path.startswith(PROXY_PREFIX + "niuapi/"):
+            sub = path[len(PROXY_PREFIX + "niuapi/"):].split("?", 1)[0]
+            if sub == "sessions":
+                self.reply_json({"personas": []})
+            else:
+                self.reply_json({"messages": []})
+            return True
+        _port = 3080 if path.startswith(PROXY_PREFIX + "quantapi/") else HARNESS_PORT
+        tgt = f"http://127.0.0.1:{_port}/" + path[len(PROXY_PREFIX):]
         if "?" in self.h.path:
             tgt += "?" + self.h.path.split("?", 1)[1]
         try:
@@ -265,7 +337,11 @@ class QtradeDeckHandler:
             try:
                 self.reply_json(json.loads(data.decode("utf-8")))
             except Exception:
-                self._send_bytes(r.status, r.headers.get("Content-Type", "application/json"), data)
+                ctype = (r.headers.get("Content-Type", "") or "").lower()
+                if "html" in ctype or data[:1] == b"<":
+                    self.reply_json({"ok": False, "error": "HARNESS 返回了 HTML（接口未挂载/暂不可达）"})
+                else:
+                    self._send_bytes(r.status, r.headers.get("Content-Type", "application/json"), data)
             return True
         except _ue.HTTPError as e:
             d = e.read()
@@ -283,7 +359,11 @@ class QtradeDeckHandler:
         body = self.h.rfile.read(length) if length else b""
         import urllib.request as _ur
         import urllib.error as _ue
-        tgt = f"http://127.0.0.1:{HARNESS_PORT}/" + path[len(PROXY_PREFIX):]
+        if path.startswith(PROXY_PREFIX + "niuapi/"):
+            self.reply_json({"ok": False, "error": "牛散插件未启用"})
+            return True
+        _port = 3080 if path.startswith(PROXY_PREFIX + "quantapi/") else HARNESS_PORT
+        tgt = f"http://127.0.0.1:{_port}/" + path[len(PROXY_PREFIX):]
         if "?" in self.h.path:
             tgt += "?" + self.h.path.split("?", 1)[1]
         req = _ur.Request(tgt, data=body, method="POST")
@@ -294,7 +374,11 @@ class QtradeDeckHandler:
             try:
                 self.reply_json(json.loads(data.decode("utf-8")))
             except Exception:
-                self._send_bytes(r.status, r.headers.get("Content-Type", "application/json"), data)
+                ctype = (r.headers.get("Content-Type", "") or "").lower()
+                if "html" in ctype or data[:1] == b"<":
+                    self.reply_json({"ok": False, "error": "HARNESS 返回了 HTML（接口未挂载/暂不可达）"})
+                else:
+                    self._send_bytes(r.status, r.headers.get("Content-Type", "application/json"), data)
         except _ue.HTTPError as e:
             d = e.read()
             try:

@@ -106,8 +106,10 @@
         const pnlCls = p.pnl_pct >= 0 ? 'up' : 'down';
         const targetGap = p.last_price ? ((p.target_price / p.last_price - 1) * 100).toFixed(1) : '--';
         const title = escapeAttr(`买入时间: ${p.buy_time || ''}\n信号: ${p.buy_reason || ''}`);
+        const src = p.source === '决策' ? '<span class="badge-src badge-dec">决策</span>'
+          : '<span class="badge-src badge-strat">策略</span>';
         return `<tr title="${title}">
-          <td class="mono">${p.symbol}</td>
+          <td class="mono">${p.symbol} ${src}</td>
           <td class="num">${p.qty}</td>
           <td class="num">${p.buy_price}</td>
           <td class="num">${p.last_price}</td>
