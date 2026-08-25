@@ -1,67 +1,65 @@
 # -*- coding: utf-8 -*-
-"""Compatibility façade for the normalized QTrade factor package.
+"""QTrade-owned normalized factor package.
 
-The implementation lives in :mod:`qtrade_factors`; this module deliberately
-keeps the historical import surface used by QTrade callers.
+The package preserves the public behavior of the historical ``factors``
+module.  Adaptation attribution is recorded in ``THIRD_PARTY_NOTICES.md``;
+the package contains no third-party market-data files.
 """
 
-from __future__ import annotations
-
-import numpy as np
-import pandas as pd
-
-from qtrade_factors import (
-    EPS,
+from .classic import (
+    cci20,
+    kdj_d,
+    kdj_j,
+    kdj_k,
+    ma200_up,
+    ma50_up,
+    macd_hist,
+    near_ma250,
+    obv_trend,
+    rsi6,
+    roc20,
+    rps_percentile,
+    vol_contract,
+    wpr14,
+)
+from .common import EPS
+from .empirical import (
+    consec_limit_down,
+    consec_limit_up,
+    limit_down_flag,
+    limit_up_flag,
+    lowvol_60,
+    mom_120,
+    mom_20,
+    near_high_250,
+    new_high_250,
+)
+from .price_volume import (
+    amihud_proxy,
+    amp20,
+    downside_vol,
+    limup_ex_5,
+    ma_alignment,
+    max_ret20,
+    mom20,
+    o2c,
+    pullback,
+    reversal20,
+    rsi14,
+    rsi_revert,
+    skew20,
+    std20,
+    volume_ratio,
+)
+from .registry import (
     AVAILABLE_FACTORS,
     NEED_CROSS_SECTION,
     NEED_FINANCE,
     NEED_INDUSTRY,
     NEED_LHG,
-    amihud_proxy,
-    amp20,
-    cci20,
-    composite_score,
-    consec_limit_down,
-    consec_limit_up,
-    downside_vol,
-    factor_frame,
     factor_inventory,
-    kdj_d,
-    kdj_j,
-    kdj_k,
-    latest_factors,
-    limit_down_flag,
-    limit_up_flag,
-    limup_ex_5,
-    lowvol_60,
-    ma200_up,
-    ma50_up,
-    ma_alignment,
-    max_ret20,
-    macd_hist,
-    mom20,
-    mom_120,
-    mom_20,
-    near_high_250,
-    near_ma250,
-    new_high_250,
-    obv_trend,
-    o2c,
-    pullback,
-    reversal20,
-    roc20,
-    rps_percentile,
-    rsi6,
-    rsi14,
-    rsi_revert,
-    skew20,
-    std20,
-    vol_contract,
-    volume_ratio,
-    wpr14,
 )
-from qtrade_factors.common import _ret
-from qtrade_factors.empirical import _limit_streaks, _prev_high_250
+from .scoring import composite_score, factor_frame, latest_factors
 
 
 __all__ = [
@@ -113,9 +111,4 @@ __all__ = [
     "NEED_LHG",
     "NEED_INDUSTRY",
     "factor_inventory",
-    "np",
-    "pd",
-    "_ret",
-    "_limit_streaks",
-    "_prev_high_250",
 ]
