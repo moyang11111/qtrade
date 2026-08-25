@@ -5,12 +5,14 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder"
-  },
-  "dependencies": {
-    "electron": "^31.0.0"
+    "test": "node --test test/runtime.test.js",
+    "lint": "node --check main.js && node --check preload.js && node --check runtime.js",
+    "dist:dir": "electron-builder --win dir",
+    "dist:win": "electron-builder --win nsis",
+    "build": "npm run dist:win"
   },
   "devDependencies": {
+    "electron": "^31.0.0",
     "electron-builder": "^26.0.0"
   },
   "build": {
@@ -21,20 +23,37 @@
     },
     "files": [
       "main.js",
-      "preload.js",
-      "../static/**",
-      "../server.py",
-      "../paper_trading/**",
-      "../qtrade.ico"
+      "runtime.js",
+      "preload.js"
     ],
     "extraResources": [
       {
         "from": "../server.py",
-        "to": "server.py"
+        "to": "qtrade/server.py"
+      },
+      {
+        "from": "../qtrade_base_bridge.py",
+        "to": "qtrade/qtrade_base_bridge.py"
+      },
+      {
+        "from": "../factors.py",
+        "to": "qtrade/factors.py"
       },
       {
         "from": "../paper_trading",
-        "to": "paper_trading"
+        "to": "qtrade/paper_trading"
+      },
+      {
+        "from": "../static",
+        "to": "qtrade/static"
+      },
+      {
+        "from": "../configs",
+        "to": "qtrade/configs"
+      },
+      {
+        "from": "../qtrade.ico",
+        "to": "qtrade/qtrade.ico"
       }
     ],
     "win": {
