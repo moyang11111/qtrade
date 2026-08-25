@@ -2124,6 +2124,16 @@ class EngineAutoPaperTrader:
     def _save_meta(self):
         self.meta_file.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    @staticmethod
+    def _position_source(meta: dict) -> str:
+        """把持仓元数据归一为界面使用的两类来源标签。"""
+        meta = meta if isinstance(meta, dict) else {}
+        explicit = str(meta.get("source") or "").strip()
+        if explicit in ("决策", "策略"):
+            return explicit
+        reason = str(meta.get("buy_reason") or "").strip()
+        return "决策" if reason.startswith("决策买入") else "策略"
+
     # ---------- 存量迁移 ----------
 
     def _migrate_legacy(self):
@@ -2158,6 +2168,7 @@ class EngineAutoPaperTrader:
                     "buy_date": d,
                     "buy_time": pos.get("buy_time", ""),
                     "buy_reason": pos.get("buy_reason", ""),
+                    "source": self._position_source(pos),
                     "target_price": pos.get("target_price"),
                     "stop_price": pos.get("stop_price"),
                 }
@@ -2228,6 +2239,7 @@ class EngineAutoPaperTrader:
                 "target_pct": self._signals.TAKE_PROFIT * 100,
                 "stop_pct": -self._signals.STOP_LOSS * 100,
                 "buy_time": m.get("buy_time", ""), "buy_reason": m.get("buy_reason", ""),
+                "source": self._position_source(m),
             })
         pos_list.sort(key=lambda x: -x["value"])
 
@@ -2430,6 +2442,7 @@ class EngineAutoPaperTrader:
                 "buy_date": time.strftime("%Y-%m-%d"),
                 "buy_time": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "buy_reason": reason,
+                "source": "决策",
                 "target_price": round(fill * (1 + self._signals.TAKE_PROFIT), 2),
                 "stop_price": round(fill * (1 - self._signals.STOP_LOSS), 2),
             }
@@ -2575,6 +2588,7 @@ class EngineAutoPaperTrader:
                     "buy_date": buy_date,
                     "buy_time": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "buy_reason": sig.get("reason", ""),
+                    "source": "策略",
                     "target_price": round(fill_price * (1 + sig.get("take_pct", self._signals.TAKE_PROFIT)), 2),
                     "stop_price": round(fill_price * (1 - sig.get("stop_pct", self._signals.STOP_LOSS)), 2),
                 }

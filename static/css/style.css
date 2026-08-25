@@ -1114,3 +1114,7 @@ body {
 @media (max-width: 900px) {
   .sidebar-right { display: none; }
 }
+/* 统一模拟盘：区分来源标签 */
+.badge-src { font-size: 8px; line-height: 1; padding: 2px 5px; border-radius: 5px; margin-left: 5px; vertical-align: 1px; font-weight: 700; }
+.badge-dec { color: #c48bff; border: 1px solid rgba(196, 139, 255, .45); background: rgba(196, 139, 255, .12); }
+.badge-strat { color: #6be7c2; border: 1px solid rgba(107, 231, 194, .45); background: rgba(107, 231, 194, .12); }
