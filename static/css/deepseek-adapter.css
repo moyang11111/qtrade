@@ -1,0 +1,52 @@
+/*
+   QTrade adapter skin for embedded ui_v2 pages.
+   Every selector is scoped to the deterministic adapter marker.  The hidden
+   nodes are verified upstream duplicate navigation/brand blocks only.
+*/
+html.qtrade-adapted body.qtrade-adapted {
+  min-height: 100%;
+  margin: 0 !important;
+  padding-left: 0 !important;
+  overflow-x: hidden !important;
+  background: var(--qt-bg-primary) !important;
+  color: var(--qt-text) !important;
+  font-family: var(--qt-font-sans) !important;
+}
+
+html.qtrade-adapted body.qtrade-adapted .v2-wrap {
+  min-height: 100vh;
+  padding-left: 0 !important;
+  overflow-x: hidden;
+}
+
+/* Verified upstream duplicate navigation container. */
+html.qtrade-adapted body.qtrade-adapted #sidebar {
+  display: none !important;
+}
+
+/* Verified portal-only duplicate feature blocks. */
+html.qtrade-adapted.qtrade-page-portal body.qtrade-adapted #wufu-box,
+html.qtrade-adapted.qtrade-page-portal body.qtrade-adapted #qt-features-box {
+  display: none !important;
+}
+
+/* Verified upstream byline/brand marker; other business content remains visible. */
+html.qtrade-adapted body.qtrade-adapted .mini:has(.dsq-brand),
+html.qtrade-adapted body.qtrade-adapted .dsq-brand {
+  display: none !important;
+}
+
+/* Surface and semantic colors stay within the QTrade token system. */
+html.qtrade-adapted body.qtrade-adapted .v2-card {
+  background: var(--qt-bg-card);
+  border-color: var(--qt-border);
+  box-shadow: var(--qt-shadow-card);
+}
+html.qtrade-adapted body.qtrade-adapted .d-up,
+html.qtrade-adapted body.qtrade-adapted .up {
+  color: var(--qt-color-up) !important;
+}
+html.qtrade-adapted body.qtrade-adapted .d-down,
+html.qtrade-adapted body.qtrade-adapted .down {
+  color: var(--qt-color-down) !important;
+}

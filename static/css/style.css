@@ -8,43 +8,35 @@
    · 入场上滑 / 错开入场 / 呼吸灯动效（prefers-reduced-motion 降级）
    ============================================================ */
 :root {
-  /* 背景层 */
-  --bg-primary:   #0a0a0b;
-  --bg-secondary: #0f0f13;
-  --bg-card:      #131316;
-  --bg-input:     #1c1c22;
-  --bg-elev:      #16161a;
-  --border:       #2a2a30;
-  --line:         rgba(255, 255, 255, .08);
-
-  /* 语义色（A股惯例：红涨绿跌） */
-  --up:      #EB5757;
-  --up-glow: rgba(235, 87, 87, 0.18);
-  --down:    #27AE60;
-  --down-glow: rgba(39, 174, 96, 0.18);
-  --red:     #EB5757;
-  --green:   #27AE60;
-  --signal:  #F2C94C;
-  --action:  #5E6AD2;
-  --accent:  #5E6AD2;
-  --purple:  #8B5CF6;
-
-  /* 文字 */
-  --text:       #F4F4F5;
-  --text-sec:   #A1A1AA;
-  --text-dim:   #71717A;
-
-  /* 字体（数字靠 tabular-nums 对齐） */
-  --font:       'Inter', 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', -apple-system, sans-serif;
-  --font-mono:  'Inter', 'SF Pro Display', 'Segoe UI', 'PingFang SC', sans-serif;
-
-  /* 圆角/阴影/缓动（对齐 ui_v2 StyleKit token） */
-  --radius: 8px;
-  --radius-lg: 12px;
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --ease-hover: cubic-bezier(0.33, 1, 0.68, 1);
-  --shadow-card: 0 1px 2px rgba(0,0,0,.04), 0 1px 3px rgba(0,0,0,.06);
-  --shadow-hover: 0 12px 24px -8px rgba(0,0,0,.16), 0 4px 8px -4px rgba(0,0,0,.10);
+  /* Legacy aliases: values live only in tokens.css. */
+  --bg-primary: var(--qt-bg-primary);
+  --bg-secondary: var(--qt-bg-secondary);
+  --bg-card: var(--qt-bg-card);
+  --bg-input: var(--qt-bg-input);
+  --bg-elev: var(--qt-bg-elev);
+  --border: var(--qt-border);
+  --line: var(--qt-line);
+  --up: var(--qt-color-up);
+  --up-glow: var(--qt-color-up-glow);
+  --down: var(--qt-color-down);
+  --down-glow: var(--qt-color-down-glow);
+  --red: var(--qt-color-up);
+  --green: var(--qt-color-down);
+  --signal: var(--qt-color-signal);
+  --action: var(--qt-color-brand);
+  --accent: var(--qt-color-brand);
+  --purple: var(--qt-color-brand-strong);
+  --text: var(--qt-text);
+  --text-sec: var(--qt-text-secondary);
+  --text-dim: var(--qt-text-dim);
+  --font: var(--qt-font-sans);
+  --font-mono: var(--qt-font-mono);
+  --radius: var(--qt-radius-md);
+  --radius-lg: var(--qt-radius-lg);
+  --ease-out: var(--qt-ease-out);
+  --ease-hover: var(--qt-ease-hover);
+  --shadow-card: var(--qt-shadow-card);
+  --shadow-hover: var(--qt-shadow-hover);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -272,7 +264,13 @@ body {
 /* ============================================================
    主内容区
    ============================================================ */
-.main { display: flex; flex: 1; overflow: hidden; }
+.main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
 
 /* ---- 左栏：股票列表 ---- */
 .sidebar-left {
@@ -808,9 +806,23 @@ body {
   display: flex;
   flex-direction: column;
   padding: 10px 16px 14px;
+  min-width: 0;
+  min-height: 0;
   overflow: hidden;
 }
 .auto-overlay[hidden] { display: none; }
+.auto-overlay.embedded-page { padding-bottom: 10px; }
+.embedded-deck-frame {
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+.external-link { text-decoration: none; }
 
 .auto-header {
   display: flex;

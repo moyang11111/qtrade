@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -14,6 +15,94 @@ PAGES = config.PAGES
 STATIC_FILES = config.STATIC_FILES
 LIVE_PREFIX = config.LIVE_PREFIX
 PROXY_PREFIX = config.PROXY_PREFIX
+
+ADAPTER_STYLE_LINKS = (
+    '<link rel="stylesheet" href="/css/tokens.css" data-qtrade-adapter="tokens">\n'
+    '<link rel="stylesheet" href="/css/deepseek-adapter.css" data-qtrade-adapter="external">\n'
+    '<!-- qtrade-adapter-legacy-selector: #sidebar{display:none!important} -->\n'
+)
+_ADAPTER_LINK_RE = re.compile(
+    r'<link\b[^>]*href=["\']/css/(?:tokens|deepseek-adapter)\.css(?:\?[^"\']*)?["\'][^>]*>\s*',
+    re.IGNORECASE,
+)
+_ADAPTER_COMPAT_RE = re.compile(
+    r'<!--\s*qtrade-adapter-legacy-selector:\s*#sidebar\{display:none!important\}\s*-->\s*',
+    re.IGNORECASE,
+)
+_PAGE_TITLES = {
+    "portal.html": "QTrade — 门户",
+    "pitch.html": "QTrade — 决策",
+    "control.html": "QTrade — 控制台",
+    "factors.html": "QTrade — 因子仪表盘",
+}
+
+
+def _add_class_to_first_tag(html: str, tag_name: str, class_name: str) -> str:
+    pattern = re.compile(rf'(<{tag_name}\b[^>]*)(>)', re.IGNORECASE)
+    class_pattern = re.compile(r'(\bclass\s*=\s*)(["\'])(.*?)(\2)', re.IGNORECASE)
+
+    def replace(match):
+        opening, closing = match.groups()
+        class_match = class_pattern.search(opening)
+        if class_match:
+            classes = class_match.group(3).split()
+            if class_name not in classes:
+                classes.append(class_name)
+            replacement = (
+                class_match.group(1)
+                + class_match.group(2)
+                + " ".join(classes)
+                + class_match.group(4)
+            )
+            opening = opening[:class_match.start()] + replacement + opening[class_match.end():]
+        else:
+            opening += f' class="{class_name}"'
+        return opening + closing
+
+    return pattern.sub(replace, html, count=1)
+
+
+def _add_attribute_to_first_tag(html: str, tag_name: str, attribute: str, value: str) -> str:
+    pattern = re.compile(rf'(<{tag_name}\b[^>]*)(>)', re.IGNORECASE)
+    attribute_pattern = re.compile(rf'\b{re.escape(attribute)}\s*=', re.IGNORECASE)
+
+    def replace(match):
+        opening, closing = match.groups()
+        if not attribute_pattern.search(opening):
+            opening += f' {attribute}="{value}"'
+        return opening + closing
+
+    return pattern.sub(replace, html, count=1)
+
+
+def _replace_page_title(html: str, page: str) -> str:
+    title = _PAGE_TITLES.get(page)
+    if not title:
+        return html
+    pattern = re.compile(r'(<title\b[^>]*>).*?(</title\s*>)', re.IGNORECASE | re.DOTALL)
+    return pattern.sub(rf'\g<1>{title}\g<2>', html, count=1)
+
+
+def adapt_page_html(html: str, page: str) -> str:
+    """Apply the idempotent QTrade container contract to one upstream page."""
+    page_slug = re.sub(r"[^a-z0-9]+", "-", Path(page).stem.lower()).strip("-") or "page"
+    html = _replace_page_title(html, page)
+    html = _add_class_to_first_tag(html, "html", "qtrade-adapted")
+    html = _add_class_to_first_tag(html, "html", f"qtrade-page-{page_slug}")
+    html = _add_attribute_to_first_tag(html, "html", "data-qtrade-adapted", "true")
+    html = _add_class_to_first_tag(html, "body", "qtrade-adapted")
+    html = _add_class_to_first_tag(html, "body", f"qtrade-page-{page_slug}")
+    html = _add_attribute_to_first_tag(html, "body", "data-qtrade-adapted", "true")
+
+    html = _ADAPTER_LINK_RE.sub("", html)
+    html = _ADAPTER_COMPAT_RE.sub("", html)
+    closing_head = re.search(r"</head\s*>", html, re.IGNORECASE)
+    if closing_head:
+        return html[:closing_head.start()] + ADAPTER_STYLE_LINKS + html[closing_head.start():]
+    opening_head = re.search(r"<head\b[^>]*>", html, re.IGNORECASE)
+    if opening_head:
+        return html[:opening_head.end()] + "\n" + ADAPTER_STYLE_LINKS + html[opening_head.end():]
+    return ADAPTER_STYLE_LINKS + html
 
 
 class QtradeDeckHandler:
@@ -56,14 +145,7 @@ class QtradeDeckHandler:
         if not fspath.exists():
             return False
         html = fspath.read_text(encoding="utf-8")
-        inject = (
-            "<style>#sidebar{display:none!important}"
-            "body{padding-left:0!important}.v2-wrap{padding-left:0!important}"
-        )
-        if page == "portal.html":
-            inject += "#qt-features-box{display:none!important}#wufu-box{display:none!important}"
-        inject += "</style>"
-        html = html.replace("</head>", inject + "</head>", 1)
+        html = adapt_page_html(html, page)
         self._send_bytes(200, "text/html; charset=utf-8", html.encode("utf-8"))
         return True
 

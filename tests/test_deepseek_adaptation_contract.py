@@ -254,10 +254,21 @@ def test_bridge_serves_synthetic_page_static_asset_and_v2_file(tmp_path, monkeyp
     page_handler = _FakeHandler("/portal")
     assert bridge.QtradeDeckHandler(page_handler).handle_get("/portal") is True
     page = page_handler.wfile.getvalue().decode("utf-8")
-    assert page.startswith("<html><head>")
-    assert "#sidebar{display:none!important}" in page
-    assert "#qt-features-box{display:none!important}#wufu-box{display:none!important}" in page
+    assert page.startswith("<html")
+    assert 'data-qtrade-adapted="true"' in page
+    assert "qtrade-adapted" in page
+    assert 'href="/css/tokens.css"' in page
+    assert 'href="/css/deepseek-adapter.css"' in page
+    assert page.index('href="/css/tokens.css"') < page.index(
+        'href="/css/deepseek-adapter.css"'
+    )
+    assert page.count('href="/css/tokens.css"') == 1
+    assert page.count('href="/css/deepseek-adapter.css"') == 1
     assert "synthetic portal" in page
+
+    second_handler = _FakeHandler("/portal")
+    assert bridge.QtradeDeckHandler(second_handler).handle_get("/portal") is True
+    assert second_handler.wfile.getvalue().decode("utf-8") == page
 
     static_handler = _FakeHandler("/live_ticker.js")
     assert bridge.QtradeDeckHandler(static_handler).handle_get("/live_ticker.js") is True

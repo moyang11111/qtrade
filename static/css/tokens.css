@@ -1,0 +1,63 @@
+/* QTrade design tokens: the single source for shared interface semantics. */
+:root {
+  /* Surfaces and lines */
+  --qt-bg-primary: #0a0a0b;
+  --qt-bg-secondary: #0f0f13;
+  --qt-bg-card: #131316;
+  --qt-bg-input: #1c1c22;
+  --qt-bg-elev: #16161a;
+  --qt-border: #2a2a30;
+  --qt-line: rgba(255, 255, 255, .08);
+
+  /* QTrade brand and A-share semantics: red up, green down. */
+  --qt-color-up: #eb5757;
+  --qt-color-up-glow: rgba(235, 87, 87, .18);
+  --qt-color-down: #27ae60;
+  --qt-color-down-glow: rgba(39, 174, 96, .18);
+  --qt-color-brand: #5e6ad2;
+  --qt-color-brand-strong: #8b5cf6;
+  --qt-color-signal: #f2c94c;
+
+  /* Text */
+  --qt-text: #f4f4f5;
+  --qt-text-secondary: #a1a1aa;
+  --qt-text-dim: #71717a;
+
+  /* Typography */
+  --qt-font-sans: 'Inter', 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', -apple-system, sans-serif;
+  --qt-font-mono: 'Inter', 'SF Pro Display', 'Segoe UI', 'PingFang SC', sans-serif;
+
+  /* Spacing */
+  --qt-space-1: 4px;
+  --qt-space-2: 8px;
+  --qt-space-3: 12px;
+  --qt-space-4: 16px;
+  --qt-space-5: 20px;
+  --qt-space-6: 24px;
+
+  /* Shape, elevation and layering */
+  --qt-radius-sm: 6px;
+  --qt-radius-md: 8px;
+  --qt-radius-lg: 12px;
+  --qt-radius-pill: 999px;
+  --qt-shadow-card: 0 1px 2px rgba(0, 0, 0, .04), 0 1px 3px rgba(0, 0, 0, .06);
+  --qt-shadow-hover: 0 12px 24px -8px rgba(0, 0, 0, .16), 0 4px 8px -4px rgba(0, 0, 0, .10);
+  --qt-z-rail: 300;
+  --qt-z-overlay: 210;
+  --qt-z-modal: 400;
+
+  /* Motion */
+  --qt-ease-out: cubic-bezier(.16, 1, .3, 1);
+  --qt-ease-hover: cubic-bezier(.33, 1, .68, 1);
+  --qt-motion-fast: 150ms;
+  --qt-motion-normal: 200ms;
+  --qt-motion-slow: 500ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --qt-motion-fast: 0ms;
+    --qt-motion-normal: 0ms;
+    --qt-motion-slow: 0ms;
+  }
+}
