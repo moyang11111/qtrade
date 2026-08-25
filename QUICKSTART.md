@@ -117,6 +117,40 @@ python server.py --data-dir data/cache --csv-only --no-browser --single-instance
 
 打开 http://127.0.0.1:8765
 
+#### Electron 桌面壳
+
+Electron 开发环境需要 Node.js 18+、npm，以及 Python 3.10+ 和项目 Python 依赖：
+
+```bash
+python -m pip install -e .
+npm --prefix electron ci
+```
+
+在项目根目录双击 `qtrade_electron.bat`，或运行：
+
+```bash
+npm --prefix electron run start
+```
+
+应用会使用本机回环动态端口，健康检查确认后再显示窗口。Python 解释器按
+`QTRADE_PYTHON`（单个可执行文件路径）优先发现；Windows 回退到 `py -3`、`python`，
+其他平台回退到 `python3`、`python`。`QTRADE_DATA_DIR` 可指定 CSV 缓存目录，
+`QTRADE_ELECTRON_CSV_ONLY=1` 可强制离线 CSV 模式。
+
+运行 Electron 自测、语法检查和 Windows 打包：
+
+```bash
+npm --prefix electron test
+npm --prefix electron run lint
+npm --prefix electron run dist:dir   # electron/dist/win-unpacked/
+npm --prefix electron run dist:win   # electron/dist/QTrade Setup *.exe
+```
+
+打包应用携带 Python 后端、静态资源、`paper_trading/` 和本地因子模块，但不携带
+Python 解释器或依赖；运行时仍需系统 Python 3.10+ 和项目依赖，必要时设置
+`QTRADE_PYTHON`。`third_party/deepseek-harness-quant` 是独立底座，不随打包提供，
+通过 `QTRADE_BASE_DIR` 指向包含 `deck/` 的底座根目录。
+
 ### 4. 启动 API 服务
 
 ```bash

@@ -1,11 +1,20 @@
 @echo off
-cd /d "%~dp0electron"
+setlocal
+set "PROJECT_ROOT=%~dp0"
 
-if not exist ".\node_modules\electron\dist\electron.exe" (
-    echo [提示] 未找到 Electron，请先在 electron 目录执行: npm install
-    echo 浏览器模式: 双击项目根目录的 run.bat 即可。
-    pause
-    exit /b 1
+if not exist "%PROJECT_ROOT%electron\package.json" (
+    echo [ERROR] Electron project was not found under this folder.
+    endlocal & exit /b 1
 )
 
-start "" ".\node_modules\electron\dist\electron.exe" main.js
+where npm >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] npm was not found on PATH. Install Node.js 18+ first.
+    endlocal & exit /b 1
+)
+
+echo Starting QTrade Electron development app...
+call npm --prefix "%PROJECT_ROOT%electron" run start
+set "EXIT_CODE=%ERRORLEVEL%"
+if not "%EXIT_CODE%"=="0" echo [ERROR] Electron exited with code %EXIT_CODE%.
+endlocal & exit /b %EXIT_CODE%
