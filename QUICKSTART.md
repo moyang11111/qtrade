@@ -18,6 +18,9 @@ pip install -e ".[test]"
 pip install -e ".[all]"
 ```
 
+基础安装已包含桌面门户和应用内交易日调度所需的 `akshare>=1.10.0`；不需要依赖
+`.[data]` 才能启动桌面端。
+
 也可以用 requirements.txt：
 
 ```bash
@@ -136,6 +139,9 @@ npm --prefix electron run start
 `QTRADE_PYTHON`（单个可执行文件路径）优先发现；Windows 回退到 `py -3`、`python`，
 其他平台回退到 `python3`、`python`。`QTRADE_DATA_DIR` 可指定 CSV 缓存目录，
 `QTRADE_ELECTRON_CSV_ONLY=1` 可强制离线 CSV 模式。
+窗口创建前会执行一次不联网预检，确认 Python >=3.10 且 `pandas`、`akshare` 可导入。
+如果 `QTRADE_PYTHON` 已显式设置但缺少模块，错误会列出缺失模块和当前解释器路径，
+不会静默改用其他解释器；请使用该解释器执行 `python -m pip install -e .` 后重试。
 
 运行 Electron 自测、语法检查和 Windows 打包：
 

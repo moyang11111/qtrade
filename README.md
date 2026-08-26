@@ -129,8 +129,10 @@ python server.py --data-dir data/cache --csv-only --no-browser --single-instance
 
 ### Electron 桌面壳（开发与打包）
 
+基础运行依赖包含桌面门户和应用内交易日调度所需的 `akshare>=1.10.0`。
+
 Electron 壳需要 Node.js 18+、npm，以及可运行 `server.py` 的 Python 3.10+ 环境。
-先安装项目 Python 依赖，再安装锁定的 Electron 依赖：
+先安装项目 Python 依赖（包含 `pandas` 和 `akshare`），再安装锁定的 Electron 依赖：
 
 ```bash
 python -m pip install -e .
@@ -147,6 +149,9 @@ npm --prefix electron run start
 Python 发现顺序为 `QTRADE_PYTHON`（仅填写一个可执行文件路径）优先，Windows 接着尝试
 `py -3`、`python`，其他平台接着尝试 `python3`、`python`。也可设置
 `QTRADE_DATA_DIR` 指定 CSV 缓存目录；设置 `QTRADE_ELECTRON_CSV_ONLY=1` 可强制离线本地 CSV 模式。
+窗口创建前会用一次不联网的短预检确认 Python >=3.10 且 `pandas`、`akshare` 可以导入。
+若显式设置的 `QTRADE_PYTHON` 缺少依赖，应用会明确列出缺失模块和解释器路径并停止，
+不会静默切换到其他 Python；请在该解释器上运行 `python -m pip install -e .` 后重试。
 
 Electron 自测和语法检查：
 
