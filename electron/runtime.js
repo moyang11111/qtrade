@@ -43,6 +43,7 @@ function resolveRuntimePaths({
   return {
     root,
     serverScript: path.join(root, 'server.py'),
+    schedulerScript: path.join(root, 'scripts', 'daily_update_1830.py'),
     staticDir: path.join(root, 'static'),
     paperTradingDir: path.join(root, 'paper_trading'),
     bridgeScript: path.join(root, 'qtrade_base_bridge.py'),
@@ -54,6 +55,7 @@ function resolveRuntimePaths({
 function requiredRuntimeResources(paths) {
   return [
     ['server.py', paths.serverScript],
+    ['scripts/daily_update_1830.py', paths.schedulerScript],
     ['static/index.html', path.join(paths.staticDir, 'index.html')],
     ['paper_trading/engine.py', path.join(paths.paperTradingDir, 'engine.py')],
     ['qtrade_base_bridge.py', paths.bridgeScript],
