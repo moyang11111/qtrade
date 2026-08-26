@@ -19,6 +19,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
+try:
+    from qtrade_adapters.deepseek_harness import freshness
+except ModuleNotFoundError:  # pragma: no cover - isolated script packaging probe
+    freshness = None
+
 ROOT = Path(__file__).resolve().parent.parent
 DECK = ROOT / "third_party" / "deepseek-harness-quant"
 DECK_ENV = "QTRADE_DECK_DIR"
@@ -183,6 +188,9 @@ def write_status(path: Path, **values: object) -> None:
         "step": None,
         "steps": [],
         "outputs": {"portal": False, "decision": False, "factors": False, "sync": False},
+        "freshness": {},
+        "output_meta": {},
+        "retry": {"attempt": 0, "max_attempts": 3, "next_attempt_at": None},
     }
     required.update(values)
     _atomic_write_json(Path(path), required)
@@ -296,7 +304,27 @@ def _pipeline(
     started_at: str,
     steps: list[dict[str, object]],
     outputs: dict[str, bool],
+    before_artifacts: freshness.ArtifactSnapshot | None = None,
+    portal_baseline: dict[str, object] | None = None,
+    freshness_state: dict[str, dict[str, object]] | None = None,
 ) -> bool:
+    freshness_state = {} if freshness_state is None else freshness_state
+
+    def publish(step: str | None = None) -> None:
+        write_status(
+            status_path,
+            trade_date=target.isoformat(),
+            state="running",
+            reason="pipeline_running",
+            started_at=started_at,
+            finished_at=None,
+            step=step,
+            steps=steps,
+            outputs=outputs,
+            freshness=freshness_state,
+            output_meta=freshness_state,
+        )
+
     def execute(name: str, group: str, command: list[object]) -> bool:
         entry = _step(name, group, command)
         steps.append(entry)
@@ -305,63 +333,101 @@ def _pipeline(
         entry["returncode"] = result.returncode
         if result.error:
             entry["error"] = result.error
-        write_status(
-            status_path,
-            trade_date=target.isoformat(),
-            state="running",
-            reason="pipeline_running",
-            started_at=started_at,
-            finished_at=None,
-            step=name,
-            steps=steps,
-            outputs=outputs,
-        )
+        publish(name)
         if not result.ok:
             log("FAIL: 已停止后续步骤")
+            return False
+        return True
+
+    def verify(name: str, group: str, result: dict[str, object]) -> bool:
+        safe_result = {key: value for key, value in result.items() if not key.startswith("_")}
+        freshness_state[group] = safe_result
+        entry = _step(name, group, [])
+        entry["state"] = "success" if result.get("verified") else "failure"
+        entry["reason"] = result.get("reason", "verification_failed")
+        steps.append(entry)
+        publish(name)
+        if not result.get("verified"):
+            log(f"FAIL: {group} 新鲜度校验失败：{result.get('reason', 'unknown')}")
             return False
         return True
 
     common = [PY, "-X", "utf8"]
     if not execute("portal", "portal", common + [deck / "scripts" / "auto_update_daily.py"]):
         return False
+    if not dry:
+        portal_result = freshness.verify_portal(deck, target, baseline=portal_baseline)
+        if not verify("portal_freshness", "portal", portal_result):
+            return False
+    else:
+        freshness_state["portal"] = {"verified": False, "as_of": None, "source": "dry_run", "reason": "dry_run"}
     outputs["portal"] = not dry
     if not execute("factors", "factors", common + [deck / "scripts" / "build_factor_pool_engine.py"]):
         return False
+    if not dry:
+        factor_result = freshness.verify_factors(
+            deck,
+            target,
+            before=before_artifacts,
+        )
+        if not verify("factor_freshness", "factors", factor_result):
+            return False
+    else:
+        freshness_state["factors"] = {"verified": False, "as_of": None, "source": "dry_run", "reason": "dry_run"}
     outputs["factors"] = not dry
     scan = common + [deck / "factors" / "opportunities" / "scan.py", "--pitch"]
     if not execute("decision_scan", "decision", scan):
         return False
 
-    pools = sorted(
-        (deck / "logs").glob("opp_pool_*.json"),
-        key=lambda path: path.stat().st_mtime,
-    )
-    pool = pools[-1] if pools else deck / "logs" / f"opp_pool_{target:%Y%m%d}.json"
-    if pools or dry:
-        pitch = common + [deck / "factors" / "opportunities" / "pitch_v2.py", "--pool", pool]
-        if not execute("decision_pitch_v2", "decision", pitch):
+    if dry:
+        pool = deck / "logs" / f"opp_pool_{target:%Y%m%d}.json"
+    else:
+        pool_result = freshness.verify_decision(
+            deck,
+            target,
+            before=before_artifacts,
+            require_pitch=False,
+        )
+        if not verify("decision_pool_freshness", "decision", pool_result):
+            return False
+        pool = pool_result.get("_pool_path")
+        if not isinstance(pool, Path):
+            log("FAIL: 当前交易日机会池路径不可确认")
+            return False
+    pitch = common + [deck / "factors" / "opportunities" / "pitch_v2.py", "--pool", pool]
+    if not execute("decision_pitch_v2", "decision", pitch):
+        return False
+    if not dry:
+        decision_result = freshness.verify_decision(
+            deck,
+            target,
+            before=before_artifacts,
+            require_pitch=True,
+        )
+        if not verify("decision_freshness", "decision", decision_result):
             return False
     else:
-        entry = _step("decision_pitch_v2", "decision", [])
-        entry["state"] = "skipped"
-        entry["reason"] = "no_opp_pool"
-        steps.append(entry)
-        write_status(
-            status_path,
-            trade_date=target.isoformat(),
-            state="running",
-            reason="pipeline_running",
-            started_at=started_at,
-            finished_at=None,
-            step="decision_pitch_v2",
-            steps=steps,
-            outputs=outputs,
-        )
-        log("WARN: 没有找到 opp_pool_*.json，跳过 pitch_v2")
+        freshness_state["decision"] = {"verified": False, "as_of": None, "source": "dry_run", "reason": "dry_run"}
     outputs["decision"] = not dry
 
+    sync_target = None
+    sync_before = None
+    if not dry:
+        sync_target = freshness.resolve_sync_destination(deck)
+        if sync_target is not None and sync_target.exists():
+            sync_before = freshness.capture_artifacts(sync_target)
     if not execute("sync", "sync", common + [deck / "scripts" / "sync_data_to_roaming.py"]):
         return False
+    if not dry:
+        sync_result = freshness.verify_sync(
+            sync_target,
+            target,
+            before=sync_before,
+        )
+        if not verify("sync_freshness", "sync", sync_result):
+            return False
+    else:
+        freshness_state["sync"] = {"verified": False, "as_of": None, "source": "dry_run", "reason": "dry_run"}
     outputs["sync"] = not dry
     return True
 
@@ -444,6 +510,7 @@ def main(
         started_at = now_provider().isoformat(timespec="seconds")
         steps: list[dict[str, object]] = []
         outputs = {"portal": False, "decision": False, "factors": False, "sync": False}
+        freshness_state: dict[str, dict[str, object]] = {}
         write_status(
             status,
             trade_date=target.isoformat(),
@@ -454,6 +521,8 @@ def main(
             step=None,
             steps=steps,
             outputs=outputs,
+            freshness=freshness_state,
+            output_meta=freshness_state,
         )
 
         if args.force:
@@ -494,6 +563,22 @@ def main(
             return 0
 
         log(f"交易日更新开始：{target}（{'DRY' if args.dry else 'REAL'}）")
+        if not args.dry and freshness is None:
+            log("FAIL: 新鲜度校验模块不可用，无法安全执行更新")
+            write_status(
+                status,
+                trade_date=target.isoformat(),
+                state="failure",
+                reason="freshness_adapter_missing",
+                started_at=started_at,
+                finished_at=now_provider().isoformat(timespec="seconds"),
+                step="freshness",
+                steps=steps,
+                outputs=outputs,
+            )
+            return 1
+        before_artifacts = freshness.capture_artifacts(deck) if freshness is not None else None
+        portal_baseline = freshness.capture_portal_baseline(deck) if freshness is not None else None
         try:
             completed = _pipeline(
                 deck=deck,
@@ -503,6 +588,9 @@ def main(
                 started_at=started_at,
                 steps=steps,
                 outputs=outputs,
+                before_artifacts=before_artifacts,
+                portal_baseline=portal_baseline,
+                freshness_state=freshness_state,
             )
         except Exception as error:  # noqa: BLE001 - status must record unexpected failures
             log(f"FAIL: 更新流程异常：{error}")
@@ -521,6 +609,8 @@ def main(
                 step=steps[-1].get("name") if steps else "pipeline",
                 steps=steps,
                 outputs=outputs,
+                freshness=freshness_state,
+                output_meta=freshness_state,
             )
             return 1
 
@@ -536,6 +626,8 @@ def main(
             step=None,
             steps=steps,
             outputs=outputs,
+            freshness=freshness_state,
+            output_meta=freshness_state,
         )
         return 0
 
