@@ -66,6 +66,7 @@ def test_packaged_scheduler_dry_run_uses_isolated_deck_without_updates(tmp_path:
         {
             "QTRADE_DECK_DIR": str(tmp_path / "ignored-deck"),
             "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONIOENCODING": "utf-8",
         }
     )
 
@@ -75,6 +76,7 @@ def test_packaged_scheduler_dry_run_uses_isolated_deck_without_updates(tmp_path:
         env=environment,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
 
