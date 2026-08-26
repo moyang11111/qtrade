@@ -194,6 +194,8 @@ python scripts/daily_update_1830.py --deck-dir "D:\path\to\deepseek-harness-quan
 
 需要人工补跑可执行 `python scripts/daily_update_1830.py --force`，目标日期可用 `--date YYYY-MM-DD` 指定；结构化状态默认写入 `logs/daily_update_1830.status.json`，运行日志写入 `logs/daily_update_1830.log`，可用 `--status-file` 覆盖状态路径。每日流程只更新底层数据，不自动交易或启动 HARNESS。
 
+QTrade 打开期间，界面会低频读取只读接口 `/api/update/status`。检测到新的成功状态后，当前门户、决策或因子仪表页面刷新一次；行情页不切页、不整页重载，之后切换到相关页面会自动读取新数据。相同成功状态只处理一次，更新中、失败、休市以及缺失/损坏状态文件都会安全等待下一轮。
+
 ## 核心概念
 
 ### 1. 策略接口

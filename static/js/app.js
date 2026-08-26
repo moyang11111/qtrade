@@ -11,6 +11,8 @@
     allSymbols: [],
     activeSymbol: null,
     lastBacktest: null,   // 最近一次回测结果
+    activePage: 'market',
+    updateToken: null,
   };
 
   const recentStocks = JSON.parse(localStorage.getItem('qtrade_recent') || '[]');
@@ -18,6 +20,12 @@
   const logs = [];
 
   let chartManager = null;
+  let updateMonitor = null;
+  const EMBED_IFRAME_IDS = Object.freeze({
+    portal: 'iframePortal',
+    pitch: 'iframePitch',
+    factorboard: 'iframeFactorBoard',
+  });
 
   // ======================== DOM 引用 ========================
   const $ = (id) => document.getElementById(id);
@@ -45,6 +53,7 @@
     factorSym: $('factorSym'), factorError: $('factorError'),
     factorTable: $('factorTable') ? $('factorTable').querySelector('tbody') : null,
     riskBody: $('riskBody'), riskError: $('riskError'),
+    updateStatus: $('updateStatus'),
   };
 
   // ======================== 日志 ========================
@@ -538,8 +547,44 @@
     limit_up_flag: '当日涨停', limit_down_flag: '当日跌停',
   };
   function setRailActive(page) {
+    state.activePage = page;
     document.querySelectorAll('.deck-item').forEach(b =>
       b.classList.toggle('active', b.dataset.page === page));
+  }
+
+  function applyEmbeddedUpdate(page, token = state.updateToken) {
+    const frameId = EMBED_IFRAME_IDS[page];
+    const frame = frameId ? $(frameId) : null;
+    const route = window.QTradeUpdate && window.QTradeUpdate.cacheBustedRoute(page, token);
+    if (!frame || !route || frame.getAttribute('src') === route) return;
+    frame.setAttribute('src', route);
+  }
+
+  function updateStatusLabel(status) {
+    const el = els.updateStatus;
+    if (!el || !status) return;
+    const labels = {
+      running: '数据更新中…',
+      success: '数据已更新',
+      skip: '今日无需更新',
+      failure: '数据更新失败',
+    };
+    const label = labels[status.state];
+    if (!label) {
+      el.hidden = true;
+      return;
+    }
+    el.textContent = label;
+    el.dataset.state = status.state;
+    el.hidden = false;
+  }
+
+  function handleUpdateSuccess(status, token, page) {
+    state.updateToken = token;
+    if (EMBED_IFRAME_IDS[page] && state.activePage === page) {
+      applyEmbeddedUpdate(page, token);
+    }
+    updateStatusLabel(status);
   }
   function hideAllOverlays() {
     ['trainingOverlay', 'autoPaperOverlay', 'pageFactors', 'pageRisk',
@@ -553,6 +598,7 @@
     const el = document.getElementById(id);
     if (el) el.hidden = false;
     setRailActive(page);
+    applyEmbeddedUpdate(page);
   }
   function showMarketPage() {
     hideAllOverlays();
@@ -719,6 +765,18 @@
     log('🔄 已刷新');
   }
 
+  function startUpdateMonitor() {
+    if (!window.QTradeUpdate) return;
+    updateMonitor = window.QTradeUpdate.createMonitor({
+      getStatus: () => API.getUpdateStatus(),
+      getPage: () => state.activePage,
+      onSuccess: handleUpdateSuccess,
+      setIndicator: updateStatusLabel,
+    });
+    updateMonitor.start();
+    window.addEventListener('pagehide', () => updateMonitor.stop(), { once: true });
+  }
+
   // ======================== 启动 ========================
   async function init() {
     chartManager = new ChartManager.ChartManager($('chartContainer'));
@@ -740,6 +798,7 @@
     const first = recentStocks[0] || state.allSymbols[0];
     if (first) await selectStock(first);
     else els.symName.textContent = '无数据';
+    startUpdateMonitor();
   }
 
   document.addEventListener('DOMContentLoaded', init);

@@ -28,6 +28,7 @@ import os
 import sqlite3
 import socket
 import argparse
+import re
 import threading
 import urllib.request
 import urllib.parse
@@ -2622,6 +2623,80 @@ STATIC_DIR: Path = None
 AI_PAPER: AiPaperTrader = None
 AUTO_PAPER: AutoPaperTrader = None
 
+UPDATE_STATUS_PATH = Path(__file__).resolve().parent / "logs" / "daily_update_1830.status.json"
+_UPDATE_STATUS_STATES = frozenset({"running", "skip", "success", "failure"})
+_UPDATE_STATUS_REASONS = frozenset({
+    "started",
+    "pipeline_running",
+    "completed",
+    "dry_run",
+    "forced",
+    "weekend",
+    "calendar_cache",
+    "calendar_cache_closed",
+    "calendar_api",
+    "calendar_api_closed",
+    "deck_missing",
+    "step_failed",
+    "lock_busy",
+    "status_unavailable",
+    "update_failed",
+    "calendar_unavailable",
+})
+_UPDATE_STATUS_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_UPDATE_STATUS_TIMESTAMP = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$"
+)
+_UPDATE_STATUS_OUTPUTS = ("portal", "decision", "factors")
+
+
+def read_update_status(path: Path | None = None) -> dict:
+    """Read the daily-update status without exposing local runtime details."""
+    fallback = {
+        "schema_version": 1,
+        "trade_date": None,
+        "state": "unknown",
+        "reason": "status_unavailable",
+        "started_at": None,
+        "finished_at": None,
+        "outputs": {key: False for key in _UPDATE_STATUS_OUTPUTS},
+    }
+    try:
+        payload = json.loads(Path(path or UPDATE_STATUS_PATH).read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return fallback
+    if not isinstance(payload, dict):
+        return fallback
+
+    result = dict(fallback)
+    version = payload.get("schema_version")
+    if isinstance(version, int) and not isinstance(version, bool):
+        result["schema_version"] = version
+    trade_date = payload.get("trade_date")
+    if isinstance(trade_date, str) and _UPDATE_STATUS_DATE.fullmatch(trade_date):
+        result["trade_date"] = trade_date
+    state = payload.get("state")
+    if isinstance(state, str) and state in _UPDATE_STATUS_STATES:
+        result["state"] = state
+    reason = payload.get("reason")
+    if isinstance(reason, str):
+        if reason in _UPDATE_STATUS_REASONS:
+            result["reason"] = reason
+        elif reason.startswith("calendar_unavailable:"):
+            result["reason"] = "calendar_unavailable"
+        elif result["state"] == "failure":
+            result["reason"] = "update_failed"
+    for key in ("started_at", "finished_at"):
+        value = payload.get(key)
+        if isinstance(value, str) and _UPDATE_STATUS_TIMESTAMP.fullmatch(value):
+            result[key] = value
+    outputs = payload.get("outputs")
+    if isinstance(outputs, dict) and result["state"] != "unknown":
+        result["outputs"] = {
+            key: outputs.get(key) is True for key in _UPDATE_STATUS_OUTPUTS
+        }
+    return result
+
 
 class APIHandler(SimpleHTTPRequestHandler):
     """静态文件 + JSON API。"""
@@ -2669,6 +2744,7 @@ class APIHandler(SimpleHTTPRequestHandler):
             return
         router = {
             "/api/health": self._health,
+            "/api/update/status": self._update_status,
             "/api/symbols": self._symbols,
             "/api/backtest": self._backtest,
             "/api/ai/paper": self._ai_paper,
@@ -2710,6 +2786,9 @@ class APIHandler(SimpleHTTPRequestHandler):
             "symbols": len(SERVICE.scan()),
             "mode": "live" if live else "csv",
         })
+
+    def _update_status(self, query):
+        self._json(read_update_status())
 
     def _symbols(self, query):
         self._json(SERVICE.scan())

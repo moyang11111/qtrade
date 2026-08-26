@@ -149,6 +149,17 @@ body {
   background: rgba(39, 174, 96, .08);
   -webkit-app-region: no-drag;
 }
+.toolbar .update-status {
+  font-size: 10px;
+  color: var(--text-sec);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1px 8px;
+  -webkit-app-region: no-drag;
+}
+.toolbar .update-status[data-state="success"] { color: var(--up); border-color: rgba(231, 76, 60, .5); }
+.toolbar .update-status[data-state="failure"] { color: var(--signal); border-color: rgba(245, 158, 11, .5); }
+.toolbar .update-status[data-state="running"] { color: var(--text-sec); }
 
 /* ============================================================
    按钮（默认暗色 ghost；强调态为靛蓝→紫渐变 v2-btn）
