@@ -27,6 +27,10 @@ test('development and packaged runtime roots are deterministic', () => {
   });
   assert.equal(development.root, PROJECT_ROOT);
   assert.equal(path.basename(development.serverScript), 'server.py');
+  assert.equal(
+    development.schedulerScript,
+    path.join(PROJECT_ROOT, 'scripts', 'daily_update_1830.py')
+  );
   assert.equal(path.basename(development.staticDir), 'static');
   assert.equal(path.basename(development.paperTradingDir), 'paper_trading');
 
@@ -36,6 +40,10 @@ test('development and packaged runtime roots are deterministic', () => {
   });
   assert.equal(packaged.root, path.join('C:', 'QTrade', 'resources', 'qtrade'));
   assert.equal(packaged.staticDir, path.join(packaged.root, 'static'));
+  assert.equal(
+    packaged.schedulerScript,
+    path.join(packaged.root, 'scripts', 'daily_update_1830.py')
+  );
 });
 
 test('data directory priority separates development and packaged defaults', () => {
@@ -76,12 +84,23 @@ test('required packaged resources include the Python server and its local import
   const labels = runtime.requiredRuntimeResources(paths).map(([label]) => label);
   assert.deepEqual(labels, [
     'server.py',
+    'scripts/daily_update_1830.py',
     'static/index.html',
     'paper_trading/engine.py',
     'qtrade_base_bridge.py',
     'factors.py',
   ]);
   assert.doesNotThrow(() => runtime.assertRuntimeResources(paths));
+});
+
+test('resource preflight rejects a missing packaged scheduler script', () => {
+  const paths = runtime.resolveRuntimePaths({ rootOverride: PROJECT_ROOT });
+  assert.throws(
+    () => runtime.assertRuntimeResources(paths, {
+      existsSync: (resourcePath) => resourcePath !== paths.schedulerScript,
+    }),
+    /scripts\/daily_update_1830\.py/
+  );
 });
 
 test('Python discovery honors QTRADE_PYTHON without shell parsing', () => {
@@ -409,6 +428,28 @@ test('preload, package resources, and launcher are present and portable', () => 
     assert.ok(fs.existsSync(path.join(PROJECT_ROOT, relativePath)), relativePath);
   }
   assert.ok(packageJson.build.extraResources.some((entry) => entry.to === 'qtrade/static'));
+  const schedulerEntry = packageJson.build.extraResources.find(
+    (entry) => entry.to === 'qtrade/scripts/daily_update_1830.py'
+  );
+  assert.deepEqual(schedulerEntry, {
+    from: '../scripts/daily_update_1830.py',
+    to: 'qtrade/scripts/daily_update_1830.py',
+    filter: [
+      '**/*.py',
+      '!**/__pycache__/**',
+      '!**/*.pyc',
+    ],
+  });
+  assert.equal(
+    packageJson.build.extraResources.filter((entry) => entry.to.startsWith('qtrade/scripts/')).length,
+    1
+  );
+  assert.deepEqual(
+    schedulerEntry.filter.filter((pattern) => !pattern.startsWith('!')),
+    ['**/*.py']
+  );
+  assert.ok(schedulerEntry.filter.includes('!**/__pycache__/**'));
+  assert.ok(schedulerEntry.filter.includes('!**/*.pyc'));
   const paperTradingEntry = packageJson.build.extraResources.find(
     (entry) => entry.to === 'qtrade/paper_trading'
   );

@@ -32,6 +32,15 @@
         "to": "qtrade/server.py"
       },
       {
+        "from": "../scripts/daily_update_1830.py",
+        "to": "qtrade/scripts/daily_update_1830.py",
+        "filter": [
+          "**/*.py",
+          "!**/__pycache__/**",
+          "!**/*.pyc"
+        ]
+      },
+      {
         "from": "../qtrade_base_bridge.py",
         "to": "qtrade/qtrade_base_bridge.py"
       },
