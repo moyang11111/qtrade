@@ -62,6 +62,21 @@
     els.error.hidden = false;
   }
 
+  function renderUniverseMetric(st) {
+    const summary = st.universe_summary;
+    if (!summary || typeof summary !== 'object') {
+      return st.universe_size
+        ? `<span class="mono">${fmt(st.universe_size)} 只</span>`
+        : '<span class="muted">--</span>';
+    }
+    const count = (value) => Number.isFinite(Number(value)) ? fmt(Number(value)) : '--';
+    const source = summary.source === 'external_sqlite' ? '底座只读'
+      : summary.source === 'fallback' ? '回退池' : (summary.source || '--');
+    const asOf = summary.as_of || '--';
+    return `<span class="mono">主板总池 ${count(summary.total)} / 可计算 ${count(summary.computable)} / 候选 ${count(summary.candidate)}</span>`
+      + `<span class="sub">${escapeHtml(source)} · ${escapeHtml(asOf)}</span>`;
+  }
+
   // ---------- 渲染 ----------
 
   function render(st) {
@@ -87,7 +102,7 @@
       { label: '现金', html: `<span class="mono">¥${fmt(st.cash)}</span>`, cls: '' },
       { label: '持仓市值', html: `<span class="mono">¥${fmt(st.market_value)}</span>`, cls: '' },
       { label: '仓位', html: `<span class="mono">${st.position_count}/${st.max_positions}</span>`, cls: '' },
-      { label: '股票池', html: st.universe_size ? `<span class="mono">${fmt(st.universe_size)} 只</span>` : '<span class="muted">--</span>', cls: '' },
+      { label: '股票池', html: renderUniverseMetric(st), cls: '' },
       { label: '上次轮询', html: st.last_run ? `<span class="mono">${st.last_run.slice(11)}</span>` : '<span class="muted">--</span>', cls: '' },
       { label: '运行状态', html: st.running ? '<span class="up">● 运行中</span>' : '<span class="muted">○ 已暂停</span>', cls: st.running ? 'up' : '' },
     ];
