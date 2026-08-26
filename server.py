@@ -50,6 +50,13 @@ from qtrade_adapters.deepseek_harness.market_data import (
     MainboardMarketDataAdapter,
     normalize_code,
 )
+from qtrade_adapters.deepseek_harness.factor_library import (
+    FactorLibrary,
+    FactorLibraryError,
+    FactorValidationError,
+    MAX_BODY_BYTES,
+    resolve_factor_library_path,
+)
 
 # ============================================================================
 # 实时数据源（腾讯）
@@ -2759,6 +2766,9 @@ SERVICE: DataService = None
 STATIC_DIR: Path = None
 AI_PAPER: AiPaperTrader = None
 AUTO_PAPER: AutoPaperTrader = None
+FACTOR_LIBRARY: FactorLibrary | None = None
+FACTOR_LIBRARY_FILE: Path | None = None
+FACTOR_LIBRARY_PREFIX = "/api/factor-library"
 
 UPDATE_STATUS_PATH = Path(__file__).resolve().parent / "logs" / "daily_update_1830.status.json"
 _UPDATE_STATUS_STATES = frozenset({"running", "skip", "success", "failure"})
@@ -2933,6 +2943,16 @@ def read_update_status(path: Path | None = None) -> dict:
     return result
 
 
+def get_factor_library() -> FactorLibrary:
+    """Return the process-local factor plan store outside packaged resources."""
+
+    global FACTOR_LIBRARY
+    if FACTOR_LIBRARY is None:
+        path = FACTOR_LIBRARY_FILE or resolve_factor_library_path()
+        FACTOR_LIBRARY = FactorLibrary(path, qtrade_base_bridge.base_dir())
+    return FACTOR_LIBRARY
+
+
 class APIHandler(SimpleHTTPRequestHandler):
     """静态文件 + JSON API。"""
 
@@ -2962,18 +2982,211 @@ class APIHandler(SimpleHTTPRequestHandler):
     def _decide_bg_sync(self, base):
         return qtrade_base_bridge.decide_bg_sync(base)
 
+    @staticmethod
+    def _is_factor_library_path(path: str) -> bool:
+        return path == FACTOR_LIBRARY_PREFIX or path.startswith(FACTOR_LIBRARY_PREFIX + "/")
+
+    def _factor_error(self, error: FactorLibraryError, *, status: int | None = None):
+        self._json({
+            "error": error.code,
+            "message": error.public_message,
+        }, status=status or error.status_code)
+
+    def _factor_unexpected(self):
+        self._json({
+            "error": "factor_library_unavailable",
+            "message": "factor library is temporarily unavailable",
+        }, status=503)
+
+    def _read_factor_body(self, *, optional: bool = False) -> dict | None:
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        length_text = self.headers.get("Content-Length", "0")
+        try:
+            length = int(length_text)
+        except (TypeError, ValueError):
+            self._json({"error": "invalid_request", "message": "invalid request body"}, status=400)
+            return None
+        if length < 0 or length > MAX_BODY_BYTES:
+            self._json({"error": "request_too_large", "message": "request body is too large"}, status=413)
+            return None
+        if length == 0 and optional:
+            return {}
+        if content_type != "application/json":
+            self._json({"error": "unsupported_media_type", "message": "application/json is required"}, status=415)
+            return None
+        try:
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                self._json({"error": "invalid_request", "message": "request body is incomplete"}, status=400)
+                return None
+            if len(raw) > MAX_BODY_BYTES:
+                self._json({"error": "request_too_large", "message": "request body is too large"}, status=413)
+                return None
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            self._json({"error": "invalid_request", "message": "request body must be valid JSON"}, status=400)
+            return None
+        if not isinstance(payload, dict):
+            self._json({"error": "invalid_request", "message": "request body must be an object"}, status=400)
+            return None
+        return payload
+
+    @staticmethod
+    def _factor_parts(path: str) -> list[str]:
+        return [urllib.parse.unquote(part) for part in path[len(FACTOR_LIBRARY_PREFIX):].strip("/").split("/") if part]
+
+    def _factor_path_error(self):
+        self._json({"error": "not_found", "message": "factor library resource not found"}, status=404)
+
+    def _factor_get(self, path: str):
+        parts = self._factor_parts(path)
+        if not parts:
+            try:
+                return self._json({
+                    "schema_version": 1,
+                    "items": get_factor_library().list_items(),
+                })
+            except FactorLibraryError as error:
+                return self._factor_error(error)
+            except Exception:
+                return self._factor_unexpected()
+        if len(parts) == 1:
+            try:
+                item = get_factor_library().get(parts[0])
+            except FactorLibraryError as error:
+                return self._factor_error(error)
+            except Exception:
+                return self._factor_unexpected()
+            if item is None:
+                return self._factor_path_error()
+            return self._json(item)
+        return self._factor_path_error()
+
+    def _factor_post(self, path: str):
+        parts = self._factor_parts(path)
+        if parts == ["preview"]:
+            body = self._read_factor_body()
+            if body is None:
+                return
+            if set(body) != {"conditions"}:
+                return self._factor_error(FactorValidationError("preview accepts only conditions"))
+
+            def operation():
+                return get_factor_library().preview(body["conditions"])
+
+            success_status = 200
+        elif not parts:
+            body = self._read_factor_body()
+            if body is None:
+                return
+            unknown = set(body) - {"name", "description", "conditions"}
+            if unknown or "name" not in body:
+                return self._factor_error(FactorValidationError("create accepts name, description, and conditions"))
+
+            def operation():
+                return get_factor_library().create(
+                    body["name"], body.get("description", ""), body.get("conditions", {})
+                )
+
+            success_status = 201
+        elif len(parts) == 2 and parts[1] == "refresh":
+            body = self._read_factor_body(optional=True)
+            if body is None:
+                return
+            if body:
+                return self._factor_error(FactorValidationError("refresh does not accept a request body"))
+
+            def operation():
+                return get_factor_library().refresh(parts[0])
+
+            success_status = 200
+        else:
+            return self._factor_path_error()
+        try:
+            result = operation()
+        except FactorLibraryError as error:
+            return self._factor_error(error)
+        except Exception:
+            return self._factor_unexpected()
+        if result is None:
+            return self._factor_path_error()
+        return self._json(result, status=success_status)
+
+    def _factor_put(self, path: str):
+        parts = self._factor_parts(path)
+        if len(parts) != 1:
+            return self._factor_path_error()
+        body = self._read_factor_body()
+        if body is None:
+            return
+        unknown = set(body) - {"name", "description", "conditions"}
+        if unknown or not body:
+            return self._factor_error(FactorValidationError("update accepts name, description, and conditions"))
+        try:
+            result = get_factor_library().update(
+                parts[0],
+                name=body.get("name"),
+                description=body.get("description"),
+                conditions=body.get("conditions"),
+                update_conditions="conditions" in body,
+            )
+        except FactorLibraryError as error:
+            return self._factor_error(error)
+        except Exception:
+            return self._factor_unexpected()
+        if result is None:
+            return self._factor_path_error()
+        return self._json(result)
+
+    def _factor_delete(self, path: str):
+        parts = self._factor_parts(path)
+        if len(parts) != 1:
+            return self._factor_path_error()
+        try:
+            deleted = get_factor_library().delete(parts[0])
+        except FactorLibraryError as error:
+            return self._factor_error(error)
+        except Exception:
+            return self._factor_unexpected()
+        if not deleted:
+            return self._factor_path_error()
+        return self._json({"deleted": True, "id": parts[0]})
+
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+        if self._is_factor_library_path(path):
+            return self._factor_post(path)
         if qtrade_base_bridge.QtradeDeckHandler(self).handle_post(path):
             return
         self._json({"error": "unsupported POST method"}, status=404)
+
+    def do_PUT(self):
+        path = urllib.parse.urlparse(self.path).path
+        if self._is_factor_library_path(path):
+            return self._factor_put(path)
+        self._json({"error": "unsupported method"}, status=405)
+
+    def do_DELETE(self):
+        path = urllib.parse.urlparse(self.path).path
+        if self._is_factor_library_path(path):
+            return self._factor_delete(path)
+        self._json({"error": "unsupported method"}, status=405)
+
+    def do_PATCH(self):
+        path = urllib.parse.urlparse(self.path).path
+        if self._is_factor_library_path(path):
+            self._json({"error": "method_not_allowed", "message": "PATCH is not supported"}, status=405)
+            return
+        self._json({"error": "unsupported method"}, status=405)
 
     # ---------- 路由 ----------
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path, query = parsed.path, urllib.parse.parse_qs(parsed.query)
+        if self._is_factor_library_path(path):
+            return self._factor_get(path)
         # 复用 deepseek-harness-quant 门户/决策/控制台（同端口）
         if self._try_base_deck(path):
             return
@@ -3259,7 +3472,7 @@ def _maybe_auto_update():
 
 
 def main():
-    global SERVICE, STATIC_DIR
+    global SERVICE, STATIC_DIR, FACTOR_LIBRARY, FACTOR_LIBRARY_FILE
 
     # ---- 修复 Windows GBK 编码问题（保留 write_through 避免缓冲丢失输出） ----
     # pythonw.exe 下无控制台，sys.stdout 为 None，需判空。
@@ -3275,12 +3488,19 @@ def main():
     parser.add_argument("--port", type=int, default=8765, help="HTTP 服务端口")
     parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
     parser.add_argument("--csv-only", action="store_true", help="只用本地 CSV，不连实时接口")
+    parser.add_argument(
+        "--factor-library-file",
+        default=None,
+        help="因子方案 JSON 存储路径（优先于 QTRADE_FACTOR_LIBRARY_FILE）",
+    )
     parser.add_argument("--single-instance", action="store_true",
                         help="后台服务模式：端口被占用时直接退出（不换端口），防止重复进程")
     args = parser.parse_args()
 
     data_dir = find_data_dir(args.data_dir)
     live = not args.csv_only
+    FACTOR_LIBRARY_FILE = resolve_factor_library_path(args.factor_library_file)
+    FACTOR_LIBRARY = FactorLibrary(FACTOR_LIBRARY_FILE, qtrade_base_bridge.base_dir())
 
     # 后台服务模式：已有实例在跑就直接退出，防止重复进程
     if args.single_instance and port_in_use(args.port):
