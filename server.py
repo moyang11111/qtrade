@@ -2785,6 +2785,53 @@ _UPDATE_STATUS_TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$"
 )
 _UPDATE_STATUS_OUTPUTS = ("portal", "decision", "factors")
+_UPDATE_STATUS_FRESHNESS_GROUPS = ("portal", "factors", "decision", "sync")
+_UPDATE_STATUS_FRESHNESS_SOURCES = frozenset({
+    "external_sqlite",
+    "factor_artifacts",
+    "decision_artifact",
+    "sync_target",
+    "dry_run",
+    "unavailable",
+})
+_UPDATE_STATUS_FRESHNESS_REASONS = frozenset({
+    "baseline_captured",
+    "verified",
+    "dry_run",
+    "database_unavailable",
+    "metadata_missing",
+    "metadata_schema_unsupported",
+    "metadata_read_error",
+    "bars_missing",
+    "bars_schema_unsupported",
+    "bars_read_error",
+    "factor_artifact_missing",
+    "factor_date_mismatch",
+    "factor_artifact_unchanged",
+    "factor_core_artifact_missing",
+    "factor_count_missing",
+    "decision_pool_missing_or_stale",
+    "decision_empty_result_unconfirmed",
+    "decision_pitch_missing_or_stale",
+    "sync_target_unavailable",
+    "sync_target_missing",
+    "sync_target_stale_or_incomplete",
+    "portal_date_missing",
+    "portal_stale",
+    "portal_coverage_insufficient",
+})
+_UPDATE_STATUS_FRESHNESS_COUNTS = (
+    "total",
+    "computable",
+    "tradable",
+    "coverage",
+    "coverage_required",
+    "factor_count",
+    "valid_count",
+    "artifact_count",
+    "pool_count",
+    "pitch_count",
+)
 
 
 def read_update_status(path: Path | None = None) -> dict:
@@ -2832,6 +2879,57 @@ def read_update_status(path: Path | None = None) -> dict:
         result["outputs"] = {
             key: outputs.get(key) is True for key in _UPDATE_STATUS_OUTPUTS
         }
+
+    def safe_freshness(value):
+        if not isinstance(value, dict):
+            return {}
+        safe = {}
+        for group in _UPDATE_STATUS_FRESHNESS_GROUPS:
+            item = value.get(group)
+            if not isinstance(item, dict):
+                continue
+            clean = {"verified": item.get("verified") is True}
+            as_of = item.get("as_of")
+            if isinstance(as_of, str) and _UPDATE_STATUS_DATE.fullmatch(as_of[:10]):
+                clean["as_of"] = as_of[:10]
+            else:
+                clean["as_of"] = None
+            source = item.get("source")
+            clean["source"] = source if source in _UPDATE_STATUS_FRESHNESS_SOURCES else "unavailable"
+            reason_value = item.get("reason")
+            clean["reason"] = (
+                reason_value if reason_value in _UPDATE_STATUS_FRESHNESS_REASONS else "unavailable"
+            )
+            for key in _UPDATE_STATUS_FRESHNESS_COUNTS:
+                count = item.get(key)
+                if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                    clean[key] = count
+            if isinstance(item.get("pitch_verified"), bool):
+                clean["pitch_verified"] = item["pitch_verified"]
+            for key in ("portal", "factors", "decision"):
+                if isinstance(item.get(key), bool):
+                    clean[key] = item[key]
+            safe[group] = clean
+        return safe
+
+    freshness = safe_freshness(payload.get("freshness"))
+    if freshness:
+        result["freshness"] = freshness
+    output_meta = safe_freshness(payload.get("output_meta"))
+    if output_meta:
+        result["output_meta"] = output_meta
+    retry = payload.get("retry")
+    if isinstance(retry, dict):
+        safe_retry = {}
+        for key in ("attempt", "max_attempts"):
+            value = retry.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                safe_retry[key] = value
+        next_attempt = retry.get("next_attempt_at")
+        if isinstance(next_attempt, str) and _UPDATE_STATUS_TIMESTAMP.fullmatch(next_attempt):
+            safe_retry["next_attempt_at"] = next_attempt
+        if safe_retry:
+            result["retry"] = safe_retry
     return result
 
 

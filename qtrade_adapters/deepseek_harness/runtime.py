@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
+import time
 from pathlib import Path
 
 from . import config
@@ -19,6 +22,14 @@ DAILY_UPDATE_TIMEOUT_SECONDS = 7200
 _AUTO_UPDATE_LOCK = threading.Lock()
 _AUTO_UPDATE_SCHEDULER = None
 _AUTO_UPDATE_THREAD = None
+_TRANSIENT_UPDATE_REASONS = frozenset({
+    "lock_busy",
+    "portal_date_missing",
+    "portal_stale",
+    "portal_coverage_insufficient",
+    "sync_target_missing",
+    "sync_target_stale_or_incomplete",
+})
 
 
 def ensure_harness(
@@ -202,6 +213,59 @@ def build_daily_update_command(
     ]
 
 
+def _status_has_transient_failure(path: Path) -> bool:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    reasons = [payload.get("reason")]
+    freshness = payload.get("freshness")
+    if isinstance(freshness, dict):
+        reasons.extend(
+            value.get("reason")
+            for value in freshness.values()
+            if isinstance(value, dict)
+        )
+    return any(reason in _TRANSIENT_UPDATE_REASONS for reason in reasons)
+
+
+def _record_retry(path: Path, attempt: int, max_attempts: int, next_attempt_at: datetime.datetime) -> None:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return
+        payload["retry"] = {
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+            "next_attempt_at": next_attempt_at.isoformat(timespec="seconds"),
+        }
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=destination.parent,
+                prefix=f".{destination.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as stream:
+                temporary = Path(stream.name)
+                json.dump(payload, stream, ensure_ascii=False, indent=2, sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, destination)
+        finally:
+            if temporary is not None and temporary.exists():
+                temporary.unlink()
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return
+
+
 def run_daily_update(
     base: Path,
     target: datetime.date,
@@ -211,13 +275,22 @@ def run_daily_update(
     project_root: Path | None = None,
     status_file: Path | None = None,
     python_executable: str | None = None,
+    max_attempts: int = 3,
+    retry_delay_seconds: float = 300.0,
+    sleep_fn=None,
+    stop_event=None,
+    clock=None,
 ) -> int:
-    """Run the daily script synchronously from the scheduler thread."""
+    """Run the daily script, retrying only explicitly transient freshness failures."""
 
     processes = subprocess if subprocess_module is None else subprocess_module
     process_env = dict(os.environ if environment is None else environment)
     process_env["QTRADE_DECK_DIR"] = str(base)
     root = config.PROJECT_ROOT if project_root is None else Path(project_root)
+    status_path = Path(status_file or root / "logs" / "daily_update_1830.status.json")
+    attempts = max(1, int(max_attempts))
+    sleeper = time.sleep if sleep_fn is None else sleep_fn
+    now = datetime.datetime.now if clock is None else clock
     command = build_daily_update_command(
         Path(base),
         target,
@@ -225,17 +298,29 @@ def run_daily_update(
         status_file=status_file,
         python_executable=python_executable,
     )
-    try:
-        result = processes.run(
-            command,
-            cwd=str(root),
-            env=process_env,
-            timeout=DAILY_UPDATE_TIMEOUT_SECONDS,
-        )
-    except Exception as error:  # noqa: BLE001 - scheduler records a failed day
-        print(f"[auto-update] daily_update_1830 启动失败：{error}", flush=True)
-        return 1
-    return int(getattr(result, "returncode", 0))
+    for attempt in range(1, attempts + 1):
+        try:
+            result = processes.run(
+                command,
+                cwd=str(root),
+                env=process_env,
+                timeout=DAILY_UPDATE_TIMEOUT_SECONDS,
+            )
+        except Exception as error:  # noqa: BLE001 - scheduler records a failed day
+            print(f"[auto-update] daily_update_1830 启动失败：{error}", flush=True)
+            return 1
+        returncode = int(getattr(result, "returncode", 0))
+        if returncode == 0:
+            return 0
+        if attempt >= attempts or not _status_has_transient_failure(status_path):
+            return returncode
+        next_attempt = now() + datetime.timedelta(seconds=retry_delay_seconds)
+        _record_retry(status_path, attempt, attempts, next_attempt)
+        if stop_event is not None and stop_event.wait(retry_delay_seconds):
+            return 1
+        if stop_event is None:
+            sleeper(retry_delay_seconds)
+    return 1
 
 
 def _legacy_injected_update(

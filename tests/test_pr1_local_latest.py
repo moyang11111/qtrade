@@ -148,6 +148,21 @@ def test_daily_update_fails_fast_after_nonzero_step(tmp_path, monkeypatch):
     monkeypatch.setattr(daily_update, "DECK", deck)
     monkeypatch.setattr(daily_update, "LOG", log)
     monkeypatch.setattr(daily_update, "PY", "python-under-test")
+    monkeypatch.setattr(
+        daily_update.freshness,
+        "capture_artifacts",
+        lambda deck: daily_update.freshness.ArtifactSnapshot({}),
+    )
+    monkeypatch.setattr(
+        daily_update.freshness,
+        "capture_portal_baseline",
+        lambda deck: {"coverage": 1},
+    )
+    monkeypatch.setattr(
+        daily_update.freshness,
+        "verify_portal",
+        lambda *args, **kwargs: {"verified": True, "as_of": "2026-08-25", "reason": "verified"},
+    )
 
     calls = []
 
@@ -176,6 +191,26 @@ def test_daily_update_returns_failure_after_step_exception(tmp_path, monkeypatch
     monkeypatch.setattr(daily_update, "DECK", deck)
     monkeypatch.setattr(daily_update, "LOG", log)
     monkeypatch.setattr(daily_update, "PY", "python-under-test")
+    monkeypatch.setattr(
+        daily_update.freshness,
+        "capture_artifacts",
+        lambda deck: daily_update.freshness.ArtifactSnapshot({}),
+    )
+    monkeypatch.setattr(
+        daily_update.freshness,
+        "capture_portal_baseline",
+        lambda deck: {"coverage": 1},
+    )
+    monkeypatch.setattr(
+        daily_update.freshness,
+        "verify_portal",
+        lambda *args, **kwargs: {"verified": True, "as_of": "2026-08-25", "reason": "verified"},
+    )
+    monkeypatch.setattr(
+        daily_update.freshness,
+        "verify_factors",
+        lambda *args, **kwargs: {"verified": True, "as_of": "2026-08-25", "reason": "verified"},
+    )
 
     calls = []
 

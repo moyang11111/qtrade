@@ -128,6 +128,42 @@ def test_force_bypasses_calendar_and_runs_only_mocked_steps(tmp_path, monkeypatc
     processes = FakeProcesses()
     monkeypatch.setattr(daily_update.subprocess, "run", processes.run)
     status = tmp_path / "status.json"
+    monkeypatch.setattr(
+        daily_update.freshness,
+        "capture_artifacts",
+        lambda deck: daily_update.freshness.ArtifactSnapshot({}),
+    )
+    monkeypatch.setattr(
+        daily_update.freshness,
+        "capture_portal_baseline",
+        lambda deck: {"coverage": 1},
+    )
+    monkeypatch.setattr(
+        daily_update.freshness,
+        "verify_portal",
+        lambda *args, **kwargs: {"verified": True, "as_of": "2026-08-29", "reason": "verified"},
+    )
+    monkeypatch.setattr(
+        daily_update.freshness,
+        "verify_factors",
+        lambda *args, **kwargs: {"verified": True, "as_of": "2026-08-29", "reason": "verified"},
+    )
+
+    def fake_decision(deck, target, **kwargs):
+        return {
+            "verified": True,
+            "as_of": "2026-08-29",
+            "reason": "verified",
+            "_pool_path": deck / "logs" / "opp_pool_20260829.json",
+        }
+
+    monkeypatch.setattr(daily_update.freshness, "verify_decision", fake_decision)
+    monkeypatch.setattr(daily_update.freshness, "resolve_sync_destination", lambda deck: None)
+    monkeypatch.setattr(
+        daily_update.freshness,
+        "verify_sync",
+        lambda *args, **kwargs: {"verified": True, "as_of": "2026-08-29", "reason": "verified"},
+    )
 
     result = daily_update.main(
         ["--force", "--status-file", str(status)],
@@ -135,7 +171,7 @@ def test_force_bypasses_calendar_and_runs_only_mocked_steps(tmp_path, monkeypatc
     )
 
     assert result == 0
-    assert len(processes.calls) == 4
+    assert len(processes.calls) == 5
     assert all(kwargs["cwd"] == str(daily_update.DECK) for _, kwargs in processes.calls)
     payload = json.loads(status.read_text(encoding="utf-8"))
     assert payload["state"] == "success"
@@ -182,6 +218,21 @@ def test_failure_stops_following_steps_and_records_exit_code(tmp_path, monkeypat
     (deck / "logs" / "opp_pool_20260825.json").write_text("{}", encoding="utf-8")
     processes = FakeProcesses([0, 7, 0, 0, 0])
     monkeypatch.setattr(daily_update.subprocess, "run", processes.run)
+    monkeypatch.setattr(
+        daily_update.freshness,
+        "capture_artifacts",
+        lambda deck: daily_update.freshness.ArtifactSnapshot({}),
+    )
+    monkeypatch.setattr(
+        daily_update.freshness,
+        "capture_portal_baseline",
+        lambda deck: {"coverage": 1},
+    )
+    monkeypatch.setattr(
+        daily_update.freshness,
+        "verify_portal",
+        lambda *args, **kwargs: {"verified": True, "as_of": "2026-08-25", "reason": "verified"},
+    )
     status = tmp_path / "status.json"
 
     result = daily_update.main(
