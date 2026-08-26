@@ -237,6 +237,8 @@ CLI/服务的本地 CSV 模式不依赖该底座；隔离冒烟测试会关闭�
 
 设置 `QTRADE_NO_AUTOUPDATE=1` 会完全关闭调度。需要人工补跑时可使用 `python scripts/daily_update_1830.py --force`，也可用 `--date YYYY-MM-DD` 指定目标日期；`--status-file` 可指定结构化状态 JSON，默认是 `logs/daily_update_1830.status.json`，运行日志是 `logs/daily_update_1830.log`。该流程只更新门户、决策和因子数据，不自动交易或启动 HARNESS。
 
+应用运行期间，主界面以低频只读方式检查 `/api/update/status`。当检测到新的成功完成令牌时，当前打开的门户、决策或因子仪表页面只刷新一次；主行情页不会被切换或整页重载，之后再进入这些页面会带上同一令牌读取新内容。更新中的、失败的或休市状态不会触发刷新风暴；状态文件缺失或损坏时安全降级。
+
 ## License
 
 MIT

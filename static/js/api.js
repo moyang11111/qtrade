@@ -71,5 +71,112 @@ const API = (() => {
     trainingNext(lookback = 60, horizon = 5) {
       return get('/api/training/next', { lookback, horizon });
     },
+
+    /** 应用内每日更新状态（只读，不触发更新） */
+    getUpdateStatus() {
+      return get('/api/update/status');
+    },
   };
 })();
+
+/**
+ * 应用内更新刷新协调器。
+ * 只允许固定的本地嵌入页面，状态令牌由交易日和完成时间组成。
+ * 该对象保持无 DOM 依赖，便于 Node/浏览器确定性测试。
+ */
+const QTradeUpdate = (() => {
+  const POLL_INTERVAL_MS = 30000;
+  const REFRESH_ROUTES = Object.freeze({
+    portal: '/portal',
+    pitch: '/pitch',
+    factorboard: '/factors',
+  });
+
+  function successToken(status) {
+    if (!status || status.state !== 'success') return null;
+    if (typeof status.trade_date !== 'string' || !status.trade_date) return null;
+    if (typeof status.finished_at !== 'string' || !status.finished_at) return null;
+    return `${status.trade_date}|${status.finished_at}`;
+  }
+
+  function cacheBustedRoute(page, token) {
+    const route = REFRESH_ROUTES[page];
+    if (!route) return null;
+    if (!token) return route;
+    return `${route}?qtrade_update=${encodeURIComponent(String(token))}`;
+  }
+
+  function updateTargets(status) {
+    return successToken(status) ? Object.keys(REFRESH_ROUTES) : [];
+  }
+
+  function createMonitor(options = {}) {
+    const getStatus = options.getStatus || (() => API.getUpdateStatus());
+    const getPage = options.getPage || (() => null);
+    const onSuccess = options.onSuccess || (() => {});
+    const setIndicator = options.setIndicator || (() => {});
+    const setIntervalFn = options.setIntervalFn || ((fn, ms) => setInterval(fn, ms));
+    const clearIntervalFn = options.clearIntervalFn || ((id) => clearInterval(id));
+    let timer = null;
+    let inFlight = false;
+    let stopped = false;
+    let lastSuccessToken = null;
+
+    async function poll() {
+      if (stopped || inFlight) return null;
+      inFlight = true;
+      try {
+        const status = await getStatus();
+        const token = successToken(status);
+        if (token && token !== lastSuccessToken) {
+          lastSuccessToken = token;
+          onSuccess(status, token, getPage());
+        }
+        setIndicator(status);
+        return status;
+      } catch (e) {
+        // 网络暂时不可用时静默等待下一轮，不污染用户控制台。
+        return null;
+      } finally {
+        inFlight = false;
+      }
+    }
+
+    function start() {
+      if (timer !== null) return;
+      stopped = false;
+      void poll();
+      timer = setIntervalFn(() => { void poll(); }, POLL_INTERVAL_MS);
+    }
+
+    function stop() {
+      stopped = true;
+      if (timer !== null) {
+        clearIntervalFn(timer);
+        timer = null;
+      }
+    }
+
+    return {
+      poll,
+      start,
+      stop,
+      isInFlight: () => inFlight,
+      getLastSuccessToken: () => lastSuccessToken,
+    };
+  }
+
+  return {
+    POLL_INTERVAL_MS,
+    REFRESH_ROUTES,
+    successToken,
+    cacheBustedRoute,
+    updateTargets,
+    createMonitor,
+  };
+})();
+
+if (typeof window !== 'undefined') window.QTradeUpdate = QTradeUpdate;
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { API, QTradeUpdate };
+}
