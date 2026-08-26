@@ -554,6 +554,45 @@ class FactorLibrary:
             "conditions": normalized,
         }
 
+    def capabilities(self) -> dict[str, Any]:
+        """Return safe, same-date filter facets derived from current records."""
+
+        snapshot = self._snapshot()
+        records = snapshot.records
+        facets = {
+            "status": sorted({record["status"] for record in records}),
+            "usage": sorted({
+                usage
+                for record in records
+                for usage in record.get("usage", [])
+                if isinstance(usage, str) and usage
+            }),
+            "lifecycle": sorted({
+                record["lifecycle"]
+                for record in records
+                if isinstance(record.get("lifecycle"), str) and record["lifecycle"]
+            }),
+        }
+        numeric: dict[str, dict[str, float]] = {}
+        for condition, field in (("icir120", "icir120"), ("crowding", "crowding")):
+            values = [
+                record[field]
+                for record in records
+                if isinstance(record.get(field), (int, float))
+                and not isinstance(record[field], bool)
+                and math.isfinite(record[field])
+            ]
+            if values:
+                numeric[condition] = {"min": min(values), "max": max(values)}
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "as_of": snapshot.as_of,
+            "source_token": snapshot.source_token,
+            "facets": facets,
+            "numeric": numeric,
+            "supported_conditions": list(_SUPPORTED_CONDITIONS),
+        }
+
     def list_items(self) -> list[dict[str, Any]]:
         with self._lock:
             return [dict(item) for item in self._read_unlocked()]

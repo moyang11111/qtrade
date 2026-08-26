@@ -3007,6 +3007,7 @@ class APIHandler(SimpleHTTPRequestHandler):
             self._json({"error": "invalid_request", "message": "invalid request body"}, status=400)
             return None
         if length < 0 or length > MAX_BODY_BYTES:
+            self.close_connection = True
             self._json({"error": "request_too_large", "message": "request body is too large"}, status=413)
             return None
         if length == 0 and optional:
@@ -3020,6 +3021,7 @@ class APIHandler(SimpleHTTPRequestHandler):
                 self._json({"error": "invalid_request", "message": "request body is incomplete"}, status=400)
                 return None
             if len(raw) > MAX_BODY_BYTES:
+                self.close_connection = True
                 self._json({"error": "request_too_large", "message": "request body is too large"}, status=413)
                 return None
             payload = json.loads(raw.decode("utf-8"))
@@ -3040,6 +3042,13 @@ class APIHandler(SimpleHTTPRequestHandler):
 
     def _factor_get(self, path: str):
         parts = self._factor_parts(path)
+        if parts == ["capabilities"]:
+            try:
+                return self._json(get_factor_library().capabilities())
+            except FactorLibraryError as error:
+                return self._factor_error(error)
+            except Exception:
+                return self._factor_unexpected()
         if not parts:
             try:
                 return self._json({

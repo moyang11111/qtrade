@@ -1141,3 +1141,134 @@ body {
 .badge-src { font-size: 8px; line-height: 1; padding: 2px 5px; border-radius: 5px; margin-left: 5px; vertical-align: 1px; font-weight: 700; }
 .badge-dec { color: #c48bff; border: 1px solid rgba(196, 139, 255, .45); background: rgba(196, 139, 255, .12); }
 .badge-strat { color: #6be7c2; border: 1px solid rgba(107, 231, 194, .45); background: rgba(107, 231, 194, .12); }
+
+/* 因子仪表筛选与服务器托管方案 */
+.factor-filter-panel {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: min(44vh, 390px);
+  margin: 10px 6px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-card);
+}
+.factor-filter-toggle {
+  display: block;
+  width: 100%;
+  padding: 11px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+.factor-filter-toggle::after { content: "⌄"; float: right; color: var(--text-sec); }
+.factor-filter-toggle[aria-expanded="false"]::after { content: "›"; }
+.factor-filter-body { padding: 12px 14px 14px; }
+.factor-filter-body[hidden] { display: none; }
+.factor-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(130px, 1fr));
+  gap: 10px;
+}
+.factor-filter-field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--text-sec);
+  font-size: 11px;
+}
+.factor-filter-field input,
+.factor-filter-field select,
+.factor-filter-actions input,
+.factor-plan-edit input {
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-input);
+  color: var(--text);
+  padding: 7px 8px;
+  font: inherit;
+  outline: none;
+}
+.factor-filter-field input:focus,
+.factor-filter-field select:focus,
+.factor-filter-actions input:focus,
+.factor-plan-edit input:focus { border-color: var(--accent); }
+.factor-filter-field select { min-height: 46px; }
+.factor-filter-wide { grid-column: span 3; }
+.factor-filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.factor-filter-actions input { flex: 1 1 150px; }
+.factor-filter-actions .btn { flex: 0 0 auto; }
+.factor-filter-hint { margin-top: 9px; font-size: 11px; }
+.factor-filter-message,
+.factor-plan-message { margin-top: 8px; color: var(--text-sec); font-size: 12px; }
+.factor-filter-message[data-kind="success"],
+.factor-plan-message[data-kind="success"] { color: var(--green); }
+.factor-filter-message[data-kind="error"],
+.factor-plan-message[data-kind="error"] { color: var(--red); }
+.factor-preview {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.factor-preview-count { color: var(--text); font-size: 12px; font-weight: 700; }
+.factor-preview-date { font-size: 11px; }
+.factor-chip-list { display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.factor-chip {
+  display: inline-block;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  padding: 3px 7px;
+  border: 1px solid rgba(94, 106, 210, .45);
+  border-radius: 999px;
+  background: rgba(94, 106, 210, .12);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.factor-chip.condition-chip { border-color: rgba(107, 231, 194, .35); background: rgba(107, 231, 194, .08); }
+.factor-library-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.factor-library-toolbar .auto-card-title { margin: 0; }
+.factor-library-toolbar .muted { margin: 0; flex: 1 1 240px; }
+.factor-library-list { display: flex; flex-direction: column; gap: 12px; padding: 0 6px 12px; }
+.factor-plan-card { padding: 16px 18px; }
+.factor-plan-heading { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.factor-plan-heading h3 { margin: 0; color: var(--text); font-size: 16px; }
+.factor-plan-meta { margin-left: auto; font-size: 11px; }
+.factor-plan-description { margin: 8px 0; color: var(--text-sec); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.factor-plan-section { margin-top: 10px; }
+.factor-plan-label { display: block; margin-bottom: 6px; color: var(--text-sec); font-size: 11px; }
+.factor-plan-factors { color: var(--text); font-size: 12px; }
+.factor-plan-factors summary { cursor: pointer; }
+.factor-plan-factors .factor-chip-list { margin-top: 8px; max-height: 132px; overflow: auto; }
+.factor-plan-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 13px; }
+.factor-plan-edit { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.factor-plan-edit input { flex: 1 1 180px; }
+
+@media (max-width: 760px) {
+  .factor-filter-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+  .factor-filter-wide { grid-column: span 2; }
+  .factor-plan-meta { margin-left: 0; width: 100%; }
+}

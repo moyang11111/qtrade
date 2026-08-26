@@ -13,6 +13,9 @@
     lastBacktest: null,   // 最近一次回测结果
     activePage: 'market',
     updateToken: null,
+    factorCapabilities: null,
+    factorPreview: null,
+    factorLibraryItems: [],
   };
 
   const recentStocks = JSON.parse(localStorage.getItem('qtrade_recent') || '[]');
@@ -49,9 +52,21 @@
     qH60: $('qH60'), qL60: $('qL60'), qVol: $('qVol'),
     qTurnover: $('qTurnover'), qTime: $('qTime'),
     // 决策台页面
-    pageFactors: $('pageFactors'), pageRisk: $('pageRisk'),
+    pageFactors: $('pageFactors'), pageRisk: $('pageRisk'), pageFactorBoard: $('pageFactorBoard'),
     factorSym: $('factorSym'), factorError: $('factorError'),
-    factorTable: $('factorTable') ? $('factorTable').querySelector('tbody') : null,
+    factorLibraryList: $('factorLibraryList'), factorLibraryEmpty: $('factorLibraryEmpty'),
+    btnOpenFactorBoard: $('btnOpenFactorBoard'),
+    factorFilterPanel: $('factorFilterPanel'), factorFilterToggle: $('factorFilterToggle'),
+    factorFilterBody: $('factorFilterBody'), factorStatusFilter: $('factorStatusFilter'),
+    factorUsageFilter: $('factorUsageFilter'), factorLifecycleFilter: $('factorLifecycleFilter'),
+    factorIcirMin: $('factorIcirMin'), factorIcirMax: $('factorIcirMax'),
+    factorCrowdingMax: $('factorCrowdingMax'), factorKeyword: $('factorKeyword'),
+    factorPlanName: $('factorPlanName'), factorPlanDescription: $('factorPlanDescription'),
+    btnFactorFilterClear: $('btnFactorFilterClear'), btnFactorPreview: $('btnFactorPreview'),
+    btnFactorSave: $('btnFactorSave'), factorCapabilitiesHint: $('factorCapabilitiesHint'),
+    factorFilterMessage: $('factorFilterMessage'), factorPreview: $('factorPreview'),
+    factorPreviewCount: $('factorPreviewCount'), factorPreviewDate: $('factorPreviewDate'),
+    factorPreviewFactors: $('factorPreviewFactors'),
     riskBody: $('riskBody'), riskError: $('riskError'),
     updateStatus: $('updateStatus'),
   };
@@ -520,36 +535,468 @@
   }
 
   // ======================== 决策台页面 ========================
-  const FACTOR_LABELS = {
-    composite_score: '合成打分', std20: '20日波动', downside_vol: '下行波动',
-    reversal20: '20日反转', mom20: '动量20', o2c: '开收比', amihud: '非流动性',
-    max_ret20: '20日最大涨', skew20: '20日偏度', amp20: '平均振幅',
-    volume_ratio: '量能比', limup_ex_5: '近5涨停', pullback: '60日回撤',
-    ma_alignment: '均线多头', rsi_revert: 'RSI超卖',
-    macd_hist: 'MACD柱', roc20: 'ROC20', wpr14: 'W%R14', cci20: 'CCI20',
-    obv_trend: 'OBV趋势', kdj_k: 'KDJ-K', ma200_up: '站上MA200',
-    lowvol_60: '60日波动', mom_120: '120日动量', near_high_250: '接近52周高',
-    new_high_250: '52周新高', consec_limit_up: '连续涨停', consec_limit_down: '连续跌停',
-    limit_up_flag: '涨停标记', limit_down_flag: '跌停标记',
-  };
-  const FACTOR_DESC = {
-    composite_score: '滚动z-score加权，正=偏多 负=偏空', std20: '收益波动，越低越稳',
-    downside_vol: '仅下跌日波动', reversal20: '过去跌越多反弹预期越高',
-    mom20: '20日动量', o2c: '开→收收益的10日均值', amihud: '非流动性（越高越差）',
-    max_ret20: '近20日最大单日涨幅', skew20: '收益偏度', amp20: '振幅越低越稳',
-    volume_ratio: '当日量/20日均量', limup_ex_5: '近5日涨停次数',
-    pullback: '距60日高点回撤', ma_alignment: 'MA5>10>20>60 排列度', rsi_revert: 'RSI离50下方越远越超卖',
-    macd_hist: 'DIF-DEA 动能', roc20: '20日变动率（短期反转）', wpr14: '威廉指标（高位超买偏空）',
-    cci20: '顺势指标', obv_trend: 'OBV 相对21日均值趋势', kdj_k: 'KDJ K 值（趋势）',
-    ma200_up: '站上200日均线', lowvol_60: '60日波动（低波正用）', mom_120: '120日动量（反转）',
-    near_high_250: '收盘距52周高点（越接近0越强）', new_high_250: '创52周新高标记',
-    consec_limit_up: '连续涨停天数', consec_limit_down: '连续跌停天数',
-    limit_up_flag: '当日涨停', limit_down_flag: '当日跌停',
-  };
   function setRailActive(page) {
     state.activePage = page;
     document.querySelectorAll('.deck-item').forEach(b =>
       b.classList.toggle('active', b.dataset.page === page));
+  }
+
+  const FACTOR_CONDITION_LABELS = Object.freeze({
+    status: '状态', usage: '使用层', lifecycle: '生命周期',
+    icir120_min: 'ICIR120 ≥', icir120_max: 'ICIR120 ≤', crowding_max: '拥挤度 ≤',
+    keyword: '关键词',
+  });
+  let factorPreviewRequestId = 0;
+  let factorLibraryRequestId = 0;
+  let factorCapabilitiesRequestId = 0;
+  let factorPreviewController = null;
+  let factorLibraryController = null;
+  let factorCapabilitiesController = null;
+
+  function clearElement(element) {
+    if (!element) return;
+    while (element.firstChild) element.removeChild(element.firstChild);
+  }
+
+  function setFactorMessage(message, kind = 'info') {
+    if (!els.factorFilterMessage) return;
+    els.factorFilterMessage.textContent = message || '';
+    els.factorFilterMessage.dataset.kind = kind;
+    els.factorFilterMessage.hidden = !message;
+  }
+
+  function factorErrorMessage(error, fallback = '请求失败，请稍后重试') {
+    if (error && error.name === 'AbortError') return '';
+    if (error && error.payload && typeof error.payload.message === 'string') {
+      return error.payload.message;
+    }
+    if (error && error.status === 503) return '当前因子数据不可用，请确认同日数据完整后重试';
+    if (error && error.status === 422) return '筛选条件或方案内容不符合要求';
+    return (error && error.message) || fallback;
+  }
+
+  function selectedFactorValues(select) {
+    return select ? Array.from(select.selectedOptions).map(option => option.value) : [];
+  }
+
+  function readFactorConditions() {
+    const raw = {
+      status: selectedFactorValues(els.factorStatusFilter),
+      usage: selectedFactorValues(els.factorUsageFilter),
+      lifecycle: selectedFactorValues(els.factorLifecycleFilter),
+      icir120_min: els.factorIcirMin && els.factorIcirMin.value,
+      icir120_max: els.factorIcirMax && els.factorIcirMax.value,
+      crowding_max: els.factorCrowdingMax && els.factorCrowdingMax.value,
+      keyword: els.factorKeyword && els.factorKeyword.value,
+    };
+    return window.QTradeFactorLibrary
+      ? window.QTradeFactorLibrary.serializeConditions(raw)
+      : raw;
+  }
+
+  function setMultiSelectValues(select, values) {
+    if (!select) return;
+    const wanted = new Set(Array.isArray(values) ? values : values == null ? [] : [values]);
+    Array.from(select.options).forEach(option => { option.selected = wanted.has(option.value); });
+  }
+
+  function setFactorConditions(conditions = {}) {
+    setMultiSelectValues(els.factorStatusFilter, conditions.status);
+    setMultiSelectValues(els.factorUsageFilter, conditions.usage);
+    setMultiSelectValues(els.factorLifecycleFilter, conditions.lifecycle);
+    if (els.factorIcirMin) els.factorIcirMin.value = conditions.icir120_min ?? '';
+    if (els.factorIcirMax) els.factorIcirMax.value = conditions.icir120_max ?? '';
+    if (els.factorCrowdingMax) els.factorCrowdingMax.value = conditions.crowding_max ?? '';
+    if (els.factorKeyword) els.factorKeyword.value = conditions.keyword || '';
+  }
+
+  function renderFactorFacet(select, values, selected) {
+    if (!select) return;
+    clearElement(select);
+    for (const value of Array.isArray(values) ? values : []) {
+      if (typeof value !== 'string' || !value) continue;
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = value;
+      option.selected = Array.isArray(selected) && selected.includes(value);
+      select.appendChild(option);
+    }
+  }
+
+  function renderFactorCapabilities(capabilities) {
+    const facets = capabilities && capabilities.facets;
+    if (!facets || typeof facets !== 'object') throw new Error('因子筛选条件不可用');
+    const previous = readFactorConditions();
+    renderFactorFacet(els.factorStatusFilter, facets.status, previous.status);
+    renderFactorFacet(els.factorUsageFilter, facets.usage, previous.usage);
+    renderFactorFacet(els.factorLifecycleFilter, facets.lifecycle, previous.lifecycle);
+    const numeric = capabilities.numeric || {};
+    const icir = numeric.icir120 || {};
+    const crowding = numeric.crowding || {};
+    if (els.factorIcirMin) {
+      if (Number.isFinite(icir.min)) els.factorIcirMin.min = icir.min;
+      if (Number.isFinite(icir.max)) els.factorIcirMin.max = icir.max;
+    }
+    if (els.factorIcirMax) {
+      if (Number.isFinite(icir.min)) els.factorIcirMax.min = icir.min;
+      if (Number.isFinite(icir.max)) els.factorIcirMax.max = icir.max;
+    }
+    if (els.factorCrowdingMax) {
+      if (Number.isFinite(crowding.min)) els.factorCrowdingMax.min = crowding.min;
+      if (Number.isFinite(crowding.max)) els.factorCrowdingMax.max = crowding.max;
+    }
+    const date = typeof capabilities.as_of === 'string' ? capabilities.as_of : '--';
+    els.factorCapabilitiesHint.textContent = `同日因子数据：${date} · 条件选项来自当前数据`;
+  }
+
+  async function loadFactorCapabilities(force = false) {
+    if (state.factorCapabilities && !force) return state.factorCapabilities;
+    const requestId = ++factorCapabilitiesRequestId;
+    if (factorCapabilitiesController) factorCapabilitiesController.abort();
+    factorCapabilitiesController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    try {
+      const result = await API.getFactorLibraryCapabilities(
+        factorCapabilitiesController ? { signal: factorCapabilitiesController.signal } : {}
+      );
+      if (requestId !== factorCapabilitiesRequestId) return null;
+      state.factorCapabilities = result;
+      renderFactorCapabilities(result);
+      return result;
+    } catch (error) {
+      if (requestId === factorCapabilitiesRequestId && error.name !== 'AbortError') {
+        els.factorCapabilitiesHint.textContent = factorErrorMessage(error, '无法读取因子筛选条件');
+        setFactorMessage(factorErrorMessage(error), 'error');
+      }
+      return null;
+    } finally {
+      if (requestId === factorCapabilitiesRequestId) factorCapabilitiesController = null;
+    }
+  }
+
+  function setFactorFilterBusy(busy) {
+    [els.btnFactorFilterClear, els.btnFactorPreview, els.btnFactorSave].forEach(button => {
+      if (button) button.disabled = busy;
+    });
+  }
+
+  function addFactorChip(container, text, className = '') {
+    const chip = document.createElement('span');
+    chip.className = `factor-chip${className ? ` ${className}` : ''}`;
+    chip.textContent = text;
+    container.appendChild(chip);
+  }
+
+  function renderFactorPreview(result) {
+    if (!els.factorPreview) return;
+    els.factorPreview.hidden = false;
+    els.factorPreviewCount.textContent = `命中 ${Number.isFinite(result.match_count) ? result.match_count : 0} 个因子`;
+    els.factorPreviewDate.textContent = `数据日期：${result.as_of || '--'}`;
+    clearElement(els.factorPreviewFactors);
+    for (const factor of Array.isArray(result.matched_factors) ? result.matched_factors : []) {
+      addFactorChip(els.factorPreviewFactors, factor);
+    }
+  }
+
+  async function previewFactorSelection() {
+    const requestId = ++factorPreviewRequestId;
+    if (factorPreviewController) factorPreviewController.abort();
+    factorPreviewController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    setFactorFilterBusy(true);
+    setFactorMessage('正在预览当前同日因子…');
+    try {
+      const result = await API.previewFactorLibrary(
+        readFactorConditions(),
+        factorPreviewController ? { signal: factorPreviewController.signal } : {}
+      );
+      if (requestId !== factorPreviewRequestId) return null;
+      state.factorPreview = result;
+      renderFactorPreview(result);
+      setFactorMessage(`预览完成：命中 ${result.match_count || 0} 个因子`, 'success');
+      return result;
+    } catch (error) {
+      if (requestId === factorPreviewRequestId && error.name !== 'AbortError') {
+        state.factorPreview = null;
+        if (els.factorPreview) els.factorPreview.hidden = true;
+        setFactorMessage(factorErrorMessage(error, '预览失败，请稍后重试'), 'error');
+      }
+      return null;
+    } finally {
+      if (requestId === factorPreviewRequestId) {
+        factorPreviewController = null;
+        setFactorFilterBusy(false);
+      }
+    }
+  }
+
+  async function saveFactorPlan() {
+    const name = els.factorPlanName && els.factorPlanName.value.trim();
+    if (!name) {
+      setFactorMessage('请先填写方案名称', 'error');
+      if (els.factorPlanName) els.factorPlanName.focus();
+      return null;
+    }
+    setFactorFilterBusy(true);
+    setFactorMessage('正在保存方案…');
+    try {
+      const result = await API.createFactorLibrary({
+        name,
+        description: els.factorPlanDescription ? els.factorPlanDescription.value.trim() : '',
+        conditions: readFactorConditions(),
+      });
+      setFactorMessage(`方案“${result.name || name}”已保存`, 'success');
+      if (els.factorPlanName) els.factorPlanName.value = '';
+      if (els.factorPlanDescription) els.factorPlanDescription.value = '';
+      void loadFactorLibrary(true);
+      return result;
+    } catch (error) {
+      setFactorMessage(factorErrorMessage(error, '方案保存失败，请稍后重试'), 'error');
+      return null;
+    } finally {
+      setFactorFilterBusy(false);
+    }
+  }
+
+  function formatFactorCondition(key, value) {
+    const label = FACTOR_CONDITION_LABELS[key] || key;
+    if (Array.isArray(value)) return `${label}：${value.join('、')}`;
+    return `${label}：${value}`;
+  }
+
+  function renderPlanConditions(container, conditions) {
+    for (const [key, value] of Object.entries(conditions || {})) {
+      addFactorChip(container, formatFactorCondition(key, value), 'condition-chip');
+    }
+    if (!container.childElementCount) addFactorChip(container, '未设置条件', 'condition-chip');
+  }
+
+  function renderPlanFactors(details, factors) {
+    const summary = document.createElement('summary');
+    summary.textContent = `命中因子（${Array.isArray(factors) ? factors.length : 0}）`;
+    details.appendChild(summary);
+    const content = document.createElement('div');
+    content.className = 'factor-chip-list';
+    for (const factor of Array.isArray(factors) ? factors : []) addFactorChip(content, factor);
+    if (!content.childElementCount) {
+      const empty = document.createElement('span');
+      empty.className = 'muted';
+      empty.textContent = '暂无命中因子';
+      content.appendChild(empty);
+    }
+    details.appendChild(content);
+  }
+
+  function setPlanCardMessage(card, message, kind = 'info') {
+    const messageElement = card.querySelector('.factor-plan-message');
+    if (!messageElement) return;
+    messageElement.textContent = message || '';
+    messageElement.dataset.kind = kind;
+    messageElement.hidden = !message;
+  }
+
+  function renderFactorPlanCard(item) {
+    const card = document.createElement('article');
+    card.className = 'auto-card factor-plan-card';
+    card.dataset.planId = item.id;
+
+    const heading = document.createElement('div');
+    heading.className = 'factor-plan-heading';
+    const title = document.createElement('h3');
+    title.textContent = item.name || '未命名方案';
+    heading.appendChild(title);
+    const meta = document.createElement('div');
+    meta.className = 'factor-plan-meta muted';
+    meta.textContent = `数据日期：${item.as_of || '--'} · 更新时间：${item.updated_at || '--'} · 命中：${item.match_count ?? 0}`;
+    heading.appendChild(meta);
+    card.appendChild(heading);
+
+    if (item.description) {
+      const description = document.createElement('p');
+      description.className = 'factor-plan-description';
+      description.textContent = item.description;
+      card.appendChild(description);
+    }
+    const conditionBlock = document.createElement('div');
+    conditionBlock.className = 'factor-plan-section';
+    const conditionLabel = document.createElement('span');
+    conditionLabel.className = 'factor-plan-label';
+    conditionLabel.textContent = '筛选条件';
+    conditionBlock.appendChild(conditionLabel);
+    const conditionChips = document.createElement('div');
+    conditionChips.className = 'factor-chip-list';
+    renderPlanConditions(conditionChips, item.conditions);
+    conditionBlock.appendChild(conditionChips);
+    card.appendChild(conditionBlock);
+
+    const factorBlock = document.createElement('details');
+    factorBlock.className = 'factor-plan-section factor-plan-factors';
+    renderPlanFactors(factorBlock, item.matched_factors);
+    card.appendChild(factorBlock);
+
+    const message = document.createElement('div');
+    message.className = 'factor-plan-message';
+    message.hidden = true;
+    message.setAttribute('role', 'status');
+    card.appendChild(message);
+
+    const actions = document.createElement('div');
+    actions.className = 'factor-plan-actions';
+    const apply = document.createElement('button');
+    apply.className = 'btn primary';
+    apply.type = 'button';
+    apply.textContent = '应用到仪表';
+    apply.addEventListener('click', () => openFactorBoard({ conditions: item.conditions, autoPreview: true }));
+    actions.appendChild(apply);
+    const refresh = document.createElement('button');
+    refresh.className = 'btn';
+    refresh.type = 'button';
+    refresh.textContent = '刷新匹配';
+    refresh.addEventListener('click', async () => {
+      refresh.disabled = true;
+      setPlanCardMessage(card, '正在刷新匹配…');
+      try {
+        const updated = await API.refreshFactorLibrary(item.id);
+        if (updated) {
+          card.replaceWith(renderFactorPlanCard(updated));
+        }
+      } catch (error) {
+        setPlanCardMessage(card, factorErrorMessage(error, '刷新失败，请稍后重试'), 'error');
+      } finally {
+        refresh.disabled = false;
+      }
+    });
+    actions.appendChild(refresh);
+    const edit = document.createElement('button');
+    edit.className = 'btn';
+    edit.type = 'button';
+    edit.textContent = '编辑说明';
+    const editForm = document.createElement('form');
+    editForm.className = 'factor-plan-edit';
+    editForm.hidden = true;
+    const editName = document.createElement('input');
+    editName.type = 'text'; editName.maxLength = 120; editName.value = item.name || '';
+    editName.setAttribute('aria-label', '方案名称');
+    const editDescription = document.createElement('input');
+    editDescription.type = 'text'; editDescription.maxLength = 500; editDescription.value = item.description || '';
+    editDescription.setAttribute('aria-label', '方案说明');
+    const editSave = document.createElement('button');
+    editSave.className = 'btn primary'; editSave.type = 'submit'; editSave.textContent = '保存';
+    const editCancel = document.createElement('button');
+    editCancel.className = 'btn'; editCancel.type = 'button'; editCancel.textContent = '取消';
+    editForm.append(editName, editDescription, editSave, editCancel);
+    edit.addEventListener('click', () => {
+      editForm.hidden = false;
+      edit.hidden = true;
+      editName.focus();
+    });
+    editCancel.addEventListener('click', () => { editForm.hidden = true; edit.hidden = false; });
+    editForm.addEventListener('submit', async event => {
+      event.preventDefault();
+      editSave.disabled = true;
+      try {
+        const updated = await API.updateFactorLibrary(item.id, {
+          name: editName.value.trim(), description: editDescription.value.trim(),
+        });
+        if (updated) card.replaceWith(renderFactorPlanCard(updated));
+      } catch (error) {
+        setPlanCardMessage(card, factorErrorMessage(error, '编辑失败，请稍后重试'), 'error');
+      } finally {
+        editSave.disabled = false;
+      }
+    });
+    actions.appendChild(edit);
+    const deleteButton = document.createElement('button');
+    deleteButton.className = 'btn danger';
+    deleteButton.type = 'button';
+    deleteButton.textContent = '删除';
+    const cancelDelete = document.createElement('button');
+    cancelDelete.className = 'btn';
+    cancelDelete.type = 'button';
+    cancelDelete.textContent = '取消';
+    cancelDelete.hidden = true;
+    deleteButton.addEventListener('click', async () => {
+      if (deleteButton.dataset.confirm !== '1') {
+        deleteButton.dataset.confirm = '1';
+        deleteButton.textContent = '确认删除';
+        cancelDelete.hidden = false;
+        return;
+      }
+      deleteButton.disabled = true;
+      cancelDelete.hidden = true;
+      try {
+        await API.deleteFactorLibrary(item.id);
+        card.remove();
+        updateFactorLibraryEmptyState();
+      } catch (error) {
+        deleteButton.disabled = false;
+        setPlanCardMessage(card, factorErrorMessage(error, '删除失败，请稍后重试'), 'error');
+      }
+    });
+    cancelDelete.addEventListener('click', () => {
+      deleteButton.dataset.confirm = '';
+      deleteButton.textContent = '删除';
+      cancelDelete.hidden = true;
+    });
+    actions.append(deleteButton, cancelDelete);
+    card.appendChild(actions);
+    card.appendChild(editForm);
+    return card;
+  }
+
+  function updateFactorLibraryEmptyState() {
+    if (!els.factorLibraryEmpty || !els.factorLibraryList) return;
+    els.factorLibraryEmpty.hidden = els.factorLibraryList.childElementCount !== 0;
+  }
+
+  function renderFactorLibrary(items) {
+    clearElement(els.factorLibraryList);
+    for (const item of Array.isArray(items) ? items : []) {
+      if (item && typeof item === 'object') els.factorLibraryList.appendChild(renderFactorPlanCard(item));
+    }
+    updateFactorLibraryEmptyState();
+  }
+
+  async function loadFactorLibrary(silent = false) {
+    const requestId = ++factorLibraryRequestId;
+    if (factorLibraryController) factorLibraryController.abort();
+    factorLibraryController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    if (!silent && els.factorLibraryList) {
+      clearElement(els.factorLibraryList);
+      const loading = document.createElement('div');
+      loading.className = 'muted';
+      loading.textContent = '正在加载方案…';
+      els.factorLibraryList.appendChild(loading);
+    }
+    try {
+      const result = await API.getFactorLibrary(
+        factorLibraryController ? { signal: factorLibraryController.signal } : {}
+      );
+      if (requestId !== factorLibraryRequestId) return null;
+      state.factorLibraryItems = Array.isArray(result.items) ? result.items : [];
+      els.factorError.hidden = true;
+      renderFactorLibrary(state.factorLibraryItems);
+      return state.factorLibraryItems;
+    } catch (error) {
+      if (requestId === factorLibraryRequestId && error.name !== 'AbortError') {
+        if (!silent) {
+          clearElement(els.factorLibraryList);
+          els.factorError.textContent = factorErrorMessage(error, '因子库暂时不可用，请稍后重试');
+          els.factorError.hidden = false;
+        }
+      }
+      return null;
+    } finally {
+      if (requestId === factorLibraryRequestId) factorLibraryController = null;
+    }
+  }
+
+  function openFactorBoard(options = {}) {
+    hideAllOverlays();
+    els.pageFactorBoard.hidden = false;
+    setRailActive('factorboard');
+    if (options.conditions) setFactorConditions(options.conditions);
+    applyEmbeddedUpdate('factorboard');
+    void loadFactorCapabilities();
+    if (options.autoPreview) window.setTimeout(() => { void previewFactorSelection(); }, 0);
   }
 
   function applyEmbeddedUpdate(page, token = state.updateToken) {
@@ -584,6 +1031,13 @@
     if (EMBED_IFRAME_IDS[page] && state.activePage === page) {
       applyEmbeddedUpdate(page, token);
     }
+    state.factorCapabilities = null;
+    state.factorPreview = null;
+    if (state.activePage === 'factorboard') {
+      setFactorMessage('数据已更新，可重新预览', 'success');
+      void loadFactorCapabilities(true);
+    }
+    void loadFactorLibrary(true);
     updateStatusLabel(status);
   }
   function hideAllOverlays() {
@@ -594,6 +1048,10 @@
     });
   }
   function showEmbedPage(id, page) {
+    if (page === 'factorboard') {
+      openFactorBoard();
+      return;
+    }
     hideAllOverlays();
     const el = document.getElementById(id);
     if (el) el.hidden = false;
@@ -608,27 +1066,10 @@
     hideAllOverlays();
     els.pageFactors.hidden = false;
     setRailActive('factors');
-    const sym = state.activeSymbol || (state.allSymbols.length ? state.allSymbols[0] : null);
-    els.factorSym.textContent = sym ? `🧬 ${sym}` : '🧬 未选股';
+    els.factorSym.textContent = '已保存方案';
     els.factorError.hidden = true;
-    if (!els.factorTable) return;
-    els.factorTable.innerHTML = '<tr><td colspan="3" class="auto-empty">加载中...</td></tr>';
-    if (!sym) return;
-    try {
-      const f = await API.getFactors(sym);
-      if (f.error) throw new Error(f.error);
-      const rows = Object.entries(f)
-        .filter(([k]) => !['symbol', 'error'].includes(k))
-        .map(([k, v]) => {
-          const val = (v === null || v === undefined) ? '--' : (typeof v === 'number' ? v.toFixed(4) : v);
-          return `<tr><td class="mono">${FACTOR_LABELS[k] || k}</td><td class="num">${val}</td><td class="muted">${FACTOR_DESC[k] || ''}</td></tr>`;
-        }).join('');
-      els.factorTable.innerHTML = rows || '<tr><td colspan="3" class="auto-empty">暂无因子</td></tr>';
-    } catch (e) {
-      els.factorError.textContent = `因子加载失败: ${e.message}`;
-      els.factorError.hidden = false;
-      els.factorTable.innerHTML = '';
-    }
+    setFactorMessage('');
+    await loadFactorLibrary();
   }
   async function openRiskPage() {
     hideAllOverlays();
@@ -713,6 +1154,30 @@
     const ptClose = $('btnPitchClose'); if (ptClose) ptClose.addEventListener('click', showMarketPage);
     const cClose = $('btnControlClose'); if (cClose) cClose.addEventListener('click', showMarketPage);
     const fbClose = $('btnFactorBoardClose'); if (fbClose) fbClose.addEventListener('click', showMarketPage);
+    if (els.btnOpenFactorBoard) {
+      els.btnOpenFactorBoard.addEventListener('click', () => openFactorBoard());
+    }
+    if (els.factorFilterToggle) {
+      els.factorFilterToggle.addEventListener('click', () => {
+        const expanded = els.factorFilterToggle.getAttribute('aria-expanded') !== 'true';
+        els.factorFilterToggle.setAttribute('aria-expanded', String(expanded));
+        els.factorFilterBody.hidden = !expanded;
+      });
+    }
+    if (els.btnFactorFilterClear) {
+      els.btnFactorFilterClear.addEventListener('click', () => {
+        setFactorConditions({});
+        state.factorPreview = null;
+        els.factorPreview.hidden = true;
+        setFactorMessage('已清空筛选条件');
+      });
+    }
+    if (els.btnFactorPreview) {
+      els.btnFactorPreview.addEventListener('click', () => { void previewFactorSelection(); });
+    }
+    if (els.btnFactorSave) {
+      els.btnFactorSave.addEventListener('click', () => { void saveFactorPlan(); });
+    }
     $('btnWatchlist').addEventListener('click', () => {
       if (state.activeSymbol) toggleWatchlist(state.activeSymbol);
     });
@@ -774,7 +1239,12 @@
       setIndicator: updateStatusLabel,
     });
     updateMonitor.start();
-    window.addEventListener('pagehide', () => updateMonitor.stop(), { once: true });
+    window.addEventListener('pagehide', () => {
+      updateMonitor.stop();
+      if (factorPreviewController) factorPreviewController.abort();
+      if (factorLibraryController) factorLibraryController.abort();
+      if (factorCapabilitiesController) factorCapabilitiesController.abort();
+    }, { once: true });
   }
 
   // ======================== 启动 ========================
