@@ -92,6 +92,13 @@ function resolveDataDirectory({
   return path.join(paths.root, 'data', 'cache');
 }
 
+function resolveFactorLibraryFile(userDataPath) {
+  if (typeof userDataPath !== 'string' || !userDataPath.trim()) {
+    throw new Error('QTrade factor library requires an Electron user-data directory.');
+  }
+  return path.join(userDataPath, 'factor_library.json');
+}
+
 function pythonCandidates({ platform = process.platform, env = process.env } = {}) {
   const candidates = [];
   const configured = typeof env.QTRADE_PYTHON === 'string' ? env.QTRADE_PYTHON.trim() : '';
@@ -408,6 +415,7 @@ function buildServerArguments({
   serverScript,
   port,
   dataDir,
+  factorLibraryFile,
   csvOnly = false,
 } = {}) {
   const args = [
@@ -422,6 +430,9 @@ function buildServerArguments({
   ];
   if (dataDir) {
     args.push('--data-dir', dataDir);
+  }
+  if (factorLibraryFile) {
+    args.push('--factor-library-file', factorLibraryFile);
   }
   if (csvOnly) {
     args.push('--csv-only');
@@ -482,6 +493,7 @@ async function startBackend({
   env = {},
   cwd,
   dataDir,
+  factorLibraryFile,
   csvOnly = false,
   preferredPort = 0,
   spawnImpl = spawn,
@@ -500,6 +512,7 @@ async function startBackend({
     serverScript: paths.serverScript,
     port,
     dataDir,
+    factorLibraryFile,
     csvOnly,
   });
   let child;
@@ -562,6 +575,7 @@ module.exports = {
   requiredRuntimeResources,
   requestHealth,
   resolveDataDirectory,
+  resolveFactorLibraryFile,
   resolveRuntimePaths,
   startBackend,
   waitForBackend,

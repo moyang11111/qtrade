@@ -79,6 +79,15 @@ test('data directory priority separates development and packaged defaults', () =
   );
 });
 
+test('factor library file stays under the Electron user-data directory', () => {
+  const userDataPath = path.join(PROJECT_ROOT, 'user-data');
+  assert.equal(
+    runtime.resolveFactorLibraryFile(userDataPath),
+    path.join(userDataPath, 'factor_library.json')
+  );
+  assert.throws(() => runtime.resolveFactorLibraryFile(''), /user-data directory/);
+});
+
 test('required packaged resources include the Python server and its local imports', () => {
   const paths = runtime.resolveRuntimePaths({ rootOverride: PROJECT_ROOT });
   const labels = runtime.requiredRuntimeResources(paths).map(([label]) => label);
@@ -305,12 +314,27 @@ test('backend arguments are argv-only and include safe local-mode flags', () => 
     serverScript: 'C:\\QTrade Root\\server.py',
     port: 43210,
     dataDir: 'C:\\QTrade Data\\cache',
+    factorLibraryFile: 'C:\\Users\\Test\\AppData\\factor_library.json',
     csvOnly: true,
   });
   assert.deepEqual(args, [
     '-3', '-X', 'utf8', 'C:\\QTrade Root\\server.py',
     '--port', '43210', '--no-browser', '--single-instance',
-    '--data-dir', 'C:\\QTrade Data\\cache', '--csv-only',
+    '--data-dir', 'C:\\QTrade Data\\cache',
+    '--factor-library-file', 'C:\\Users\\Test\\AppData\\factor_library.json',
+    '--csv-only',
+  ]);
+});
+
+test('factor library storage is passed separately from the data cache', () => {
+  const args = runtime.buildServerArguments({
+    python: { args: [] },
+    serverScript: 'server.py',
+    port: 43211,
+    factorLibraryFile: 'C:\\QTrade User Data\\factor_library.json',
+  });
+  assert.deepEqual(args.slice(-2), [
+    '--factor-library-file', 'C:\\QTrade User Data\\factor_library.json',
   ]);
 });
 
@@ -402,6 +426,7 @@ test('preload, package resources, and launcher are present and portable', () => 
     'qtrade_adapters/deepseek_harness/decisions.py',
     'qtrade_adapters/deepseek_harness/market_data.py',
     'qtrade_adapters/deepseek_harness/freshness.py',
+    'qtrade_adapters/deepseek_harness/factor_library.py',
     'qtrade_adapters/deepseek_harness/runtime.py',
   ]) {
     assert.ok(fs.existsSync(path.join(PROJECT_ROOT, relativePath)), relativePath);

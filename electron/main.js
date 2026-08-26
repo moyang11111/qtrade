@@ -7,6 +7,7 @@ const {
   assertRuntimeResources,
   findPython,
   resolveDataDirectory,
+  resolveFactorLibraryFile,
   resolveRuntimePaths,
   startBackend,
 } = require('./runtime');
@@ -113,6 +114,7 @@ async function bootstrap() {
     python,
     cwd: userDataPath,
     dataDir,
+    factorLibraryFile: resolveFactorLibraryFile(userDataPath),
     csvOnly: process.env.QTRADE_ELECTRON_CSV_ONLY === '1',
     preferredPort: requestedPort(process.env),
   });
