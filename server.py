@@ -25,7 +25,6 @@ import io
 import json
 import time
 import os
-import sqlite3
 import socket
 import argparse
 import re
@@ -44,8 +43,13 @@ import numpy as np
 import factors as factors_mod
 
 # ---- 本地仿真盘引擎（a-share-skill, MIT）----
-from paper_trading.engine import OrderRequest, PaperTradingEngine
+from paper_trading.engine import PaperTradingEngine
 from paper_trading.market_data import MarketDataProvider, infer_limit_prices
+from qtrade_adapters.deepseek_harness.market_data import (
+    MIN_HISTORY_ROWS,
+    MainboardMarketDataAdapter,
+    normalize_code,
+)
 
 # ============================================================================
 # 实时数据源（腾讯）
@@ -249,6 +253,11 @@ class DataService:
         self._df_cache: dict[str, pd.DataFrame] = {}
         self._ind_cache: dict[str, dict] = {}
         self._csv_symbols: list[str] | None = None
+        self.mainboard_adapter = MainboardMarketDataAdapter(
+            base_dir=qtrade_base_bridge.base_dir(),
+            csv_dir=self.data_dir,
+        )
+        self._candidate_symbols: set[str] = set()
 
     # ---------- 数据源解析 ----------
 
@@ -267,7 +276,7 @@ class DataService:
                 pass  # 回退
         if symbol in self._df_cache:
             return self._df_cache[symbol]
-        return self._load_csv(symbol)
+        return self.load_history(symbol)
 
     def _load_csv(self, symbol: str) -> pd.DataFrame | None:
         # 命中内存缓存直接返回（主板全市场扫描每轮需要三千+只，避免重复磁盘IO）
@@ -284,10 +293,28 @@ class DataService:
         except Exception:
             return None
 
+    def load_history(self, symbol: str, count: int = 320) -> pd.DataFrame | None:
+        """Load local qfq history through the read-only adapter, then CSV fallback."""
+
+        if symbol in self._df_cache:
+            return self._df_cache[symbol]
+        if self.mainboard_adapter.available:
+            try:
+                frame = self.mainboard_adapter.get_history(symbol, count=count)
+                if frame is not None and not frame.empty:
+                    self._df_cache[symbol] = frame
+                    return frame
+            except Exception:
+                pass
+        return self._load_csv(symbol)
+
     # ---------- 股票列表 ----------
 
     def scan(self) -> list[str]:
-        """股票列表：CSV 文件名（存在时）∪ 内置常用池。"""
+        """Return the read-only full mainboard list, or the legacy fallback pool."""
+
+        if self.mainboard_adapter.available:
+            return self.mainboard_adapter.scan()
         if self._csv_symbols is None:
             symbols = []
             if self.data_dir.exists():
@@ -303,6 +330,86 @@ class DataService:
                 seen.add(s)
                 merged.append(s)
         return merged
+
+    def mainboard_symbols(self) -> list[str]:
+        """Return listed Shanghai/Shenzhen mainboard symbols in stable order."""
+
+        if self.mainboard_adapter.available:
+            return self.mainboard_adapter.scan()
+        seen: set[str] = set()
+        symbols: list[str] = []
+        for raw in self.scan():
+            code = normalize_code(raw)
+            if code is None or not (code.startswith("60") or code.startswith("00")):
+                continue
+            if code not in seen:
+                seen.add(code)
+                symbols.append(code)
+        return symbols
+
+    def symbol_metadata(self, symbol: str) -> dict | None:
+        """Return safe metadata for a symbol without exposing database paths."""
+
+        if self.mainboard_adapter.available:
+            return self.mainboard_adapter.metadata(symbol)
+        code = normalize_code(symbol)
+        if code not in set(self.mainboard_symbols()):
+            return None
+        frame = self._load_csv(code)
+        rows = len(frame) if frame is not None else 0
+        latest = str(frame.index[-1])[:10] if frame is not None and len(frame) else None
+        return {
+            "code": code,
+            "name": code,
+            "exchange": "SH" if code.startswith("60") else "SZ",
+            "risk_warning": None,
+            "listed": True,
+            "suspended": False,
+            "tradable": True,
+            "latest_trade_date": latest,
+            "history_rows": rows,
+            "computable": rows >= MIN_HISTORY_ROWS,
+            "eligible_reason": None if rows >= MIN_HISTORY_ROWS else "history_insufficient",
+            "source": "fallback",
+        }
+
+    def is_tradable(self, symbol: str) -> bool:
+        metadata = self.symbol_metadata(symbol)
+        return bool(metadata and metadata.get("tradable") and metadata.get("listed"))
+
+    def set_candidate_symbols(self, symbols) -> None:
+        self._candidate_symbols = {
+            code for code in (normalize_code(symbol) for symbol in (symbols or [])) if code
+        }
+
+    @property
+    def universe_summary(self) -> dict:
+        """Return total/computable/tradable/candidate counts for the current snapshot."""
+
+        if self.mainboard_adapter.available:
+            return self.mainboard_adapter.universe_summary(self._candidate_symbols)
+        records = []
+        as_of = None
+        for code in self.mainboard_symbols():
+            frame = self._load_csv(code)
+            rows = len(frame) if frame is not None else 0
+            latest = str(frame.index[-1])[:10] if frame is not None and len(frame) else None
+            if latest and (as_of is None or latest > as_of):
+                as_of = latest
+            records.append((code, rows))
+        computable = {code for code, rows in records if rows >= MIN_HISTORY_ROWS}
+        return {
+            "total": len(records),
+            "computable": len(computable),
+            "tradable": len(records),
+            "candidate": len(computable & self._candidate_symbols),
+            "excluded_by_reason": {
+                "history_insufficient": len(records) - len(computable),
+            } if len(records) != len(computable) else {},
+            "as_of": as_of,
+            "source": "fallback",
+            "reason": self.mainboard_adapter.last_error or "external_database_unavailable",
+        }
 
     # ---------- 查询 ----------
 
@@ -450,8 +557,8 @@ class DataService:
             close = df["close"].astype(float)
             sym_ret = float(close.iloc[-1] / close.iloc[-121] - 1) if len(df) > 121 else None
             uni_rets = []
-            for s in self.scan()[:300]:
-                d = self._load_csv(s)
+            for s in self.mainboard_symbols()[:300]:
+                d = self.load_history(s)
                 if d is not None and len(d) > 121:
                     uni_rets.append(float(d["close"].astype(float).iloc[-1] / d["close"].astype(float).iloc[-121] - 1))
             rps = factors_mod.rps_percentile(sym_ret, uni_rets)
@@ -520,7 +627,6 @@ class DataService:
         if df is None:
             return {"error": f"无法加载 {symbol}"}
 
-        close = df["close"]
         if strategy == "rsi_layered":
             # RSI 分层买入策略：专用模拟器（逐层建仓，与信号模型不同）
             result = self._simulate_rsi_layered(df, capital, commission, symbol=symbol)
@@ -1186,11 +1292,11 @@ class LearnedSignalEngineV2:
     @staticmethod
     def _adx(df: pd.DataFrame, n: int = 14):
         """Wilder ADX：返回 (adx, +di, -di) 最新值。"""
-        h, l, c = df["high"].astype(float), df["low"].astype(float), df["close"].astype(float)
-        up, dn = h.diff(), -l.diff()
+        h, low, c = df["high"].astype(float), df["low"].astype(float), df["close"].astype(float)
+        up, dn = h.diff(), -low.diff()
         plus_dm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0), index=df.index)
         minus_dm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0), index=df.index)
-        tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+        tr = pd.concat([h - low, (h - c.shift()).abs(), (low - c.shift()).abs()], axis=1).max(axis=1)
         a = 1 / n
         atr = tr.ewm(alpha=a, adjust=False).mean()
         pdi = 100 * plus_dm.ewm(alpha=a, adjust=False).mean() / atr.replace(0, np.nan)
@@ -1698,13 +1804,13 @@ class AutoPaperTrader:
     def _mainboard_scan(service, symbols: list[str], rs_min: float) -> tuple[dict, float, list[str]]:
         """主板全市场扫描：全主板 RPS(120日)百分位 + 市场宽度 + 便宜预筛。
 
-        只读本地 CSV 缓存（_load_csv 带内存缓存），numpy 向量化快筛（~毫秒级/千只），
+        只读本地历史缓存，numpy 向量化快筛（~毫秒级/千只），
         绝不触发实时拉取。预筛条件与欧奈尔闸门同参（距52周高≤15%、MA50趋势、RPS），
         幸存者再交完整引擎精析。返回 (rs_map, breadth, 候选列表)。
         """
         closes, highs, lows, opens, vols, rets, above = {}, {}, {}, {}, {}, {}, []
         for sym in symbols:
-            d = service._load_csv(sym)
+            d = service.load_history(sym)
             if d is None or len(d) < 130:
                 continue
             closes[sym] = d["close"].values.astype(float)
@@ -1741,7 +1847,7 @@ class AutoPaperTrader:
             if last < d[-10:].max() * 0.97:
                 return False
             # Sequoia 四形态之一当天命中（与 patterns() 同参数的 numpy 版）
-            o, h, l, v, c = opens[sym], highs[sym], lows[sym], vols[sym], arr
+            o, h, low, v, c = opens[sym], highs[sym], lows[sym], vols[sym], arr
             vol20 = v[-20:].mean()
             turtle = (c[-1] > h[-21:-1].max() and c[-1] > o[-1] and c[-1] > c[-2]
                       and v[-1] * c[-1] >= SequoiaSignalEngine.MIN_TURNOVER)
@@ -1749,12 +1855,12 @@ class AutoPaperTrader:
             ma20_now, ma20_prev = c[-20:].mean(), c[-21:-1].mean()
             goldcross = (ma5_prev <= ma20_prev and ma5_now > ma20_now
                          and v[-1] > 1.5 * vol20)
-            h40, l40 = h[-40:].max(), l[-40:].min()
-            h10, l10 = h[-10:].max(), l[-10:].min()
+            h40, l40 = h[-40:].max(), low[-40:].min()
+            h10, l10 = h[-10:].max(), low[-10:].min()
             htf = (h40 / l40 > 1.6 and h10 / l10 < 1.15 and l10 >= 0.8 * h40
                    and v[-1] < 0.6 * vol20)
             shakeout = (c[-2] >= c[-3] * 1.095 and c[-1] < o[-1]
-                        and v[-1] >= 2 * v[-2] and l[-1] >= c[-2])
+                        and v[-1] >= 2 * v[-2] and low[-1] >= c[-2])
             return turtle or goldcross or htf or shakeout
 
         candidates = [s for s in closes if _fast_filter(s)]
@@ -1810,8 +1916,9 @@ class AutoPaperTrader:
                 is_fusion = mode == "sequoia_oneil"
 
                 rs_map, breadth = {}, 1.0
+                candidate_symbols = []
                 # 股票池统一为全主板（沪60/深00），不再截断前 60 只
-                mainboard = [s for s in service.scan() if s[:2] in ("60", "00")]
+                mainboard = service.mainboard_symbols()
                 st["_universe_n"] = len(mainboard)
                 if is_fusion or is_oneil:
                     # 主板全市场：RS百分位与宽度都用全主板口径；
@@ -1819,13 +1926,14 @@ class AutoPaperTrader:
                     rs_map, breadth, symbols = self._mainboard_scan(
                         service, mainboard,
                         rs_min=SequoiaOneilEngine.RS_MIN if is_fusion else OneilSignalEngine.RS_MIN)
+                    candidate_symbols = list(symbols)
                 else:
                     symbols = mainboard
                     if is_v2:
                         # v2 市场宽度闸门（借自 O'Neil M 要素）：全主板口径计算
                         above = []
                         for sym in symbols:
-                            d = service._load_csv(sym)
+                            d = service.load_history(sym)
                             if d is None or len(d) < 25:
                                 continue
                             c = d["close"].astype(float)
@@ -1910,12 +2018,15 @@ class AutoPaperTrader:
                     for sym in symbols:
                         if sym in st["positions"] or len(st["positions"]) + len(candidates) >= self.MAX_POSITIONS:
                             continue
-                        df = service._load_csv(sym)
+                        if not service.is_tradable(sym):
+                            continue
+                        df = service.load_history(sym)
                         sig = self._signal_for(df)
                         if not sig or sig["date"] == sig_dates.get(sym):
                             continue
                         if sig["action"] == "buy":
                             candidates.append((sym, sig))
+                            candidate_symbols.append(sym)
                     candidates.sort(key=lambda x: -(x[1].get("score") or 0))
                     if not gate_ok:
                         candidates = []  # 市场宽度不足（弱市）：本轮不开新仓，持仓退出规则照常
@@ -1932,10 +2043,12 @@ class AutoPaperTrader:
                             break
                         if sym in st["positions"]:
                             continue
+                        if not service.is_tradable(sym):
+                            continue
                         if (is_fusion or is_oneil) and not breadth_ok:
                             break  # 全市场禁止开仓，无需逐只分析
                         # 全主板扫描统一用本地CSV日K（避免实时拉取几千只）
-                        df = service._load_csv(sym)
+                        df = service.load_history(sym)
                         sig = self._signal_for(df, rs_pct=rs_map.get(sym, 50.0), breadth=breadth)
                         if not sig:
                             continue
@@ -1943,10 +2056,12 @@ class AutoPaperTrader:
                             continue
                         sig_dates[sym] = sig["date"]
                         if sig["action"] == "buy":
+                            candidate_symbols.append(sym)
                             self._buy(sym, sig["price"], sig)
 
                 # 3) 资金曲线
-                status = self.status()
+                service.set_candidate_symbols(candidate_symbols)
+                status = self.status(service)
                 st["equity_hist"] = (st["equity_hist"] + [
                     {"time": time.strftime("%Y-%m-%d %H:%M"), "total": status["total"]}
                 ])[-500:]
@@ -2003,6 +2118,12 @@ class AutoPaperTrader:
                     "buy_reason": pos.get("buy_reason", ""),
                 })
             pos_list.sort(key=lambda p: -p["value"])
+            summary = getattr(service, "universe_summary", None) if service is not None else None
+            if summary is None:
+                summary = {
+                    "total": st.get("_universe_n", 0), "computable": 0, "tradable": 0,
+                    "candidate": 0, "excluded_by_reason": {}, "as_of": None, "source": "unknown",
+                }
             return {
                 "cash": round(cash, 2),
                 "market_value": round(mv - cash, 2),
@@ -2024,6 +2145,7 @@ class AutoPaperTrader:
                 "signal_modes": [{"mode": k, "label": v} for k, v in self.SIGNAL_MODES.items()],
                 "engine_owner": self.engine_lock.acquired(),
                 "universe_size": st.get("_universe_n", 0),
+                "universe_summary": summary,
                 "rules": {
                     "pos_ratio": self.POS_RATIO, "take_profit": self.TAKE_PROFIT,
                     "stop_loss": self.STOP_LOSS, "cost": self.COST,
@@ -2258,6 +2380,12 @@ class EngineAutoPaperTrader:
         pnl = total - self.INIT_CASH
         pnl_pct = round((total / self.INIT_CASH - 1) * 100, 2) if self.INIT_CASH else 0.0
         st = self.state
+        summary = getattr(service, "universe_summary", None) if service is not None else None
+        if summary is None:
+            summary = {
+                "total": st.get("_universe_n", 0), "computable": 0, "tradable": 0,
+                "candidate": 0, "excluded_by_reason": {}, "as_of": None, "source": "unknown",
+            }
         return {
             "cash": round(acc.get("cash") or 0.0, 2),
             "market_value": round(acc.get("market_value") or 0.0, 2),
@@ -2279,6 +2407,7 @@ class EngineAutoPaperTrader:
             "signal_modes": [{"mode": k, "label": v} for k, v in self.SIGNAL_MODES.items()],
             "engine_owner": True,
             "universe_size": st.get("_universe_n", 0),
+            "universe_summary": summary,
             "rules": {
                 "pos_ratio": self._signals.POS_RATIO, "take_profit": self._signals.TAKE_PROFIT,
                 "stop_loss": self._signals.STOP_LOSS, "cost": self._signals.COST,
@@ -2395,6 +2524,10 @@ class EngineAutoPaperTrader:
         sym = str(rec.get("code") or "").strip()
         if not sym:
             return {"ok": False, "error": "缺少 code"}
+        if not service.is_tradable(sym):
+            self.state["last_error"] = f"决策买入 {sym} 失败：标的暂不可交易"
+            self._save_meta()
+            return self.status(service)
         if not self.state.get("running", True):
             return self.status(service)
         if not self.engine_lock.acquired():
@@ -2470,22 +2603,22 @@ class EngineAutoPaperTrader:
         self._signals.state["signal_mode"] = mode
         is_fusion = mode == "sequoia_oneil"
         is_oneil = mode == "oneil"
-        is_v2 = mode == "learned_v2"
-
         # 股票池：全主板
-        mainboard = [s for s in service.scan() if s[:2] in ("60", "00")]
+        candidate_symbols = []
+        mainboard = service.mainboard_symbols()
         self.state["_universe_n"] = len(mainboard)
         rs_map, breadth = {}, 1.0
         if is_fusion or is_oneil:
             rs_map, breadth, symbols = self._signals._mainboard_scan(
                 service, mainboard,
                 rs_min=SequoiaOneilEngine.RS_MIN if is_fusion else OneilSignalEngine.RS_MIN)
+            candidate_symbols = list(symbols)
         else:
             symbols = mainboard
             # 全市场宽度（站上 MA20 占比）——用于 L0 择时门控，所有信号源统一计算
             above = []
             for sym in symbols:
-                d = service._load_csv(sym)
+                d = service.load_history(sym)
                 if d is None or len(d) < 25:
                     continue
                 c = d["close"].astype(float)
@@ -2561,10 +2694,13 @@ class EngineAutoPaperTrader:
                 continue
             if len(held) >= self._signals.MAX_POSITIONS:
                 break
-            df = service._load_csv(sym)
+            if not service.is_tradable(sym):
+                continue
+            df = service.load_history(sym)
             sig = self._sig(df, rs_pct=rs_map.get(sym, 50.0), breadth=breadth)
             if not sig or sig.get("action") != "buy" or sig.get("date") == self.state["_sig_date"].get(sym):
                 continue
+            candidate_symbols.append(sym)
             # 单因子暴露控制：同一信号族持仓数达到上限则跳过该买入
             family = self._factor_family(sig.get("reason", ""))
             if self._family_counts().get(family, 0) >= self.MAX_FAMILY_POSITIONS:
@@ -2606,6 +2742,7 @@ class EngineAutoPaperTrader:
             if sym not in held_now:
                 self.state["positions_meta"].pop(sym, None)
         self.state["family_exposure"] = self._family_counts()
+        service.set_candidate_symbols(candidate_symbols)
 
         # 净值快照 + 保存
         self.engine.snapshot_accounts()
@@ -2844,7 +2981,9 @@ class APIHandler(SimpleHTTPRequestHandler):
             # DSA 信号源已移除，AI 模拟盘保留查看/估值，不再同步外部 AI 信号
             return self._json({"error": "DSA 信号已移除，AI 模拟盘暂不支持同步"}, status=400)
         elif action == "mark":
-            price_fn = lambda sym: self._latest_close(sym)
+            def price_fn(sym):
+                return self._latest_close(sym)
+
             status = AI_PAPER.mark_prices(price_fn)
         else:
             status = AI_PAPER.status()
@@ -2900,21 +3039,19 @@ class APIHandler(SimpleHTTPRequestHandler):
         # 随机挑一只数据足够长的股票（需额外留 60 根预热，保证均线/形态有上下文）
         # 平盘题（|涨跌幅|<0.5%）无训练意义，自动重抽，最多 20 次
         df = None
-        chosen = None
         for _ in range(20):
             symbols = SERVICE.scan()
             _random.shuffle(symbols)
             for sym in symbols:
                 d = SERVICE._resolve_df(sym)
                 if d is not None and len(d) >= lookback + horizon + 60:
-                    df, chosen = d, sym
+                    df = d
                     break
             if df is None:
                 return self._json({"error": "没有足够长的K线数据"}, status=500)
 
             # 随机起点：保证 known 段之前至少 60 根上下文
             start = _random.randint(60, len(df) - lookback - horizon)
-            idx = df.index
             b = float(df["close"].iloc[start + lookback - 1])
             e = float(df["close"].iloc[start + lookback + horizon - 1])
             if abs(e / b - 1) * 100 >= 0.5:
@@ -3113,7 +3250,7 @@ def main():
     if port != args.port:
         print(f"⚠️  端口 {args.port} 被占用，已自动改用端口 {port}")
 
-    print(f"📊 QTrade Desktop")
+    print("📊 QTrade Desktop")
     print(f"📂 CSV 回退目录: {data_dir}")
     print(f"📈 股票池: {len(symbols)} 只")
     print(f"🌐 交易终端: {url}")

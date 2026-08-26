@@ -400,6 +400,7 @@ test('preload, package resources, and launcher are present and portable', () => 
     'qtrade_adapters/deepseek_harness/config.py',
     'qtrade_adapters/deepseek_harness/handler.py',
     'qtrade_adapters/deepseek_harness/decisions.py',
+    'qtrade_adapters/deepseek_harness/market_data.py',
     'qtrade_adapters/deepseek_harness/runtime.py',
   ]) {
     assert.ok(fs.existsSync(path.join(PROJECT_ROOT, relativePath)), relativePath);

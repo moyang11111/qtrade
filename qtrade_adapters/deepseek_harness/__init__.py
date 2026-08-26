@@ -14,6 +14,7 @@ from .config import (
 )
 from .decisions import decide, decide_bg_sync
 from .handler import QtradeDeckHandler, serve_base_file
+from .market_data import MainboardMarketDataAdapter, normalize_code
 from .runtime import ensure_harness, maybe_auto_update
 
 __all__ = [
@@ -30,6 +31,8 @@ __all__ = [
     "decide_bg_sync",
     "ensure_harness",
     "maybe_auto_update",
+    "MainboardMarketDataAdapter",
+    "normalize_code",
     "prepare_sys_path",
     "resolve_base_dir",
     "serve_base_file",
