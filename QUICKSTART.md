@@ -190,6 +190,10 @@ python scripts/daily_update_1830.py --deck-dir "D:\path\to\deepseek-harness-quan
 每日更新路径优先级为 CLI `--deck-dir` > `QTRADE_DECK_DIR` > 项目内默认 `third_party/` 路径。
 没有底座时，CSV 服务、测试和本地质量门禁仍可运行，但底座桥接接口不可用。
 
+应用打开期间，QTrade 会在交易日 18:30 调度一次数据更新；18:30 后首次打开会立即补跑。关闭应用不会等待调度，成功、休市或失败当天都不会重复忙循环，下一自然日再检查。调度依赖可选的 `akshare` 交易日历，并将缓存写入 `logs/cache/trading_calendar.json`；日历无法确认且没有缓存时会安全停止，不会猜测执行。设置 `QTRADE_NO_AUTOUPDATE=1` 可完全关闭调度。
+
+需要人工补跑可执行 `python scripts/daily_update_1830.py --force`，目标日期可用 `--date YYYY-MM-DD` 指定；结构化状态默认写入 `logs/daily_update_1830.status.json`，运行日志写入 `logs/daily_update_1830.log`，可用 `--status-file` 覆盖状态路径。每日流程只更新底层数据，不自动交易或启动 HARNESS。
+
 ## 核心概念
 
 ### 1. 策略接口
