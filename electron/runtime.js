@@ -9,6 +9,24 @@ const { spawn, spawnSync } = require('child_process');
 const HEALTH_PATH = '/api/health';
 const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
 const DEFAULT_POLL_INTERVAL_MS = 150;
+const DEFAULT_REQUIRED_PYTHON_MODULES = Object.freeze(['pandas', 'akshare']);
+
+const PYTHON_PREFLIGHT_SCRIPT = [
+  'import importlib, json, sys',
+  'required = ' + JSON.stringify(DEFAULT_REQUIRED_PYTHON_MODULES),
+  'missing = []',
+  'for name in required:',
+  '    try:',
+  '        importlib.import_module(name)',
+  '    except ModuleNotFoundError as error:',
+  "        missing.append(name if error.name == name else f'{name} (requires {error.name})')",
+  '    except Exception as error:',
+  "        missing.append(f'{name} ({type(error).__name__})')",
+  "version = '.'.join(str(part) for part in sys.version_info[:3])",
+  'supported = sys.version_info >= (3, 10)',
+  "print(json.dumps({'python': sys.executable, 'version': version, 'supported': supported, 'missing': missing}, separators=(',', ':')))",
+  'raise SystemExit(0 if supported and not missing else 1)',
+].join('\n');
 
 function resolveRuntimePaths({
   packaged = false,
@@ -95,14 +113,61 @@ function describePythonCandidate(candidate) {
     : candidate.command;
 }
 
-function probePython(candidate, {
+function normalizeRequiredModules(requiredModules = DEFAULT_REQUIRED_PYTHON_MODULES) {
+  if (!Array.isArray(requiredModules)) {
+    throw new TypeError('requiredModules must be an array of module names.');
+  }
+  return [...new Set(requiredModules.filter((moduleName) => (
+    typeof moduleName === 'string' && moduleName.trim()
+  )).map((moduleName) => moduleName.trim()))];
+}
+
+function buildPythonPreflightScript(requiredModules = DEFAULT_REQUIRED_PYTHON_MODULES) {
+  const modules = normalizeRequiredModules(requiredModules);
+  return PYTHON_PREFLIGHT_SCRIPT.replace(
+    `required = ${JSON.stringify(DEFAULT_REQUIRED_PYTHON_MODULES)}`,
+    `required = ${JSON.stringify(modules)}`
+  );
+}
+
+function parsePythonPreflight(result, candidate, requiredModules) {
+  const stdout = typeof result?.stdout === 'string' ? result.stdout : '';
+  const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  let payload = {};
+  try {
+    if (lines.length > 0) payload = JSON.parse(lines.at(-1));
+  } catch {
+    payload = {};
+  }
+  const missing = Array.isArray(payload.missing)
+    ? payload.missing.filter((moduleName) => typeof moduleName === 'string')
+    : [];
+  const supported = payload.supported === true;
+  const error = result?.error && result.error.message
+    ? result.error.message
+    : null;
+  return {
+    ok: !error && result?.status === 0 && supported && missing.length === 0,
+    error,
+    missing,
+    pythonPath: typeof payload.python === 'string' && payload.python ? payload.python : candidate.command,
+    requiredModules,
+    status: result?.status ?? null,
+    supported,
+    version: typeof payload.version === 'string' ? payload.version : null,
+  };
+}
+
+function probePythonDetails(candidate, {
   spawnSyncImpl = spawnSync,
   timeoutMs = 5_000,
+  requiredModules = DEFAULT_REQUIRED_PYTHON_MODULES,
 } = {}) {
+  const modules = normalizeRequiredModules(requiredModules);
   try {
     const result = spawnSyncImpl(
       candidate.command,
-      [...candidate.args, '-c', 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'],
+      [...candidate.args, '-c', buildPythonPreflightScript(modules)],
       {
         encoding: 'utf8',
         timeout: timeoutMs,
@@ -111,10 +176,36 @@ function probePython(candidate, {
         stdio: ['ignore', 'pipe', 'pipe'],
       }
     );
-    return !result.error && result.status === 0;
-  } catch {
-    return false;
+    return parsePythonPreflight(result, candidate, modules);
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message,
+      missing: [],
+      pythonPath: candidate.command,
+      requiredModules: modules,
+      status: null,
+      supported: false,
+      version: null,
+    };
   }
+}
+
+function probePython(candidate, options = {}) {
+  return probePythonDetails(candidate, options).ok;
+}
+
+function describePythonFailure(candidate, details) {
+  const problems = [];
+  if (details.missing.length > 0) {
+    problems.push(`missing modules: ${details.missing.join(', ')}`);
+  }
+  if (!details.supported) {
+    problems.push(`Python ${details.version || 'version'} is below 3.10`);
+  }
+  if (details.error) problems.push(details.error);
+  if (problems.length === 0) problems.push(`preflight exited with status ${details.status}`);
+  return `${candidate.source || 'Python candidate'}; Python path/source: ${details.pythonPath}; ${problems.join('; ')}`;
 }
 
 function findPython({
@@ -122,18 +213,35 @@ function findPython({
   env = process.env,
   candidates = pythonCandidates({ platform, env }),
   spawnSyncImpl = spawnSync,
+  requiredModules = DEFAULT_REQUIRED_PYTHON_MODULES,
 } = {}) {
+  const modules = normalizeRequiredModules(requiredModules);
+  const configured = typeof env.QTRADE_PYTHON === 'string' ? env.QTRADE_PYTHON.trim() : '';
+  if (configured) {
+    const candidate = { command: configured, args: [], source: 'QTRADE_PYTHON' };
+    const details = probePythonDetails(candidate, { spawnSyncImpl, requiredModules: modules });
+    if (details.ok) return candidate;
+    throw new Error(
+      `QTRADE_PYTHON is explicitly configured but failed QTrade Python preflight: ` +
+      `${describePythonFailure(candidate, details)}. Do not silently switch interpreters.`
+    );
+  }
+
+  const failures = [];
   for (const candidate of candidates) {
-    if (probePython(candidate, { spawnSyncImpl })) {
+    const details = probePythonDetails(candidate, { spawnSyncImpl, requiredModules: modules });
+    if (details.ok) {
       return candidate;
     }
+    failures.push(describePythonFailure(candidate, details));
   }
 
   const checked = candidates.map(describePythonCandidate).join(', ');
   throw new Error(
     `Unable to find a usable Python 3 interpreter. Checked: ${checked || '(none)'}. ` +
-    'Install Python 3.10+ with the project dependencies, or set QTRADE_PYTHON ' +
-    'to the executable path.'
+    `Required modules: ${modules.join(', ') || '(none)'}. ` +
+    `${failures.join(' | ')}. Install Python 3.10+ with the project dependencies, or set ` +
+    'QTRADE_PYTHON to the executable path.'
   );
 }
 
@@ -436,15 +544,18 @@ async function startBackend({
 }
 
 module.exports = {
+  DEFAULT_REQUIRED_PYTHON_MODULES,
   HEALTH_PATH,
   assertRuntimeResources,
   buildServerArguments,
+  buildPythonPreflightScript,
   createChildStopper,
   createIdempotentCleanup,
   findPython,
   getAvailablePort,
   parseHealthPayload,
   probePython,
+  probePythonDetails,
   pythonCandidates,
   requiredRuntimeResources,
   requestHealth,

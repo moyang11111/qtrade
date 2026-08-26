@@ -12,6 +12,15 @@ const runtime = require('../runtime');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 
+function preflightOutput({
+  python = 'C:\\Python312\\python.exe',
+  version = '3.12.0',
+  supported = true,
+  missing = [],
+} = {}) {
+  return JSON.stringify({ python, version, supported, missing });
+}
+
 test('development and packaged runtime roots are deterministic', () => {
   const development = runtime.resolveRuntimePaths({
     dirname: path.join(PROJECT_ROOT, 'electron'),
@@ -83,7 +92,12 @@ test('Python discovery honors QTRADE_PYTHON without shell parsing', () => {
     env: { QTRADE_PYTHON: configured },
     spawnSyncImpl(command, args, options) {
       calls.push({ command, args, options });
-      return { status: 0, error: null };
+      return {
+        status: 0,
+        error: null,
+        stdout: preflightOutput({ python: configured }),
+        stderr: '',
+      };
     },
   });
 
@@ -102,13 +116,23 @@ test('Python version probe rejects pre-3.10 and accepts 3.10+', () => {
   const oldPython = runtime.probePython(candidate, {
     spawnSyncImpl: (_command, args) => {
       probeExpression.push(args.at(-1));
-      return { status: 1, error: null };
+      return {
+        status: 1,
+        error: null,
+        stdout: preflightOutput({ supported: false, version: '3.9.18' }),
+        stderr: '',
+      };
     },
   });
   const supportedPython = runtime.probePython(candidate, {
     spawnSyncImpl: (_command, args) => {
       probeExpression.push(args.at(-1));
-      return { status: 0, error: null };
+      return {
+        status: 0,
+        error: null,
+        stdout: preflightOutput(),
+        stderr: '',
+      };
     },
   });
 
@@ -127,8 +151,18 @@ test('Python discovery falls back to Windows py -3 and PATH python', () => {
     spawnSyncImpl(command, args) {
       calls.push({ command, args });
       return command === 'py'
-        ? { status: 1, error: null }
-        : { status: 0, error: null };
+        ? {
+          status: 1,
+          error: null,
+          stdout: preflightOutput({ supported: false, version: '3.9.18' }),
+          stderr: '',
+        }
+        : {
+          status: 0,
+          error: null,
+          stdout: preflightOutput({ python: 'C:\\Python312\\python.exe' }),
+          stderr: '',
+        };
     },
   });
 
@@ -137,15 +171,89 @@ test('Python discovery falls back to Windows py -3 and PATH python', () => {
   assert.deepEqual(calls[0].args.slice(0, 1), ['-3']);
 });
 
-test('Python discovery reports an actionable error when every candidate fails', () => {
+test('Python discovery reports an actionable error for an unusable explicit candidate', () => {
   assert.throws(
     () => runtime.findPython({
       platform: 'win32',
       env: { QTRADE_PYTHON: 'missing-python.exe' },
       spawnSyncImpl: () => ({ status: 1, error: null }),
     }),
-    /Unable to find a usable Python 3 interpreter.*QTRADE_PYTHON/
+    /QTRADE_PYTHON is explicitly configured.*Python path\/source: missing-python\.exe/
   );
+});
+
+test('Python preflight defaults to pandas and akshare without shell execution', () => {
+  const calls = [];
+  const candidate = { command: 'python', args: [] };
+  const result = runtime.probePythonDetails(candidate, {
+    spawnSyncImpl(command, args, options) {
+      calls.push({ command, args, options });
+      return {
+        status: 0,
+        error: null,
+        stdout: preflightOutput(),
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.requiredModules, ['pandas', 'akshare']);
+  assert.equal(calls[0].options.shell, false);
+  assert.match(calls[0].args.at(-1), /importlib\.import_module/);
+  assert.match(calls[0].args.at(-1), /"pandas"/);
+  assert.match(calls[0].args.at(-1), /"akshare"/);
+});
+
+test('Python preflight reports missing modules and explicit paths do not fall back', () => {
+  const configured = 'C:\\Users\\ASUS\\Apps\\QTrade\\runtime\\.venv\\Scripts\\python.exe';
+  const calls = [];
+  assert.throws(
+    () => runtime.findPython({
+      platform: 'win32',
+      env: { QTRADE_PYTHON: configured },
+      spawnSyncImpl(command, args) {
+        calls.push({ command, args });
+        return {
+          status: 1,
+          error: null,
+          stdout: preflightOutput({
+            python: configured,
+            missing: ['akshare'],
+          }),
+          stderr: '',
+        };
+      },
+    }),
+    (error) => (
+      /QTRADE_PYTHON is explicitly configured/.test(error.message)
+      && /missing modules: akshare/.test(error.message)
+      && error.message.includes(`Python path/source: ${configured}`)
+      && /Do not silently switch interpreters/.test(error.message)
+    )
+  );
+  assert.deepEqual(calls.map(({ command }) => command), [configured]);
+});
+
+test('Python preflight required modules can be injected for isolated tools', () => {
+  let script = '';
+  const candidate = runtime.findPython({
+    env: { QTRADE_PYTHON: 'test-python' },
+    requiredModules: ['pandas'],
+    spawnSyncImpl: (_command, args) => {
+      script = args.at(-1);
+      return {
+        status: 0,
+        error: null,
+        stdout: preflightOutput(),
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(candidate.command, 'test-python');
+  assert.match(script, /"pandas"/);
+  assert.doesNotMatch(script, /"akshare"/);
 });
 
 test('non-Windows Python discovery uses python3 before python', () => {

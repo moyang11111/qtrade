@@ -34,12 +34,12 @@ dependencies = [
     "scipy>=1.11.0",
     "statsmodels>=0.14.0",
     "seaborn>=0.12.0",
+    "akshare>=1.10.0",
 ]
 
 [project.optional-dependencies]
 data = [
     "pytdx>=1.72",
-    "akshare>=1.10.0",
     "pyarrow>=12.0.0",
 ]
 ml = [
