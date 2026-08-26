@@ -1,16 +1,24 @@
-"""Optional HARNESS process detection/start and daily update scheduling."""
+"""Optional HARNESS detection and app-lifecycle daily update scheduling."""
 
 from __future__ import annotations
 
+import datetime
 import os
 import shutil
 import socket
 import subprocess
 import sys
-import time
+import threading
 from pathlib import Path
 
 from . import config
+
+
+DAILY_UPDATE_TIME = datetime.time(18, 30)
+DAILY_UPDATE_TIMEOUT_SECONDS = 7200
+_AUTO_UPDATE_LOCK = threading.Lock()
+_AUTO_UPDATE_SCHEDULER = None
+_AUTO_UPDATE_THREAD = None
 
 
 def ensure_harness(
@@ -86,32 +94,168 @@ def ensure_harness(
         print(f"[HARNESS({port})] 自动启动失败（忽略）: {error}")
 
 
-def maybe_auto_update(
+def next_daily_update_at(
+    now: datetime.datetime,
     *,
-    base_dir_fn=None,
-    env=None,
-    subprocess_module=None,
-    os_name: str | None = None,
-    today_fn=None,
-    python_executable: str | None = None,
-):
-    """Optionally schedule the existing once-per-day incremental update."""
+    cutoff: datetime.time = DAILY_UPDATE_TIME,
+    handled_date: datetime.date | None = None,
+) -> datetime.datetime:
+    """Return the next check time without sleeping or touching external state."""
 
-    environment = os.environ if env is None else env
-    resolve_base = base_dir_fn or config.resolve_base_dir
+    candidate = datetime.datetime.combine(now.date(), cutoff)
+    if handled_date == now.date():
+        candidate += datetime.timedelta(days=1)
+    elif now >= candidate:
+        return now
+    return candidate
+
+
+def seconds_until_next_check(
+    now: datetime.datetime,
+    *,
+    cutoff: datetime.time = DAILY_UPDATE_TIME,
+    handled_date: datetime.date | None = None,
+) -> float:
+    """Return seconds until the scheduler should check again."""
+
+    return max(0.0, (next_daily_update_at(now, cutoff=cutoff, handled_date=handled_date) - now).total_seconds())
+
+
+class DailyUpdateScheduler:
+    """Small stoppable scheduler used for the lifetime of the QTrade app."""
+
+    def __init__(
+        self,
+        update_fn,
+        *,
+        clock=None,
+        stop_event=None,
+        cutoff: datetime.time = DAILY_UPDATE_TIME,
+    ):
+        self.update_fn = update_fn
+        self.clock = clock or datetime.datetime.now
+        self.stop_event = stop_event or threading.Event()
+        self.cutoff = cutoff
+        self.handled_date: datetime.date | None = None
+        self.last_result: int | None = None
+
+    def run_pending(self, now: datetime.datetime | None = None) -> int | None:
+        """Run at most once after the cutoff for the supplied/current day."""
+
+        current = now or self.clock()
+        if self.handled_date == current.date():
+            return None
+        cutoff_at = datetime.datetime.combine(current.date(), self.cutoff)
+        if current < cutoff_at:
+            return None
+        self.handled_date = current.date()
+        try:
+            result = self.update_fn(current.date())
+            self.last_result = 0 if result is None else int(result)
+        except Exception as error:  # noqa: BLE001 - one failed day must not spin
+            print(f"[auto-update] 调度执行失败：{error}", flush=True)
+            self.last_result = 1
+        return self.last_result
+
+    def seconds_until_next_check(self, now: datetime.datetime | None = None) -> float:
+        current = now or self.clock()
+        return seconds_until_next_check(
+            current,
+            cutoff=self.cutoff,
+            handled_date=self.handled_date,
+        )
+
+    def run_forever(self) -> None:
+        while not self.stop_event.is_set():
+            current = self.clock()
+            self.run_pending(current)
+            self.stop_event.wait(self.seconds_until_next_check(current))
+
+    def stop(self) -> None:
+        self.stop_event.set()
+
+
+def build_daily_update_command(
+    base: Path,
+    target: datetime.date,
+    *,
+    project_root: Path | None = None,
+    status_file: Path | None = None,
+    python_executable: str | None = None,
+) -> list[str]:
+    """Build an argv-only daily-update command with explicit paths."""
+
+    root = config.PROJECT_ROOT if project_root is None else Path(project_root)
+    status = status_file or root / "logs" / "daily_update_1830.status.json"
+    script = root / "scripts" / "daily_update_1830.py"
+    return [
+        python_executable or sys.executable,
+        "-X",
+        "utf8",
+        str(script),
+        "--date",
+        target.isoformat(),
+        "--deck-dir",
+        str(base),
+        "--status-file",
+        str(status),
+    ]
+
+
+def run_daily_update(
+    base: Path,
+    target: datetime.date,
+    *,
+    environment=None,
+    subprocess_module=None,
+    project_root: Path | None = None,
+    status_file: Path | None = None,
+    python_executable: str | None = None,
+) -> int:
+    """Run the daily script synchronously from the scheduler thread."""
+
     processes = subprocess if subprocess_module is None else subprocess_module
+    process_env = dict(os.environ if environment is None else environment)
+    process_env["QTRADE_DECK_DIR"] = str(base)
+    root = config.PROJECT_ROOT if project_root is None else Path(project_root)
+    command = build_daily_update_command(
+        Path(base),
+        target,
+        project_root=root,
+        status_file=status_file,
+        python_executable=python_executable,
+    )
+    try:
+        result = processes.run(
+            command,
+            cwd=str(root),
+            env=process_env,
+            timeout=DAILY_UPDATE_TIMEOUT_SECONDS,
+        )
+    except Exception as error:  # noqa: BLE001 - scheduler records a failed day
+        print(f"[auto-update] daily_update_1830 启动失败：{error}", flush=True)
+        return 1
+    return int(getattr(result, "returncode", 0))
+
+
+def _legacy_injected_update(
+    *,
+    base,
+    environment,
+    processes,
+    os_name,
+    today_fn,
+    python_executable,
+):
+    """Keep the PR5 explicit-clock test seam without affecting production."""
+
     platform_name = os.name if os_name is None else os_name
-    current_day = today_fn or (lambda: time.strftime("%Y-%m-%d"))
-    if environment.get("QTRADE_NO_AUTOUPDATE"):
-        print("[auto-update] 已通过 QTRADE_NO_AUTOUPDATE 关闭自动增量")
-        return
-    base = resolve_base()
+    current_day = today_fn()
     if not (base / "logs" / "pipeline_full_v2_done.txt").exists():
         print("[auto-update] 全量回填未完成，跳过自动增量（等 run_pipeline_full_v2.py 跑完即可启用）")
         return
     marker = base / "data" / "cache" / "last_auto_update.txt"
-    today = current_day()
-    if marker.exists() and marker.read_text(encoding="utf-8").strip() == today:
+    if marker.exists() and marker.read_text(encoding="utf-8").strip() == current_day:
         print("[auto-update] 今天已更新过，跳过")
         return
     script = base / "scripts" / "auto_update_daily.py"
@@ -130,3 +274,86 @@ def maybe_auto_update(
         creationflags=flags,
     )
     print("[auto-update] 已在后台启动增量更新（当天补最近 7 天日线）")
+
+
+def maybe_auto_update(
+    *,
+    base_dir_fn=None,
+    env=None,
+    subprocess_module=None,
+    os_name: str | None = None,
+    today_fn=None,
+    python_executable: str | None = None,
+    project_root: Path | None = None,
+    status_file: Path | None = None,
+):
+    """Start one daemon scheduler for the application's lifetime."""
+
+    environment = os.environ if env is None else env
+    if environment.get("QTRADE_NO_AUTOUPDATE"):
+        print("[auto-update] 已通过 QTRADE_NO_AUTOUPDATE 关闭自动增量")
+        return None
+
+    resolve_base = base_dir_fn or config.resolve_base_dir
+    base = Path(resolve_base())
+    if today_fn is not None:
+        _legacy_injected_update(
+            base=base,
+            environment=environment,
+            processes=subprocess if subprocess_module is None else subprocess_module,
+            os_name=os_name,
+            today_fn=today_fn,
+            python_executable=python_executable,
+        )
+        return None
+
+    processes = subprocess if subprocess_module is None else subprocess_module
+    root = config.PROJECT_ROOT if project_root is None else Path(project_root)
+
+    global _AUTO_UPDATE_SCHEDULER, _AUTO_UPDATE_THREAD
+    with _AUTO_UPDATE_LOCK:
+        if _AUTO_UPDATE_THREAD is not None and _AUTO_UPDATE_THREAD.is_alive():
+            return _AUTO_UPDATE_SCHEDULER
+
+        stop_event = threading.Event()
+
+        def invoke(target: datetime.date) -> int:
+            return run_daily_update(
+                base,
+                target,
+                environment=environment,
+                subprocess_module=processes,
+                project_root=root,
+                status_file=status_file,
+                python_executable=python_executable,
+            )
+
+        scheduler = DailyUpdateScheduler(invoke, stop_event=stop_event)
+        thread = threading.Thread(
+            target=scheduler.run_forever,
+            name="qtrade-daily-update",
+            daemon=True,
+        )
+        _AUTO_UPDATE_SCHEDULER = scheduler
+        _AUTO_UPDATE_THREAD = thread
+        thread.start()
+    print("[auto-update] 已启动交易日 18:30 生命周期调度器")
+    return scheduler
+
+
+def stop_auto_update(timeout: float = 2.0) -> None:
+    """Stop the singleton scheduler; safe to call repeatedly."""
+
+    global _AUTO_UPDATE_SCHEDULER, _AUTO_UPDATE_THREAD
+    with _AUTO_UPDATE_LOCK:
+        scheduler = _AUTO_UPDATE_SCHEDULER
+        thread = _AUTO_UPDATE_THREAD
+        if scheduler is None:
+            return
+        scheduler.stop()
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout=timeout)
+    with _AUTO_UPDATE_LOCK:
+        if _AUTO_UPDATE_THREAD is None or not _AUTO_UPDATE_THREAD.is_alive():
+            _AUTO_UPDATE_SCHEDULER = None
+            _AUTO_UPDATE_THREAD = None

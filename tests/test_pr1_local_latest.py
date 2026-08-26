@@ -81,7 +81,11 @@ def test_daily_update_dry_run_never_executes_subprocess(tmp_path, monkeypatch):
 
     monkeypatch.setattr(daily_update.subprocess, "run", forbidden_run)
 
-    assert daily_update.main(["--dry-run"], today=dt.date(2026, 8, 25)) == 0
+    assert daily_update.main(
+        ["--dry-run"],
+        today=dt.date(2026, 8, 25),
+        calendar_loader=lambda: {dt.date(2026, 8, 25)},
+    ) == 0
     text = log.read_text(encoding="utf-8")
     assert "DRY" in text
     assert "pitch_v2.py" in text
@@ -107,7 +111,11 @@ def test_daily_update_missing_base_returns_failure_without_execution(tmp_path, m
     monkeypatch.setattr(daily_update, "LOG", log)
     monkeypatch.setattr(daily_update.subprocess, "run", lambda *args, **kwargs: pytest.fail("底座缺失不应执行"))
 
-    assert daily_update.main([], today=dt.date(2026, 8, 28)) == 1
+    assert daily_update.main(
+        [],
+        today=dt.date(2026, 8, 28),
+        calendar_loader=lambda: {dt.date(2026, 8, 28)},
+    ) == 1
     text = log.read_text(encoding="utf-8")
     assert "底座不存在" in text
     assert "RUN:" not in text
@@ -123,7 +131,11 @@ def test_daily_update_deck_dir_cli_overrides_environment(tmp_path, monkeypatch):
     monkeypatch.setattr(daily_update, "PY", "python-under-test")
     monkeypatch.setenv("QTRADE_DECK_DIR", str(env_deck))
 
-    assert daily_update.main(["--dry-run", "--deck-dir", str(cli_deck)], today=dt.date(2026, 8, 25)) == 0
+    assert daily_update.main(
+        ["--dry-run", "--deck-dir", str(cli_deck)],
+        today=dt.date(2026, 8, 25),
+        calendar_loader=lambda: {dt.date(2026, 8, 25)},
+    ) == 0
     text = log.read_text(encoding="utf-8")
     assert str(cli_deck / "scripts" / "auto_update_daily.py") in text
     assert str(env_deck) not in text
@@ -145,7 +157,11 @@ def test_daily_update_fails_fast_after_nonzero_step(tmp_path, monkeypatch):
 
     monkeypatch.setattr(daily_update.subprocess, "run", fake_run)
 
-    assert daily_update.main([], today=dt.date(2026, 8, 25)) == 1
+    assert daily_update.main(
+        [],
+        today=dt.date(2026, 8, 25),
+        calendar_loader=lambda: {dt.date(2026, 8, 25)},
+    ) == 1
     assert len(calls) == 2
     text = log.read_text(encoding="utf-8")
     assert "FAIL: 步骤返回 7" in text
@@ -171,7 +187,11 @@ def test_daily_update_returns_failure_after_step_exception(tmp_path, monkeypatch
 
     monkeypatch.setattr(daily_update.subprocess, "run", fake_run)
 
-    assert daily_update.main([], today=dt.date(2026, 8, 25)) == 1
+    assert daily_update.main(
+        [],
+        today=dt.date(2026, 8, 25),
+        calendar_loader=lambda: {dt.date(2026, 8, 25)},
+    ) == 1
     assert len(calls) == 3
     text = log.read_text(encoding="utf-8")
     assert "FAIL: 步骤执行异常" in text

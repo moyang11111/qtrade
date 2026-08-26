@@ -231,6 +231,12 @@ python scripts/daily_update_1830.py --deck-dir "D:\path\to\deepseek-harness-quan
 每日更新路径优先级为 CLI `--deck-dir` > `QTRADE_DECK_DIR` > 项目内默认 `third_party/` 路径。
 CLI/服务的本地 CSV 模式不依赖该底座；隔离冒烟测试会关闭自动底座启动和自动更新。
 
+### 应用内每日更新调度
+
+每日更新调度器随 QTrade 应用生命周期运行，必须保持 QTrade 打开：18:30 前打开会等到当日 18:30，18:30 后首次打开会立即补跑一次；应用关闭时不会等待未完成的自然日调度。当天成功、确认休市或失败后都不会忙循环，下一自然日再检查。交易日历由可选的 `akshare` 提供并缓存到 `logs/cache/trading_calendar.json`；日历无法确认且没有可用缓存时安全停止并返回非零，不猜测为交易日。
+
+设置 `QTRADE_NO_AUTOUPDATE=1` 会完全关闭调度。需要人工补跑时可使用 `python scripts/daily_update_1830.py --force`，也可用 `--date YYYY-MM-DD` 指定目标日期；`--status-file` 可指定结构化状态 JSON，默认是 `logs/daily_update_1830.status.json`，运行日志是 `logs/daily_update_1830.log`。该流程只更新门户、决策和因子数据，不自动交易或启动 HARNESS。
+
 ## License
 
 MIT
