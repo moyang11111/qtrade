@@ -320,22 +320,19 @@
   <div class="auto-overlay" id="pageFactors" hidden>
     <div class="auto-header">
       <div class="auto-title">🧬 因子库</div>
-      <div class="auto-status" id="factorSym">--</div>
+      <div class="auto-status" id="factorSym">已保存方案</div>
       <div class="auto-controls">
         <button class="btn" id="btnFactorClose">✕ 返回行情</button>
       </div>
     </div>
     <div class="auto-error" id="factorError" hidden></div>
     <div class="auto-body">
-      <section class="auto-card auto-card-wide">
-        <div class="auto-card-title">首批 A 股量价因子</div>
-        <div class="auto-table-wrap">
-          <table class="auto-table" id="factorTable">
-            <thead><tr><th>因子</th><th>当前值</th><th>说明</th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
+      <section class="auto-card auto-card-wide factor-library-toolbar">
+        <div class="auto-card-title">已保存的筛选方案</div>
+        <p class="muted" id="factorLibraryEmpty" hidden>请到因子仪表设置条件并保存。</p>
+        <button class="btn primary" id="btnOpenFactorBoard">前往因子仪表</button>
       </section>
+      <div class="factor-library-list" id="factorLibraryList" aria-live="polite"></div>
     </div>
   </div>
 
@@ -379,6 +376,34 @@
       <div class="auto-status">本地因子页面（同端口）</div>
       <div class="auto-controls"><button class="btn" id="btnFactorBoardClose">✕ 返回行情</button></div>
     </div>
+    <section class="factor-filter-panel" id="factorFilterPanel">
+      <button class="factor-filter-toggle" id="factorFilterToggle" type="button" aria-expanded="true" aria-controls="factorFilterBody">筛选并保存方案</button>
+      <div class="factor-filter-body" id="factorFilterBody">
+        <div class="factor-filter-grid">
+          <label class="factor-filter-field">状态<select id="factorStatusFilter" multiple size="2" aria-label="因子状态"></select></label>
+          <label class="factor-filter-field">使用层<select id="factorUsageFilter" multiple size="2" aria-label="因子使用层"></select></label>
+          <label class="factor-filter-field">生命周期<select id="factorLifecycleFilter" multiple size="2" aria-label="因子生命周期"></select></label>
+          <label class="factor-filter-field">ICIR120 最小<input id="factorIcirMin" type="number" step="any" inputmode="decimal"></label>
+          <label class="factor-filter-field">ICIR120 最大<input id="factorIcirMax" type="number" step="any" inputmode="decimal"></label>
+          <label class="factor-filter-field">拥挤度最大<input id="factorCrowdingMax" type="number" step="any" inputmode="decimal"></label>
+          <label class="factor-filter-field factor-filter-wide">关键词<input id="factorKeyword" type="text" maxlength="120" autocomplete="off" placeholder="名称或标签"></label>
+        </div>
+        <div class="factor-filter-actions">
+          <button class="btn" id="btnFactorFilterClear" type="button">清空</button>
+          <button class="btn primary" id="btnFactorPreview" type="button">预览</button>
+          <input id="factorPlanName" type="text" maxlength="120" placeholder="方案名称（保存必填）" aria-label="方案名称">
+          <input id="factorPlanDescription" type="text" maxlength="500" placeholder="说明（可选）" aria-label="方案说明">
+          <button class="btn accent" id="btnFactorSave" type="button">保存方案</button>
+        </div>
+        <div class="factor-filter-hint muted" id="factorCapabilitiesHint" role="status" aria-live="polite">正在读取同日因子条件…</div>
+        <div class="factor-filter-message" id="factorFilterMessage" role="status" aria-live="polite" hidden></div>
+        <div class="factor-preview" id="factorPreview" hidden>
+          <span class="factor-preview-count" id="factorPreviewCount"></span>
+          <span class="factor-preview-date muted" id="factorPreviewDate"></span>
+          <div class="factor-chip-list" id="factorPreviewFactors"></div>
+        </div>
+      </div>
+    </section>
     <iframe id="iframeFactorBoard" class="embedded-deck-frame" src="/factors" title="QTrade 因子仪表盘"></iframe>
   </div>
 

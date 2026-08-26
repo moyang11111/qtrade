@@ -213,6 +213,14 @@ def test_http_api_crud_filters_server_owned_matches_and_safe_errors(tmp_path, mo
     port = httpd.server_address[1]
     try:
         assert _api_request(opener, port, "/api/factor-library") == (200, {"schema_version": 1, "items": []})
+        status, capabilities = _api_request(opener, port, "/api/factor-library/capabilities")
+        assert status == 200
+        assert capabilities["facets"] == {
+            "status": ["eligible", "ineligible"],
+            "usage": ["deferred", "ext_decision"],
+            "lifecycle": ["active", "watch"],
+        }
+        assert capabilities["as_of"] == "2026-08-25"
         status, preview = _api_request(opener, port, "/api/factor-library/preview", "POST", {"conditions": {"status": "eligible"}})
         assert status == 200
         assert preview["matched_factors"] == ["alpha", "gamma"]

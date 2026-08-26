@@ -14,6 +14,22 @@ const API = (() => {
     return res.json();
   }
 
+  async function jsonRequest(path, method = 'GET', body, options = {}) {
+    const request = { method, headers: {}, ...options };
+    if (body !== undefined) {
+      request.headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+      request.body = JSON.stringify(body);
+    }
+    const res = await fetch(BASE + path, request);
+    if (!res.ok) {
+      const error = new Error(`HTTP ${res.status}: ${path}`);
+      error.status = res.status;
+      try { error.payload = await res.json(); } catch (e) { /* non-JSON error */ }
+      throw error;
+    }
+    return res.json();
+  }
+
   return {
     /** 获取全部股票代码 */
     listSymbols() {
@@ -76,7 +92,71 @@ const API = (() => {
     getUpdateStatus() {
       return get('/api/update/status');
     },
+
+    /** 因子库能力与方案 API；命中因子始终由服务端重算。 */
+    getFactorLibraryCapabilities(options = {}) {
+      return jsonRequest('/api/factor-library/capabilities', 'GET', undefined, options);
+    },
+    getFactorLibrary(options = {}) {
+      return jsonRequest('/api/factor-library', 'GET', undefined, options);
+    },
+    previewFactorLibrary(conditions, options = {}) {
+      return jsonRequest('/api/factor-library/preview', 'POST', { conditions }, options);
+    },
+    createFactorLibrary(payload, options = {}) {
+      return jsonRequest('/api/factor-library', 'POST', payload, options);
+    },
+    updateFactorLibrary(id, payload, options = {}) {
+      return jsonRequest(`/api/factor-library/${encodeURIComponent(id)}`, 'PUT', payload, options);
+    },
+    refreshFactorLibrary(id, options = {}) {
+      return jsonRequest(`/api/factor-library/${encodeURIComponent(id)}/refresh`, 'POST', {}, options);
+    },
+    deleteFactorLibrary(id, options = {}) {
+      return jsonRequest(`/api/factor-library/${encodeURIComponent(id)}`, 'DELETE', undefined, options);
+    },
   };
+})();
+
+/**
+ * 因子筛选面板的纯数据工具。只保留后端支持的安全条件，不执行表达式。
+ */
+const QTradeFactorLibrary = (() => {
+  const CONDITION_KEYS = Object.freeze([
+    'status', 'usage', 'lifecycle', 'icir120_min', 'icir120_max', 'crowding_max', 'keyword',
+  ]);
+  const ENUM_KEYS = new Set(['status', 'usage', 'lifecycle']);
+  const NUMBER_KEYS = new Set(['icir120_min', 'icir120_max', 'crowding_max']);
+
+  function serializeConditions(raw = {}) {
+    const source = raw && typeof raw === 'object' ? raw : {};
+    const result = {};
+    for (const key of CONDITION_KEYS) {
+      if (!(key in source)) continue;
+      const value = source[key];
+      if (ENUM_KEYS.has(key)) {
+        const values = Array.isArray(value) ? value : [value];
+        const clean = [...new Set(values.filter(item => typeof item === 'string' && item.trim())
+          .map(item => item.trim()))].sort();
+        if (clean.length) result[key] = clean;
+      } else if (NUMBER_KEYS.has(key)) {
+        if (value === '' || value === null || value === undefined) continue;
+        const number = typeof value === 'number' ? value : Number(value);
+        if (Number.isFinite(number)) result[key] = number;
+      } else if (key === 'keyword' && typeof value === 'string' && value.trim()) {
+        result[key] = value.trim();
+      }
+    }
+    return result;
+  }
+
+  function routeForPlan(id, action = '') {
+    if (typeof id !== 'string' || !id) return null;
+    const suffix = action ? `/${encodeURIComponent(action)}` : '';
+    return `/api/factor-library/${encodeURIComponent(id)}${suffix}`;
+  }
+
+  return { CONDITION_KEYS, serializeConditions, routeForPlan };
 })();
 
 /**
@@ -177,6 +257,7 @@ const QTradeUpdate = (() => {
 })();
 
 if (typeof window !== 'undefined') window.QTradeUpdate = QTradeUpdate;
+if (typeof window !== 'undefined') window.QTradeFactorLibrary = QTradeFactorLibrary;
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { API, QTradeUpdate };
+  module.exports = { API, QTradeUpdate, QTradeFactorLibrary };
 }
