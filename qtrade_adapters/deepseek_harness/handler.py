@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import socket
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from . import config, decisions
@@ -15,6 +20,9 @@ PAGES = config.PAGES
 STATIC_FILES = config.STATIC_FILES
 LIVE_PREFIX = config.LIVE_PREFIX
 PROXY_PREFIX = config.PROXY_PREFIX
+HARNESS_STATUS_PATH = "/api/harness/status"
+_PROXY_TARGET_PREFIXES = ("quantapi/", "niuapi/")
+_STATUS_TIMEOUT_SECONDS = 2.0
 
 ADAPTER_STYLE_LINKS = (
     '<link rel="stylesheet" href="/css/tokens.css" data-qtrade-adapter="tokens">\n'
@@ -35,6 +43,25 @@ _PAGE_TITLES = {
     "control.html": "QTrade — 控制台",
     "factors.html": "QTrade — 因子仪表盘",
 }
+
+
+def _proxy_failure(error: Exception) -> tuple[int, str, str]:
+    """Map transport failures to stable, non-sensitive public responses."""
+
+    reason = getattr(error, "reason", None)
+    timeout_types = (socket.timeout, TimeoutError)
+    if isinstance(error, timeout_types) or isinstance(reason, timeout_types):
+        return 504, "upstream_timeout", "HARNESS 上游请求超时"
+    if any(
+        marker in str(value).lower()
+        for value in (error, reason)
+        if value is not None
+        for marker in ("timed out", "timeout")
+    ):
+        return 504, "upstream_timeout", "HARNESS 上游请求超时"
+    if isinstance(error, (urllib.error.URLError, OSError, ConnectionError)):
+        return 502, "upstream_unreachable", "HARNESS 服务不可达"
+    return 502, "upstream_unreachable", "HARNESS 服务不可达"
 
 
 def _add_class_to_first_tag(html: str, tag_name: str, class_name: str) -> str:
@@ -112,7 +139,27 @@ class QtradeDeckHandler:
         self.h = handler
         self._base_dir_fn = base_dir_fn or config.resolve_base_dir
         self._prepare_sys_path_fn = prepare_sys_path_fn or config.prepare_sys_path
-        self._harness_port_fn = harness_port_fn or (lambda: config.HARNESS_PORT)
+        self._harness_port_fn = harness_port_fn or (lambda: config.resolve_harness_port())
+
+    def _harness_port(self) -> int:
+        """Resolve an injected/default port through the strict config contract."""
+
+        try:
+            candidate = self._harness_port_fn()
+        except Exception:
+            candidate = config.DEFAULT_HARNESS_PORT
+        return config.resolve_harness_port(
+            env={config.HARNESS_PORT_ENV: str(candidate)},
+            default=config.DEFAULT_HARNESS_PORT,
+        )
+
+    def _status_port(self) -> tuple[int, str | None]:
+        """Return the effective port and a safe configuration diagnostic."""
+
+        return config.harness_port_info(
+            env=os.environ,
+            default=self._harness_port(),
+        )
 
     def reply_json(self, data, status=200):
         return self.h._json(data, status)
@@ -222,6 +269,84 @@ class QtradeDeckHandler:
         except Exception as error:
             return self.reply_json({"ok": False, "error": f"live/{sub}: {error}"})
 
+    def serve_harness_status(self):
+        """Probe only the loopback sessions endpoint; never start or message HARNESS."""
+
+        port, config_reason = self._status_port()
+        result = {
+            "enabled": True,
+            "port": port,
+            "state": "unreachable",
+            "transport": "http",
+            "sessions_reachable": False,
+            "model_ready": "unknown",
+            "reason": config_reason or "HARNESS service is unreachable",
+        }
+        if os.environ.get("QTRADE_NO_HARNESS"):
+            result.update(
+                enabled=False,
+                state="disabled",
+                reason="QTRADE_NO_HARNESS is set",
+            )
+            return self.reply_json(result)
+
+        target = f"http://127.0.0.1:{port}/quantapi/sessions"
+        try:
+            response = urllib.request.urlopen(
+                urllib.request.Request(target),
+                timeout=_STATUS_TIMEOUT_SECONDS,
+            )
+            try:
+                try:
+                    status = int(getattr(response, "status", getattr(response, "code", 200)))
+                except (TypeError, ValueError):
+                    status = 200
+                response_matches_harness = self._sessions_response_is_expected(response)
+            finally:
+                close = getattr(response, "close", None)
+                if close is not None:
+                    close()
+            if 200 <= status < 300 and response_matches_harness:
+                result.update(
+                    state="service_reachable",
+                    sessions_reachable=True,
+                    reason=config_reason or "HARNESS sessions endpoint is reachable",
+                )
+            elif 200 <= status < 300:
+                result.update(
+                    reason=config_reason or "HARNESS sessions response is invalid",
+                )
+            else:
+                result.update(
+                    reason=config_reason or "HARNESS sessions endpoint returned an HTTP error",
+                )
+        except urllib.error.HTTPError:
+            result.update(
+                reason=config_reason or "HARNESS sessions endpoint returned an HTTP error",
+            )
+        except Exception as error:
+            _, error_code, message = _proxy_failure(error)
+            result.update(
+                reason=config_reason or message,
+            )
+            if error_code == "upstream_timeout":
+                result["reason"] = "HARNESS health check timed out"
+        return self.reply_json(result)
+
+    @staticmethod
+    def _sessions_response_is_expected(response) -> bool:
+        """Require the known sessions shape when the probe exposes a response body."""
+
+        reader = getattr(response, "read", None)
+        if not callable(reader):
+            return True
+        try:
+            body = reader()
+            payload = json.loads(body.decode("utf-8"))
+        except (AttributeError, UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError):
+            return False
+        return isinstance(payload, dict) and isinstance(payload.get("sessions"), list)
+
     def _serve_endpoints(self):
         import urllib.request as _urlrequest
         from concurrent.futures import ThreadPoolExecutor
@@ -324,6 +449,11 @@ class QtradeDeckHandler:
         return self.reply_json({"ok": True, "n": len(items), "n_high": 0, "items": items})
 
     def handle_get(self, path: str) -> bool:
+        if path == HARNESS_STATUS_PATH:
+            self.serve_harness_status()
+            return True
+        if path.startswith(PROXY_PREFIX):
+            return self._proxy_get(path)
         base = self._base_dir_fn()
         if not (base / "deck").exists():
             return False
@@ -377,8 +507,6 @@ class QtradeDeckHandler:
                     status=404,
                 )
             return True
-        if path.startswith(PROXY_PREFIX):
-            return self._proxy_get(path)
         if path.startswith(LIVE_PREFIX):
             sub = path[len(LIVE_PREFIX):].strip("/").split("?", 1)[0]
             self.serve_live(sub)
@@ -408,77 +536,177 @@ class QtradeDeckHandler:
         return False
 
     def _proxy_get(self, path: str) -> bool:
-        import urllib.error as _urlerror
-        import urllib.request as _urlrequest
-
-        if path.startswith(PROXY_PREFIX + "niuapi/"):
-            sub = path[len(PROXY_PREFIX + "niuapi/"):].split("?", 1)[0]
+        path_only = urllib.parse.urlsplit(path).path
+        target = self._proxy_target(path_only)
+        if target is None:
+            return True
+        if path_only.startswith(PROXY_PREFIX + "niuapi/"):
+            sub = path_only[len(PROXY_PREFIX + "niuapi/"):]
             if sub == "sessions":
                 self.reply_json({"personas": []})
             else:
                 self.reply_json({"messages": []})
             return True
-        port = 3080 if path.startswith(PROXY_PREFIX + "quantapi/") else self._harness_port_fn()
-        target = f"http://127.0.0.1:{port}/" + path[len(PROXY_PREFIX):]
-        if "?" in self.h.path:
-            target += "?" + self.h.path.split("?", 1)[1]
         try:
-            response = _urlrequest.urlopen(_urlrequest.Request(target), timeout=40)
-            data = response.read()
-            try:
-                self.reply_json(json.loads(data.decode("utf-8")))
-            except Exception:
-                content_type = (response.headers.get("Content-Type", "") or "").lower()
-                if "html" in content_type or data[:1] == b"<":
-                    self.reply_json({"ok": False, "error": "HARNESS 返回了 HTML（接口未挂载/暂不可达）"})
-                else:
-                    self._send_bytes(response.status, response.headers.get("Content-Type", "application/json"), data)
+            response = urllib.request.urlopen(urllib.request.Request(target), timeout=40)
+            self._forward_proxy_response(response)
             return True
-        except _urlerror.HTTPError as error:
-            data = error.read()
-            try:
-                self.reply_json(json.loads(data.decode("utf-8")), error.code)
-            except Exception:
-                self.reply_json({"ok": False, "error": "proxy upstream " + str(error.code)}, error.code)
+        except urllib.error.HTTPError as error:
+            self._forward_proxy_http_error(error)
             return True
         except Exception as error:
-            self.reply_json({"ok": False, "error": "proxy: " + str(error)}, 502)
+            self._reply_proxy_failure(error)
             return True
 
     def _proxy_post(self, path: str):
         length = int(self.h.headers.get("Content-Length", 0) or 0)
         body = self.h.rfile.read(length) if length else b""
-        import urllib.error as _urlerror
-        import urllib.request as _urlrequest
+        path_only = urllib.parse.urlsplit(path).path
 
-        if path.startswith(PROXY_PREFIX + "niuapi/"):
+        target = self._proxy_target(path_only)
+        if target is None:
+            return True
+        if path_only.startswith(PROXY_PREFIX + "niuapi/"):
             self.reply_json({"ok": False, "error": "牛散插件未启用"})
             return True
-        port = 3080 if path.startswith(PROXY_PREFIX + "quantapi/") else self._harness_port_fn()
-        target = f"http://127.0.0.1:{port}/" + path[len(PROXY_PREFIX):]
-        if "?" in self.h.path:
-            target += "?" + self.h.path.split("?", 1)[1]
-        request = _urlrequest.Request(target, data=body, method="POST")
-        request.add_header("Content-Type", self.h.headers.get("Content-Type", "application/json"))
+        request = urllib.request.Request(target, data=body, method="POST")
+        content_type = self.h.headers.get("Content-Type", "application/json")
+        if (
+            not isinstance(content_type, str)
+            or "\r" in content_type
+            or "\n" in content_type
+            or content_type.split(";", 1)[0].strip().lower() != "application/json"
+        ):
+            content_type = "application/json"
+        request.add_header("Content-Type", content_type)
         try:
-            response = _urlrequest.urlopen(request, timeout=60)
+            response = urllib.request.urlopen(request, timeout=60)
+            self._forward_proxy_response(response)
+        except urllib.error.HTTPError as error:
+            self._forward_proxy_http_error(error)
+        except Exception as error:
+            self._reply_proxy_failure(error)
+        return True
+
+    def _proxy_target(self, path: str) -> str | None:
+        """Build a fixed-loopback target from a small, path-safe proxy allowlist."""
+
+        if not path.startswith(PROXY_PREFIX):
+            self.reply_json(
+                {
+                    "ok": False,
+                    "error_code": "proxy_path_not_allowed",
+                    "error": "HARNESS proxy path is not allowed",
+                },
+                404,
+            )
+            return None
+        relative = path[len(PROXY_PREFIX):]
+        if not any(relative.startswith(prefix) for prefix in _PROXY_TARGET_PREFIXES):
+            self.reply_json(
+                {
+                    "ok": False,
+                    "error_code": "proxy_path_not_allowed",
+                    "error": "HARNESS proxy path is not allowed",
+                },
+                404,
+            )
+            return None
+        decoded = urllib.parse.unquote(relative)
+        if (
+            not decoded
+            or "\\" in decoded
+            or any(ord(char) < 0x20 for char in decoded)
+            or any(segment in ("", ".", "..") for segment in decoded.split("/"))
+            or any(char in decoded for char in ("?", "#", ":"))
+        ):
+            self.reply_json(
+                {
+                    "ok": False,
+                    "error_code": "proxy_path_not_allowed",
+                    "error": "HARNESS proxy path is not allowed",
+                },
+                404,
+            )
+            return None
+        raw_request_path = getattr(self.h, "path", path)
+        query = urllib.parse.urlsplit(raw_request_path).query
+        if "\r" in query or "\n" in query or len(query) > 4096:
+            self.reply_json(
+                {
+                    "ok": False,
+                    "error_code": "proxy_query_not_allowed",
+                    "error": "HARNESS proxy query is not allowed",
+                },
+                400,
+            )
+            return None
+        port = config.resolve_harness_port() if relative.startswith("quantapi/") else self._harness_port()
+        target = f"http://127.0.0.1:{port}/{relative}"
+        return target + (f"?{query}" if query else "")
+
+    def _forward_proxy_response(self, response) -> None:
+        try:
             data = response.read()
+            status = self._response_status(response)
             try:
-                self.reply_json(json.loads(data.decode("utf-8")))
-            except Exception:
-                content_type = (response.headers.get("Content-Type", "") or "").lower()
+                self.reply_json(json.loads(data.decode("utf-8")), status)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                content_type = (getattr(response, "headers", {}).get("Content-Type", "") or "").lower()
                 if "html" in content_type or data[:1] == b"<":
-                    self.reply_json({"ok": False, "error": "HARNESS 返回了 HTML（接口未挂载/暂不可达）"})
+                    self.reply_json(
+                        {"ok": False, "error": "HARNESS 返回了 HTML（接口未挂载/暂不可达）"},
+                        status,
+                    )
                 else:
-                    self._send_bytes(response.status, response.headers.get("Content-Type", "application/json"), data)
-        except _urlerror.HTTPError as error:
+                    self._send_bytes(
+                        status,
+                        getattr(response, "headers", {}).get("Content-Type", "application/json"),
+                        data,
+                    )
+        finally:
+            close = getattr(response, "close", None)
+            if close is not None:
+                close()
+
+    @staticmethod
+    def _response_status(response) -> int:
+        try:
+            status = int(getattr(response, "status", getattr(response, "code", 200)))
+        except (TypeError, ValueError):
+            status = 200
+        return status if 100 <= status <= 599 else 502
+
+    def _forward_proxy_http_error(self, error: urllib.error.HTTPError) -> None:
+        status = int(error.code) if 100 <= int(error.code) <= 599 else 502
+        try:
             data = error.read()
             try:
-                self.reply_json(json.loads(data.decode("utf-8")), error.code)
-            except Exception:
-                self.reply_json({"ok": False, "error": "proxy upstream " + str(error.code)}, error.code)
-        except Exception as error:
-            self.reply_json({"ok": False, "error": "proxy: " + str(error)}, 502)
+                self.reply_json(json.loads(data.decode("utf-8")), status)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self.reply_json(
+                    {
+                        "ok": False,
+                        "error_code": "upstream_http_error",
+                        "error": f"HARNESS 上游返回 HTTP {status}",
+                    },
+                    status,
+                )
+        finally:
+            close = getattr(error, "close", None)
+            if close is not None:
+                close()
+
+    def _reply_proxy_failure(self, error: Exception) -> None:
+        status, error_code, message = _proxy_failure(error)
+        self.reply_json(
+            {
+                "ok": False,
+                "error_code": error_code,
+                "error": message,
+            },
+            status,
+        )
 
     def decide(self, rec, auto_paper=None, service=None):
         return decisions.decide(

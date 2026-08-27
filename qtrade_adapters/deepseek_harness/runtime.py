@@ -48,7 +48,13 @@ def ensure_harness(
     environment = os.environ if env is None else env
     resolve_base = base_dir_fn or config.resolve_base_dir
     source_base = config.DEFAULT_SRC_BASE if default_src_base is None else Path(default_src_base)
-    port = config.HARNESS_PORT if harness_port is None else harness_port
+    port = (
+        config.resolve_harness_port(env=environment)
+        if harness_port is None
+        else config.resolve_harness_port(
+            env={config.HARNESS_PORT_ENV: str(harness_port)},
+        )
+    )
     sockets = socket if socket_module is None else socket_module
     shell = shutil if shutil_module is None else shutil_module
     processes = subprocess if subprocess_module is None else subprocess_module
