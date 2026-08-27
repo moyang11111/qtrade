@@ -9,6 +9,8 @@ const { spawn, spawnSync } = require('child_process');
 const HEALTH_PATH = '/api/health';
 const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
 const DEFAULT_POLL_INTERVAL_MS = 150;
+const DEFAULT_PYTHON_PREFLIGHT_TIMEOUT_MS = 15_000;
+const MAX_PYTHON_PREFLIGHT_ATTEMPTS = 2;
 const DEFAULT_REQUIRED_PYTHON_MODULES = Object.freeze(['pandas', 'akshare']);
 
 const PYTHON_PREFLIGHT_SCRIPT = [
@@ -139,6 +141,17 @@ function buildPythonPreflightScript(requiredModules = DEFAULT_REQUIRED_PYTHON_MO
   );
 }
 
+function isPythonPreflightTimeout(value) {
+  return value?.code === 'ETIMEDOUT'
+    || (typeof value?.message === 'string' && /\bETIMEDOUT\b/.test(value.message));
+}
+
+function getSpawnErrorMessage(error) {
+  if (!error) return null;
+  if (typeof error.message === 'string' && error.message) return error.message;
+  return typeof error === 'string' ? error : String(error);
+}
+
 function parsePythonPreflight(result, candidate, requiredModules) {
   const stdout = typeof result?.stdout === 'string' ? result.stdout : '';
   const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -148,13 +161,12 @@ function parsePythonPreflight(result, candidate, requiredModules) {
   } catch {
     payload = {};
   }
+  const timedOut = isPythonPreflightTimeout(result?.error);
   const missing = Array.isArray(payload.missing)
     ? payload.missing.filter((moduleName) => typeof moduleName === 'string')
     : [];
   const supported = payload.supported === true;
-  const error = result?.error && result.error.message
-    ? result.error.message
-    : null;
+  const error = timedOut ? null : getSpawnErrorMessage(result?.error);
   return {
     ok: !error && result?.status === 0 && supported && missing.length === 0,
     error,
@@ -163,41 +175,55 @@ function parsePythonPreflight(result, candidate, requiredModules) {
     requiredModules,
     status: result?.status ?? null,
     supported,
+    timedOut,
     version: typeof payload.version === 'string' ? payload.version : null,
   };
 }
 
 function probePythonDetails(candidate, {
   spawnSyncImpl = spawnSync,
-  timeoutMs = 5_000,
+  timeoutMs = DEFAULT_PYTHON_PREFLIGHT_TIMEOUT_MS,
   requiredModules = DEFAULT_REQUIRED_PYTHON_MODULES,
 } = {}) {
   const modules = normalizeRequiredModules(requiredModules);
-  try {
-    const result = spawnSyncImpl(
-      candidate.command,
-      [...candidate.args, '-c', buildPythonPreflightScript(modules)],
-      {
-        encoding: 'utf8',
-        timeout: timeoutMs,
-        shell: false,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
+  for (let attempt = 1; attempt <= MAX_PYTHON_PREFLIGHT_ATTEMPTS; attempt += 1) {
+    try {
+      const result = spawnSyncImpl(
+        candidate.command,
+        [...candidate.args, '-c', buildPythonPreflightScript(modules)],
+        {
+          encoding: 'utf8',
+          timeout: timeoutMs,
+          shell: false,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }
+      );
+      const details = parsePythonPreflight(result, candidate, modules);
+      details.attempts = attempt;
+      details.timeoutMs = timeoutMs;
+      if (!details.timedOut || attempt === MAX_PYTHON_PREFLIGHT_ATTEMPTS) return details;
+    } catch (error) {
+      const timedOut = isPythonPreflightTimeout(error);
+      if (!timedOut || attempt === MAX_PYTHON_PREFLIGHT_ATTEMPTS) {
+        return {
+          ok: false,
+          error: timedOut ? null : getSpawnErrorMessage(error),
+          missing: [],
+          pythonPath: candidate.command,
+          requiredModules: modules,
+          status: null,
+          supported: false,
+          timedOut,
+          attempts: attempt,
+          timeoutMs,
+          version: null,
+        };
       }
-    );
-    return parsePythonPreflight(result, candidate, modules);
-  } catch (error) {
-    return {
-      ok: false,
-      error: error.message,
-      missing: [],
-      pythonPath: candidate.command,
-      requiredModules: modules,
-      status: null,
-      supported: false,
-      version: null,
-    };
+    }
   }
+
+  throw new Error('Python preflight attempt loop did not return a result.');
 }
 
 function probePython(candidate, options = {}) {
@@ -206,13 +232,25 @@ function probePython(candidate, options = {}) {
 
 function describePythonFailure(candidate, details) {
   const problems = [];
-  if (details.missing.length > 0) {
-    problems.push(`missing modules: ${details.missing.join(', ')}`);
+  if (details.timedOut) {
+    problems.push(
+      `Python preflight timed out after ${details.timeoutMs} ms `
+      + `(attempts: ${details.attempts || 1})`
+    );
+    problems.push('ensure the interpreter is available and retry');
+  } else {
+    if (details.missing.length > 0) {
+      problems.push(`missing modules: ${details.missing.join(', ')}`);
+    }
+    if (!details.supported) {
+      problems.push(
+        details.version
+          ? `Python ${details.version} is below 3.10`
+          : 'Python version could not be verified'
+      );
+    }
+    if (details.error) problems.push(details.error);
   }
-  if (!details.supported) {
-    problems.push(`Python ${details.version || 'version'} is below 3.10`);
-  }
-  if (details.error) problems.push(details.error);
   if (problems.length === 0) problems.push(`preflight exited with status ${details.status}`);
   return `${candidate.source || 'Python candidate'}; Python path/source: ${details.pythonPath}; ${problems.join('; ')}`;
 }
@@ -232,7 +270,9 @@ function findPython({
     if (details.ok) return candidate;
     throw new Error(
       `QTRADE_PYTHON is explicitly configured but failed QTrade Python preflight: ` +
-      `${describePythonFailure(candidate, details)}. Do not silently switch interpreters.`
+      `${describePythonFailure(candidate, details)}. ` +
+      'Install Python 3.10+ with the project dependencies, or retry after the interpreter starts. ' +
+      'Do not silently switch interpreters.'
     );
   }
 
@@ -559,6 +599,8 @@ async function startBackend({
 }
 
 module.exports = {
+  DEFAULT_PYTHON_PREFLIGHT_TIMEOUT_MS,
+  MAX_PYTHON_PREFLIGHT_ATTEMPTS,
   DEFAULT_REQUIRED_PYTHON_MODULES,
   HEALTH_PATH,
   assertRuntimeResources,

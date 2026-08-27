@@ -233,6 +233,121 @@ test('Python preflight defaults to pandas and akshare without shell execution', 
   assert.match(calls[0].args.at(-1), /"akshare"/);
 });
 
+test('Python preflight retries one timeout and accepts a successful second attempt', () => {
+  const calls = [];
+  const candidate = { command: 'python', args: [] };
+  const result = runtime.probePythonDetails(candidate, {
+    spawnSyncImpl(command, args, options) {
+      calls.push({ command, args, options });
+      if (calls.length === 1) {
+        return {
+          status: null,
+          error: { code: 'ETIMEDOUT', message: 'spawnSync python ETIMEDOUT' },
+          stdout: '',
+          stderr: '',
+        };
+      }
+      return {
+        status: 0,
+        error: null,
+        stdout: preflightOutput(),
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.attempts, 2);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls.map(({ options }) => options.timeout), [
+    runtime.DEFAULT_PYTHON_PREFLIGHT_TIMEOUT_MS,
+    runtime.DEFAULT_PYTHON_PREFLIGHT_TIMEOUT_MS,
+  ]);
+  assert.deepEqual(calls.map(({ options }) => options.shell), [false, false]);
+});
+
+test('Python preflight reports bounded timeout failure without a version error', () => {
+  const configured = 'C:\\Program Files\\Python312\\python.exe';
+  const calls = [];
+  assert.throws(
+    () => runtime.findPython({
+      platform: 'win32',
+      env: { QTRADE_PYTHON: configured },
+      spawnSyncImpl(command, args, options) {
+        calls.push({ command, args, options });
+        return {
+          status: null,
+          error: { code: 'ETIMEDOUT', message: 'spawnSync python ETIMEDOUT' },
+          stdout: '',
+          stderr: '',
+        };
+      },
+    }),
+    (error) => (
+      error.message.includes('QTRADE_PYTHON is explicitly configured')
+      && error.message.includes(`Python path/source: ${configured}`)
+      && error.message.includes(
+        `Python preflight timed out after ${runtime.DEFAULT_PYTHON_PREFLIGHT_TIMEOUT_MS} ms`
+      )
+      && error.message.includes('(attempts: 2)')
+      && error.message.includes('Install Python 3.10+')
+      && error.message.includes('retry')
+      && !error.message.includes('below 3.10')
+    )
+  );
+  assert.equal(calls.length, runtime.MAX_PYTHON_PREFLIGHT_ATTEMPTS);
+  assert.deepEqual(calls.map(({ command }) => command), [configured, configured]);
+});
+
+test('Python preflight does not retry version or ordinary spawn failures', () => {
+  const scenarios = [
+    {
+      name: 'unsupported version',
+      result: {
+        status: 1,
+        error: null,
+        stdout: preflightOutput({ supported: false, version: '3.9.18' }),
+        stderr: '',
+      },
+    },
+    {
+      name: 'ordinary spawn error',
+      result: {
+        status: null,
+        error: { code: 'ENOENT', message: 'spawn python ENOENT' },
+        stdout: '',
+        stderr: '',
+      },
+    },
+    {
+      name: 'nonzero exit',
+      result: {
+        status: 1,
+        error: null,
+        stdout: preflightOutput(),
+        stderr: 'preflight failed',
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    let calls = 0;
+    const details = runtime.probePythonDetails(
+      { command: 'python', args: [] },
+      { spawnSyncImpl: () => { calls += 1; return scenario.result; } }
+    );
+    assert.equal(details.ok, false, scenario.name);
+    assert.equal(details.timedOut, false, scenario.name);
+    assert.equal(calls, 1, scenario.name);
+  }
+});
+
+test('Python preflight retry policy is bounded and uses the 15 second timeout', () => {
+  assert.equal(runtime.DEFAULT_PYTHON_PREFLIGHT_TIMEOUT_MS, 15_000);
+  assert.equal(runtime.MAX_PYTHON_PREFLIGHT_ATTEMPTS, 2);
+});
+
 test('Python preflight reports missing modules and explicit paths do not fall back', () => {
   const configured = 'C:\\Users\\ASUS\\Apps\\QTrade\\runtime\\.venv\\Scripts\\python.exe';
   const calls = [];
