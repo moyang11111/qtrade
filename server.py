@@ -3738,6 +3738,8 @@ class APIHandler(SimpleHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", len(body))
+        if self.close_connection:
+            self.send_header("Connection", "close")
         if cors:
             self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()

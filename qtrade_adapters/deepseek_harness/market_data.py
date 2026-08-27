@@ -118,8 +118,12 @@ class MainboardMarketDataAdapter:
             uri=True,
             timeout=0.5,
         )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA query_only=ON")
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA query_only=ON")
+        except Exception:
+            connection.close()
+            raise
         return connection
 
     @staticmethod

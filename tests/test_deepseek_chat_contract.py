@@ -5,11 +5,14 @@ from __future__ import annotations
 import ast
 from concurrent.futures import Future
 from contextlib import closing
+from http.client import HTTPResponse
 import json
 from pathlib import Path
 import sqlite3
 import socket
 import ssl
+import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -113,17 +116,32 @@ class _FakeSocket:
         self.timeouts.append(value)
 
 
+class _FakeResponseFile:
+    def __init__(self, sock):
+        self.raw = SimpleNamespace(_sock=sock)
+
+    def close(self):
+        self.raw._sock.closed = True
+
+
 class _FakeResponse:
-    def __init__(self, chunks, status=200):
+    def __init__(self, chunks, status=200, response_socket=None):
         self.chunks = list(chunks)
         self.status = status
         self.read_sizes = []
+        self.socket = response_socket or _FakeSocket()
+        self.fp = _FakeResponseFile(self.socket)
+        self.closed = False
 
     def read(self, amount):
         self.read_sizes.append(amount)
         if self.chunks:
             return self.chunks.pop(0)
         return b""
+
+    def close(self):
+        self.closed = True
+        self.fp.close()
 
 
 class _FakeHTTPSConnection:
@@ -135,6 +153,7 @@ class _FakeHTTPSConnection:
         self.timeout = timeout
         self.context = context
         self.sock = _FakeSocket()
+        self.transport_socket = self.sock
         self.headers = []
         self.request_line = None
         self.sent_body = None
@@ -158,6 +177,10 @@ class _FakeHTTPSConnection:
         self.sent_body = body
 
     def getresponse(self):
+        # Model http.client.HTTPConnection.getresponse() transferring a
+        # Connection: close response to its own response file and clearing
+        # connection.sock.
+        self.sock = None
         return self.__class__.response
 
     def close(self):
@@ -300,7 +323,42 @@ def test_fixed_transport_is_verified_direct_https_without_proxy_or_redirect(monk
     assert connection.context.check_hostname is True
     assert connection.context.verify_mode == ssl.CERT_REQUIRED
     assert connection.closed is True
-    assert all(0 < value <= config.TOTAL_TIMEOUT_SECONDS for value in connection.sock.timeouts)
+    assert all(
+        0 < value <= config.TOTAL_TIMEOUT_SECONDS
+        for value in connection.transport_socket.timeouts
+    )
+    assert response.socket.timeouts
+    assert response.closed is True
+
+
+def test_fixed_transport_controls_stdlib_response_file_after_connection_close(monkeypatch):
+    server_socket, client_socket = socket.socketpair()
+    try:
+        server_socket.sendall(
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\n"
+            b"Content-Length: 2\r\n\r\nok"
+        )
+        response = HTTPResponse(client_socket)
+        response.begin()
+        observed_timeouts = []
+        original_read = response.read
+
+        def read(amount):
+            observed_timeouts.append(client_socket.gettimeout())
+            return original_read(amount)
+
+        response.read = read
+        _install_fake_https(monkeypatch, response)
+
+        result = _post_with_transport()
+
+        assert result == TransportResponse(200, b"ok")
+        assert observed_timeouts
+        assert 0 < observed_timeouts[0] <= 0.25
+        assert response.isclosed() is True
+    finally:
+        server_socket.close()
+        client_socket.close()
 
 
 def test_fixed_transport_rejects_non_fixed_url_without_connecting(monkeypatch):
@@ -317,7 +375,7 @@ def test_fixed_transport_rejects_non_fixed_url_without_connecting(monkeypatch):
     assert _FakeHTTPSConnection.instances == []
 
 
-def test_fixed_transport_stops_slow_drip_at_hard_deadline(monkeypatch):
+def test_fixed_transport_stops_slow_drip_body_at_hard_deadline(monkeypatch):
     class _AdvancingClock:
         value = 0.0
 
@@ -332,12 +390,47 @@ def test_fixed_transport_stops_slow_drip_at_hard_deadline(monkeypatch):
             clock.value = config.TOTAL_TIMEOUT_SECONDS + 1
             return b"x"
 
-    _install_fake_https(monkeypatch, _SlowResponse([]))
+    response = _SlowResponse([])
+    _install_fake_https(monkeypatch, response)
     monkeypatch.setattr(deepseek_service_module, "_monotonic", clock)
 
     with pytest.raises(TimeoutError):
         _post_with_transport()
     assert _FakeHTTPSConnection.instances[0].closed is True
+    assert response.socket.timeouts
+    assert response.closed is True
+
+
+def test_fixed_transport_stops_slow_drip_headers_at_hard_deadline(monkeypatch):
+    class _AdvancingClock:
+        value = 0.0
+
+        def __call__(self):
+            return self.value
+
+    clock = _AdvancingClock()
+
+    class _HeaderSlowConnection(_FakeHTTPSConnection):
+        instances = []
+
+        def getresponse(self):
+            assert self.transport_socket.timeouts
+            clock.value = config.TOTAL_TIMEOUT_SECONDS + 1
+            raise socket.timeout("provider header detail")
+
+    _HeaderSlowConnection.response = _FakeResponse([])
+    monkeypatch.setattr(deepseek_service_module, "HTTPSConnection", _HeaderSlowConnection)
+    monkeypatch.setattr(deepseek_service_module, "_monotonic", clock)
+
+    with pytest.raises(TimeoutError):
+        _post_with_transport()
+
+    connection = _HeaderSlowConnection.instances[0]
+    assert connection.closed is True
+    assert all(
+        0 < value <= config.TOTAL_TIMEOUT_SECONDS
+        for value in connection.transport_socket.timeouts
+    )
 
 
 def test_fixed_transport_bounds_response_reads_to_16_kib(monkeypatch):
@@ -458,6 +551,29 @@ def test_mainboard_adapter_closes_read_only_connections_before_cache_cleanup(tmp
     renamed = cache / "bars-renamed.db"
     (cache / "bars.db").rename(renamed)
     renamed.unlink()
+
+
+def test_mainboard_connect_closes_after_query_only_setup_failure(monkeypatch, tmp_path):
+    from qtrade_adapters.deepseek_harness.market_data import MainboardMarketDataAdapter
+
+    class _Connection:
+        row_factory = None
+        closed = False
+
+        def execute(self, statement):
+            assert statement == "PRAGMA query_only=ON"
+            raise sqlite3.OperationalError("synthetic setup failure")
+
+        def close(self):
+            self.closed = True
+
+    connection = _Connection()
+    monkeypatch.setattr(sqlite3, "connect", lambda *_args, **_kwargs: connection)
+
+    with pytest.raises(sqlite3.OperationalError):
+        MainboardMarketDataAdapter._connect(tmp_path / "bars.db")
+
+    assert connection.closed is True
 
 
 def test_unconfigured_status_is_local_and_does_not_start_work(monkeypatch):
@@ -811,6 +927,98 @@ def test_close_uses_bounded_nonwaiting_executor_shutdown(monkeypatch):
     assert executor.future.timeout is not None
     assert service._sessions == {}
     assert service._requests == {}
+
+
+def test_default_executor_worker_is_daemon_and_close_is_bounded(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking_context():
+        started.set()
+        try:
+            release.wait(timeout=10)
+            return _context()
+        finally:
+            finished.set()
+
+    monkeypatch.setenv(config.FEATURE_ENV, "1")
+    monkeypatch.setenv(config.API_KEY_ENV, "test-only-key")
+    service = DeepSeekChatService(
+        transport=_FakeTransport(response=_reply()),
+        context_provider=blocking_context,
+        id_factory=_Ids(),
+    )
+    session_id = service.status()["session_id"]
+    service.send(session_id=session_id, text="daemon worker")
+    assert started.wait(timeout=3)
+
+    executor = service._executor
+    assert executor is not None
+    worker = executor._thread
+    assert worker.daemon is True
+
+    monkeypatch.setattr(config, "CLOSE_WAIT_SECONDS", 0.05)
+    started_at = time.monotonic()
+    service.close()
+    elapsed = time.monotonic() - started_at
+    assert elapsed < 1
+    assert service._executor is None
+    assert service._sessions == {}
+    assert service._requests == {}
+
+    release.set()
+    assert finished.wait(timeout=3)
+    worker.join(timeout=3)
+    assert not worker.is_alive()
+
+
+def test_default_executor_blocked_context_does_not_hold_process_exit():
+    script = """
+import os
+import threading
+
+from qtrade_adapters.deepseek_chat import config
+from qtrade_adapters.deepseek_chat.service import DeepSeekChatService
+
+os.environ[config.FEATURE_ENV] = "1"
+os.environ[config.API_KEY_ENV] = "test-only-key"
+config.CLOSE_WAIT_SECONDS = 0.05
+
+started = threading.Event()
+
+def blocked_context():
+    started.set()
+    threading.Event().wait(timeout=60)
+    return {"health": "ok"}
+
+class NoNetworkTransport:
+    def post(self, **_kwargs):
+        raise AssertionError("blocked context should prevent network")
+
+service = DeepSeekChatService(
+    transport=NoNetworkTransport(),
+    context_provider=blocked_context,
+)
+session_id = service.status()["session_id"]
+service.send(session_id=session_id, text="process boundary")
+if not started.wait(timeout=2):
+    raise AssertionError("worker did not start")
+if not service._executor._thread.daemon:
+    raise AssertionError("worker is not daemon")
+service.close()
+print("bounded-process-exit", flush=True)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "bounded-process-exit" in result.stdout
 
 
 def test_history_is_bounded_to_ten_turns(monkeypatch):

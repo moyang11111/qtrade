@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Mapping
-from concurrent.futures import Executor, Future, ThreadPoolExecutor
+from concurrent.futures import Executor, Future
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.client import HTTPSConnection
 import json
+import queue
 import secrets
 import socket
 import ssl
@@ -77,6 +78,7 @@ class UrllibTransport:
         _check_deadline(deadline, cancel_event)
         connection_timeout = min(float(connect_timeout), _remaining(deadline))
         connection = None
+        response = None
         try:
             # The host and path are constants, not parsed from a request or
             # accepted from the browser.  The default context verifies the
@@ -88,7 +90,7 @@ class UrllibTransport:
             )
             _prepare_connection(connection, deadline, cancel_event)
             connection.connect()
-            _prepare_connection(connection, deadline, cancel_event)
+            _prepare_connection(connection, deadline, cancel_event, require_socket=True)
             connection.putrequest(
                 "POST",
                 config.DEEPSEEK_CHAT_PATH,
@@ -98,15 +100,19 @@ class UrllibTransport:
             connection.putheader("Content-Type", "application/json")
             connection.putheader("Authorization", f"Bearer {api_key}")
             connection.putheader("Content-Length", str(len(body)))
-            _prepare_connection(connection, deadline, cancel_event)
+            _prepare_connection(connection, deadline, cancel_event, require_socket=True)
             connection.endheaders()
-            _prepare_connection(connection, deadline, cancel_event)
+            _prepare_connection(connection, deadline, cancel_event, require_socket=True)
             connection.send(body)
-            _prepare_connection(connection, deadline, cancel_event)
+            _prepare_connection(connection, deadline, cancel_event, require_socket=True)
             response = connection.getresponse()
+            # HTTPConnection.getresponse() may detach the response from the
+            # connection and clear connection.sock for Connection: close.
+            # Apply the deadline to the response's own file/socket before any
+            # body read, and fail closed if that socket cannot be identified.
+            _prepare_response(response, deadline, cancel_event)
             response_body = _read_response_body(
                 response,
-                connection,
                 deadline,
                 cancel_event,
             )
@@ -116,6 +122,11 @@ class UrllibTransport:
                 raise _LocalTransportCancelled from None
             raise TimeoutError from error
         finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
             if connection is not None:
                 try:
                     connection.close()
@@ -194,29 +205,77 @@ def _prepare_connection(
     connection: HTTPSConnection,
     deadline: float,
     cancel_event: threading.Event,
+    *,
+    require_socket: bool = False,
 ) -> None:
     remaining = _check_deadline(deadline, cancel_event)
     sock = getattr(connection, "sock", None)
-    if sock is not None:
-        sock.settimeout(remaining)
+    if sock is None:
+        if require_socket:
+            raise OSError("HTTPS connection socket unavailable")
+        return
+    sock.settimeout(remaining)
+
+
+def _response_socket(response: object) -> object | None:
+    """Find the socket owned by an HTTPResponse, including detached files."""
+
+    candidates = (
+        getattr(response, "fp", None),
+        getattr(response, "file", None),
+        getattr(response, "sock", None),
+    )
+    seen: set[int] = set()
+    for candidate in candidates:
+        current = candidate
+        for _ in range(6):
+            if current is None or id(current) in seen:
+                break
+            seen.add(id(current))
+            if callable(getattr(current, "settimeout", None)):
+                return current
+            for attribute in ("_sock", "raw", "_file", "fp"):
+                nested = getattr(current, attribute, None)
+                if nested is not None and id(nested) not in seen:
+                    current = nested
+                    break
+            else:
+                break
+    return None
+
+
+def _response_is_closed(response: object) -> bool:
+    if getattr(response, "fp", object()) is None:
+        return True
+    isclosed = getattr(response, "isclosed", None)
+    return bool(isclosed()) if callable(isclosed) else False
+
+
+def _prepare_response(
+    response: object,
+    deadline: float,
+    cancel_event: threading.Event,
+) -> None:
+    remaining = _check_deadline(deadline, cancel_event)
+    sock = _response_socket(response)
+    if sock is None:
+        # A closed response has no future network work.  Any other response
+        # without a controllable socket cannot satisfy the hard deadline.
+        if _response_is_closed(response):
+            return
+        raise OSError("HTTP response socket unavailable")
+    sock.settimeout(min(remaining, 0.25))
 
 
 def _read_response_body(
     response: object,
-    connection: HTTPSConnection,
     deadline: float,
     cancel_event: threading.Event,
 ) -> bytes:
     chunks: list[bytes] = []
     total = 0
     while True:
-        remaining = _check_deadline(deadline, cancel_event)
-        sock = getattr(connection, "sock", None)
-        if sock is not None:
-            # A short socket timeout makes local cancel responsive while the
-            # monotonic deadline remains the hard upper bound for slow drip
-            # responses.  A timeout is retried only while time remains.
-            sock.settimeout(min(remaining, 0.25))
+        _prepare_response(response, deadline, cancel_event)
         try:
             chunk = response.read(
                 min(config.MAX_RESPONSE_BYTES + 1 - total, 4 * 1024)
@@ -280,6 +339,65 @@ class _Session:
     history_truncated: bool = False
 
 
+class _DaemonExecutor(Executor):
+    """One-worker executor whose blocked task cannot hold up interpreter exit."""
+
+    def __init__(self) -> None:
+        self._tasks: queue.Queue[object] = queue.Queue()
+        self._lock = threading.Lock()
+        self._shutdown = False
+        self._thread = threading.Thread(
+            target=self._worker,
+            name="qtrade-deepseek",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def submit(self, function, *args, **kwargs):
+        future = Future()
+        with self._lock:
+            if self._shutdown:
+                raise RuntimeError("cannot schedule work after shutdown")
+            self._tasks.put((future, function, args, kwargs))
+        return future
+
+    def _worker(self) -> None:
+        while True:
+            task = self._tasks.get()
+            try:
+                if task is None:
+                    return
+                future, function, args, kwargs = task
+                if future.set_running_or_notify_cancel():
+                    try:
+                        result = function(*args, **kwargs)
+                    except BaseException as error:
+                        future.set_exception(error)
+                    else:
+                        future.set_result(result)
+            finally:
+                self._tasks.task_done()
+
+    def shutdown(self, wait=True, *, cancel_futures=False):
+        with self._lock:
+            if not self._shutdown:
+                self._shutdown = True
+                if cancel_futures:
+                    while True:
+                        try:
+                            task = self._tasks.get_nowait()
+                        except queue.Empty:
+                            break
+                        try:
+                            if task is not None:
+                                task[0].cancel()
+                        finally:
+                            self._tasks.task_done()
+                self._tasks.put(None)
+        if wait:
+            self._thread.join()
+
+
 class _SystemClock:
     @staticmethod
     def monotonic() -> float:
@@ -319,7 +437,7 @@ class DeepSeekChatService:
         self._transport = transport or UrllibTransport()
         self._clock = clock or _SystemClock()
         self._executor_factory = executor_factory or (
-            lambda: ThreadPoolExecutor(max_workers=1, thread_name_prefix="qtrade-deepseek")
+            _DaemonExecutor
         )
         self._context_provider = context_provider or (
             lambda: build_context(ContextProvider())
