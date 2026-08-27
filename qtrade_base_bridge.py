@@ -28,6 +28,7 @@ SPECIAL_ENDPOINTS = _config.SPECIAL_ENDPOINTS
 DEFAULT_SELF_BASE = _config.DEFAULT_SELF_BASE
 DEFAULT_SRC_BASE = _config.DEFAULT_SRC_BASE
 HARNESS_PORT = _config.HARNESS_PORT
+NATIVE_CONTROL_PATH = "/control"
 
 
 def _harness_port() -> int:
@@ -55,6 +56,14 @@ class QtradeDeckHandler(_AdapterQtradeDeckHandler):
             prepare_sys_path_fn=_config.prepare_sys_path,
             harness_port_fn=_harness_port,
         )
+
+    def handle_get(self, path: str) -> bool:
+        """Serve QTrade's read-only console before consulting the optional base."""
+
+        if path == NATIVE_CONTROL_PATH:
+            control_page = Path(__file__).resolve().parent / "static" / "control.html"
+            return serve_base_file(self.h, control_page)
+        return super().handle_get(path)
 
 
 def serve_base_file(handler, fspath: Path) -> bool:

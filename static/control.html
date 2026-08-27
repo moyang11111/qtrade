@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN" data-qtrade-native-control="true">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QTrade — 运维与研究控制台</title>
+  <link rel="stylesheet" href="/css/tokens.css">
+  <link rel="stylesheet" href="/css/control-console.css">
+</head>
+<body>
+  <main class="control-shell" id="controlConsole">
+    <header class="control-hero">
+      <div class="control-hero-copy">
+        <p class="control-eyebrow">QTRADE / READ ONLY</p>
+        <h1>QTrade 运维与研究控制台</h1>
+        <p class="control-subtitle">集中查看服务、数据新鲜度、主板池与研究方案状态。</p>
+        <p class="control-safety">只读控制台：不会执行交易或系统命令。</p>
+      </div>
+      <div class="control-actions" aria-label="控制台操作">
+        <span class="control-state" id="controlState" role="status">正在读取状态…</span>
+        <button class="control-button control-button-primary" id="controlRefresh" type="button">刷新状态</button>
+        <button class="control-button" id="controlCopy" type="button">复制脱敏诊断</button>
+      </div>
+    </header>
+
+    <div class="control-notice" id="controlNotice" role="status" aria-live="polite" hidden></div>
+
+    <section class="control-grid" aria-label="QTrade 状态卡片">
+      <article class="control-card" id="cardSystem">
+        <div class="control-card-heading">
+          <div>
+            <p class="control-card-kicker">SYSTEM</p>
+            <h2>系统状态</h2>
+          </div>
+          <span class="control-card-mark" aria-hidden="true">●</span>
+        </div>
+        <div class="control-card-body" id="systemBody"></div>
+      </article>
+
+      <article class="control-card" id="cardPipeline">
+        <div class="control-card-heading">
+          <div>
+            <p class="control-card-kicker">18:30 PIPELINE</p>
+            <h2>每日数据流水线</h2>
+          </div>
+          <span class="control-card-mark" aria-hidden="true">◷</span>
+        </div>
+        <div class="control-card-body" id="pipelineBody"></div>
+      </article>
+
+      <article class="control-card" id="cardUniverse">
+        <div class="control-card-heading">
+          <div>
+            <p class="control-card-kicker">MAINBOARD UNIVERSE</p>
+            <h2>主板池</h2>
+          </div>
+          <span class="control-card-mark" aria-hidden="true">▦</span>
+        </div>
+        <div class="control-card-body" id="universeBody"></div>
+      </article>
+
+      <article class="control-card" id="cardOpportunities">
+        <div class="control-card-heading">
+          <div>
+            <p class="control-card-kicker">OPPORTUNITIES</p>
+            <h2>机会摘要</h2>
+          </div>
+          <span class="control-card-mark" aria-hidden="true">↗</span>
+        </div>
+        <div class="control-card-body" id="opportunityBody"></div>
+      </article>
+
+      <article class="control-card" id="cardFactors">
+        <div class="control-card-heading">
+          <div>
+            <p class="control-card-kicker">FACTOR LIBRARY</p>
+            <h2>因子库</h2>
+          </div>
+          <span class="control-card-mark" aria-hidden="true">◇</span>
+        </div>
+        <div class="control-card-body" id="factorBody"></div>
+      </article>
+
+      <article class="control-card" id="cardHarness">
+        <div class="control-card-heading">
+          <div>
+            <p class="control-card-kicker">OPTIONAL SERVICE</p>
+            <h2>HARNESS 服务</h2>
+          </div>
+          <span class="control-card-mark" aria-hidden="true">⌁</span>
+        </div>
+        <div class="control-card-body" id="harnessBody"></div>
+      </article>
+    </section>
+
+    <nav class="control-navigation" aria-label="QTrade 页面导航">
+      <div>
+        <p class="control-card-kicker">QUICK NAVIGATION</p>
+        <h2>前往 QTrade 页面</h2>
+      </div>
+      <div class="control-nav-actions">
+        <button class="control-button" type="button" data-qtrade-page="market">行情</button>
+        <button class="control-button" type="button" data-qtrade-page="portal">门户</button>
+        <button class="control-button" type="button" data-qtrade-page="pitch">决策</button>
+        <button class="control-button" type="button" data-qtrade-page="factorboard">因子仪表</button>
+        <button class="control-button" type="button" data-qtrade-page="factors">因子库</button>
+        <button class="control-button" type="button" data-qtrade-page="autopaper">模拟盘</button>
+      </div>
+    </nav>
+  </main>
+  <script src="/js/control.js" defer></script>
+</body>
+</html>

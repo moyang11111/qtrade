@@ -570,6 +570,13 @@ test('preload, package resources, and launcher are present and portable', () => 
     assert.ok(fs.existsSync(path.join(PROJECT_ROOT, relativePath)), relativePath);
   }
   assert.ok(packageJson.build.extraResources.some((entry) => entry.to === 'qtrade/static'));
+  for (const relativePath of [
+    'static/control.html',
+    'static/js/control.js',
+    'static/css/control-console.css',
+  ]) {
+    assert.ok(fs.existsSync(path.join(PROJECT_ROOT, relativePath)), relativePath);
+  }
   const schedulerEntry = packageJson.build.extraResources.find(
     (entry) => entry.to === 'qtrade/scripts/daily_update_1830.py'
   );
