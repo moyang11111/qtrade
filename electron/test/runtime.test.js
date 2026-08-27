@@ -102,6 +102,27 @@ test('required packaged resources include the Python server and its local import
   assert.doesNotThrow(() => runtime.assertRuntimeResources(paths));
 });
 
+test('packaging includes the QTrade-owned chat adapter without third-party secrets', () => {
+  const packageJson = JSON.parse(
+    fs.readFileSync(path.join(PROJECT_ROOT, 'electron', 'package.json'), 'utf8')
+  );
+  const adapterResource = packageJson.build.extraResources.find((resource) => (
+    resource.from === '../qtrade_adapters' && resource.to === 'qtrade/qtrade_adapters'
+  ));
+  assert.ok(adapterResource);
+  assert.ok(adapterResource.filter.includes('**/*.py'));
+  assert.ok(adapterResource.filter.includes('!**/__pycache__/**'));
+  assert.ok(adapterResource.filter.includes('!**/*.pyc'));
+  assert.equal(fs.existsSync(path.join(
+    PROJECT_ROOT,
+    'qtrade_adapters',
+    'deepseek_chat',
+    'service.py'
+  )), true);
+  assert.equal(JSON.stringify(packageJson.build.extraResources).includes('credentials'), false);
+  assert.equal(JSON.stringify(packageJson.build.extraResources).includes('third_party'), false);
+});
+
 test('resource preflight rejects a missing packaged scheduler script', () => {
   const paths = runtime.resolveRuntimePaths({ rootOverride: PROJECT_ROOT });
   assert.throws(
