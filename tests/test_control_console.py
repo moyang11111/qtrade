@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+import subprocess
 
 import qtrade_base_bridge as bridge
 
@@ -12,6 +13,17 @@ ROOT = Path(__file__).resolve().parents[1]
 CONTROL_HTML = ROOT / "static" / "control.html"
 CONTROL_JS = ROOT / "static" / "js" / "control.js"
 CONTROL_CSS = ROOT / "static" / "css" / "control-console.css"
+
+
+def _run_node(source: str) -> None:
+    completed = subprocess.run(
+        ["node", "--input-type=commonjs", "-e", source],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
 
 
 class _FakeHandler:
@@ -130,3 +142,25 @@ def test_parent_message_listener_is_a_small_static_navigation_contract():
 
     assert "handleControlNavigationMessage" in source
     assert "window.addEventListener('message', handleControlNavigationMessage)" in source
+
+
+def test_health_probe_uses_exact_path_without_api_object_concat():
+    app = (ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
+    assert "const h = await fetch('/api/health').then(r => r.json());" in app
+    assert "fetch(API +" not in app
+
+    _run_node(
+        """
+        const assert = require('node:assert/strict');
+        const calls = [];
+        global.fetch = async (url) => {
+          calls.push(url);
+          return { ok: true, json: async () => ({ status: 'ok', mode: 'csv' }) };
+        };
+        (async () => {
+          const health = await fetch('/api/health').then(response => response.json());
+          assert.equal(health.status, 'ok');
+          assert.deepEqual(calls, ['/api/health']);
+        })().catch(error => { console.error(error); process.exitCode = 1; });
+        """
+    )

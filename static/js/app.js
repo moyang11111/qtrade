@@ -1284,7 +1284,7 @@
 
     // 获取后端模式（实时/CSV），显示徽标
     try {
-      const h = await fetch(API + '/api/health').then(r => r.json());
+      const h = await fetch('/api/health').then(r => r.json());
       if (h.mode === 'live') $('liveBadge').hidden = false;
     } catch (e) { /* 忽略 */ }
 
