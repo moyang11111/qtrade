@@ -3307,6 +3307,11 @@ class APIHandler(SimpleHTTPRequestHandler):
             )
             return None
         if length < 0 or length > deepseek_chat_config.MAX_REQUEST_BODY_BYTES:
+            # The oversized body has not been consumed.  Closing this HTTP
+            # connection prevents a client from reusing a socket whose unread
+            # bytes could otherwise be mistaken for the next request (and is
+            # especially important on Windows).
+            self.close_connection = True
             self._json(
                 {"error": "request_too_large", "message": "request body is too large"},
                 status=413,
@@ -3375,7 +3380,9 @@ class APIHandler(SimpleHTTPRequestHandler):
                 if unknown:
                     raise DeepSeekChatError("unknown_field")
                 session_id = self._query_value(query, "session_id", required=False)
-                return self._json(service.status(session_id), cors=False)
+                result = service.status(session_id)
+                status = 503 if result.get("state") == "unconfigured" else 200
+                return self._json(result, status=status, cors=False)
             if path == DEEPSEEK_CHAT_POLL_PATH:
                 unknown = set(query) - {"request_id", "session_id"}
                 if unknown:

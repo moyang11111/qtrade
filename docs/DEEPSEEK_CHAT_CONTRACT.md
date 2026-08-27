@@ -48,11 +48,16 @@ handled before the external base/proxy routes.
 This is a local readiness check.  It does not contact DeepSeek.  The response
 contains only `ok`, `feature`, `experimental`, `read_only`, `state`, opaque
 `session_id`/`request_id` values, `upstream_cancel_supported: false`, a stable
-`last_error` object or null, and safe numeric `limits`.  It never contains a
-key, environment value, path, provider response, or transcript.
+`last_error` object or null, an `error` object when unconfigured, and safe
+numeric `limits`.  It never contains a key, environment value, path, provider
+response, or transcript.
 
 `ready` means that the feature flag, dedicated key, local session and local
 capacity checks pass.  It does not mean that the provider has been contacted.
+When the feature is enabled without the dedicated key, the status response is
+HTTP 503 with `state: "unconfigured"` and a stable `error.code` of
+`"unconfigured"`; clients must use that code rather than infer a credential
+failure from a 401 response.
 
 ### `POST /api/deepseek-chat/send`
 
@@ -65,6 +70,8 @@ The exact JSON object is:
 Unknown fields are rejected.  Text is limited to 2,000 Unicode characters and
 8 KiB UTF-8.  The response state is `accepted`, which means only that the
 bounded local job was queued.  The client must poll for `replied`.
+Both `accepted` and `waiting` responses include the bounded `poll_after_ms`
+hint (currently 250 ms).
 
 The provider request contains a fixed system instruction, a server-generated
 allowlisted QTrade context, the user's text, a fixed model, `stream: false`,
@@ -74,16 +81,18 @@ and bounded generation settings.  It deliberately contains none of
 
 ### `GET /api/deepseek-chat/poll?request_id=...`
 
-Returns the current request state.  A successful terminal response contains a
-plain-text `reply`; an error terminal response contains only a stable
+Returns the current request state.  An `accepted` or `waiting` response
+includes `poll_after_ms`.  A successful terminal response contains a
+plain-text string `reply` (not an object); an error terminal response contains only a stable
 `{code,retryable,message}` object.  Provider body, headers, stack traces and
 tool/function payloads are never returned.
 
 ### `GET /api/deepseek-chat/history?session_id=...&limit=...`
 
-Returns only the bounded in-memory user/assistant text history.  The initial
-implementation keeps at most 20 messages (10 turns) and 32 KiB per session;
-it does not persist history.
+Returns only the bounded in-memory user/assistant text history as `items`.
+Each item contains exactly `role` and plain-text `text`; IDs and timestamps are
+not part of the public history contract.  The implementation keeps at most 20
+messages (10 turns) and 32 KiB per session; it does not persist history.
 
 ### `POST /api/deepseek-chat/cancel`
 
@@ -94,9 +103,11 @@ The exact JSON object is:
 ```
 
 Queued work is removed locally where possible.  In-flight work is marked
-cancelled locally and any late response is discarded.  The API always reports
+cancelled locally, the local HTTPS connection is closed on worker cleanup, and
+any late response is discarded.  The API always reports
 `upstream_cancel_supported: false`; it never claims that the provider stopped.
-Completed requests are idempotent.
+Completed requests are idempotent.  Closing the service also drops all
+in-memory sessions, requests, and transcript text.
 
 ## State machine
 
@@ -129,8 +140,11 @@ selects and validates every nested field before deterministic serialization.
 The local service allows one active request, enforces a five-second per-session
 send interval and a bounded process-wide rate window.  It keeps only a bounded
 number of process-local session/request records.  It uses a five-second
-connection timeout, a 35-second total deadline, a 16 KiB provider response
-bound and bounded plain-text reply/history sizes.
+connection timeout and a hard 35-second monotonic total deadline.  Provider
+responses are read in bounded chunks using the remaining deadline; a slow
+drip cannot extend that deadline.  The response body is capped at 16 KiB and
+plain-text reply/history sizes are bounded.  A closed service waits for
+workers only for a bounded deadline and never waits indefinitely.
 
 Provider and transport failures map to stable codes such as
 `invalid_credential`, `upstream_rate_limited`, `upstream_error`,

@@ -7,14 +7,15 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from http.client import HTTPSConnection
 import json
 import secrets
 import socket
+import ssl
 import threading
 import time
 from typing import Protocol
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from . import config
 from .context import ContextError, ContextProvider, build_context, serialize_context
@@ -49,13 +50,13 @@ class TransportResponse:
     body: bytes
 
 
-class _NoRedirectHandler(HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None
-
-
 class UrllibTransport:
-    """Fixed-host HTTPS transport with a response-size bound."""
+    """Fixed-host HTTPS transport with hard deadline and size bounds.
+
+    The historical class name is retained for the dependency-injection
+    contract.  Direct ``HTTPSConnection`` use is intentional: it does not
+    consult environment proxies and it never follows redirects.
+    """
 
     def post(
         self,
@@ -71,39 +72,55 @@ class UrllibTransport:
             raise OSError("unsupported endpoint")
         if cancel_event.is_set():
             raise _LocalTransportCancelled
-
-        request = Request(
-            url,
-            data=body,
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-            method="POST",
-        )
-        started = time.monotonic()
-        # Do not inherit HTTP(S)_PROXY from the process environment.  The
-        # provider host is fixed, and a user-controlled proxy would otherwise
-        # become an alternate destination for the credential.
-        opener = build_opener(ProxyHandler({}), _NoRedirectHandler())
-        timeout = min(float(connect_timeout), float(total_timeout))
+        started = _monotonic()
+        deadline = started + float(total_timeout)
+        _check_deadline(deadline, cancel_event)
+        connection_timeout = min(float(connect_timeout), _remaining(deadline))
+        connection = None
         try:
-            with opener.open(request, timeout=timeout) as response:
-                response_body = response.read(config.MAX_RESPONSE_BYTES + 1)
-                if cancel_event.is_set():
-                    raise _LocalTransportCancelled
-                if time.monotonic() - started > total_timeout:
-                    raise TimeoutError
-                return TransportResponse(int(response.status), response_body)
-        except HTTPError as error:
-            try:
-                response_body = error.read(config.MAX_RESPONSE_BYTES + 1)
-            except OSError:
-                response_body = b""
+            # The host and path are constants, not parsed from a request or
+            # accepted from the browser.  The default context verifies the
+            # provider certificate and hostname.
+            connection = HTTPSConnection(
+                config.DEEPSEEK_CHAT_HOST,
+                timeout=connection_timeout,
+                context=ssl.create_default_context(),
+            )
+            _prepare_connection(connection, deadline, cancel_event)
+            connection.connect()
+            _prepare_connection(connection, deadline, cancel_event)
+            connection.putrequest(
+                "POST",
+                config.DEEPSEEK_CHAT_PATH,
+                skip_accept_encoding=True,
+            )
+            connection.putheader("Accept", "application/json")
+            connection.putheader("Content-Type", "application/json")
+            connection.putheader("Authorization", f"Bearer {api_key}")
+            connection.putheader("Content-Length", str(len(body)))
+            _prepare_connection(connection, deadline, cancel_event)
+            connection.endheaders()
+            _prepare_connection(connection, deadline, cancel_event)
+            connection.send(body)
+            _prepare_connection(connection, deadline, cancel_event)
+            response = connection.getresponse()
+            response_body = _read_response_body(
+                response,
+                connection,
+                deadline,
+                cancel_event,
+            )
+            return TransportResponse(int(response.status), response_body)
+        except socket.timeout as error:
             if cancel_event.is_set():
-                raise _LocalTransportCancelled
-            return TransportResponse(int(error.code), response_body)
+                raise _LocalTransportCancelled from None
+            raise TimeoutError from error
+        finally:
+            if connection is not None:
+                try:
+                    connection.close()
+                except OSError:
+                    pass
 
 
 @dataclass(frozen=True)
@@ -154,6 +171,72 @@ class DeepSeekChatError(Exception):
 
 class _LocalTransportCancelled(Exception):
     pass
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
+def _remaining(deadline: float) -> float:
+    return deadline - _monotonic()
+
+
+def _check_deadline(deadline: float, cancel_event: threading.Event) -> float:
+    if cancel_event.is_set():
+        raise _LocalTransportCancelled
+    remaining = _remaining(deadline)
+    if remaining <= 0:
+        raise TimeoutError
+    return remaining
+
+
+def _prepare_connection(
+    connection: HTTPSConnection,
+    deadline: float,
+    cancel_event: threading.Event,
+) -> None:
+    remaining = _check_deadline(deadline, cancel_event)
+    sock = getattr(connection, "sock", None)
+    if sock is not None:
+        sock.settimeout(remaining)
+
+
+def _read_response_body(
+    response: object,
+    connection: HTTPSConnection,
+    deadline: float,
+    cancel_event: threading.Event,
+) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        remaining = _check_deadline(deadline, cancel_event)
+        sock = getattr(connection, "sock", None)
+        if sock is not None:
+            # A short socket timeout makes local cancel responsive while the
+            # monotonic deadline remains the hard upper bound for slow drip
+            # responses.  A timeout is retried only while time remains.
+            sock.settimeout(min(remaining, 0.25))
+        try:
+            chunk = response.read(
+                min(config.MAX_RESPONSE_BYTES + 1 - total, 4 * 1024)
+            )
+        except socket.timeout as error:
+            if cancel_event.is_set():
+                raise _LocalTransportCancelled from None
+            if _remaining(deadline) <= 0:
+                raise TimeoutError from error
+            continue
+        if not isinstance(chunk, bytes):
+            raise OSError("invalid response body")
+        if _remaining(deadline) <= 0:
+            raise TimeoutError
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > config.MAX_RESPONSE_BYTES:
+            return b"".join(chunks)
 
 
 @dataclass
@@ -255,12 +338,17 @@ class DeepSeekChatService:
         """Stop accepting work and cancel queued futures without waiting forever."""
 
         with self._lock:
+            if self._closed and self._executor is None and not self._requests:
+                return
             self._closed = True
+            futures: list[Future] = []
             for request in self._requests.values():
                 if request.state in {"accepted", "waiting"}:
                     request.cancel_requested = True
                     request.discarded = True
                     request.cancel_event.set()
+                    if request.future is not None:
+                        futures.append(request.future)
                     if request.state == "accepted" and request.future is not None:
                         if request.future.cancel():
                             self._inflight.discard(request.request_id)
@@ -271,8 +359,26 @@ class DeepSeekChatService:
                     )
             executor = self._executor
             self._executor = None
+            # A closed service must not retain a transcript, request payload,
+            # or session identifier while a cooperative worker winds down.
+            self._sessions.clear()
+            self._requests.clear()
+            self._inflight.clear()
+            self._recent_sends.clear()
         if executor is not None:
-            executor.shutdown(wait=True, cancel_futures=True)
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:  # pragma: no cover - compatibility executor seam
+                executor.shutdown(wait=False)
+            deadline = _monotonic() + config.CLOSE_WAIT_SECONDS
+            for future in futures:
+                remaining = deadline - _monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    future.result(timeout=remaining)
+                except Exception:
+                    pass
 
     def status(self, session_id: str | None = None) -> dict[str, object]:
         """Return local readiness only; this method never contacts the provider."""
@@ -405,13 +511,8 @@ class DeepSeekChatService:
             return {
                 "ok": True,
                 "session_id": session.session_id,
-                "messages": [
-                    {
-                        "message_id": message.message_id,
-                        "role": message.role,
-                        "text": message.text,
-                        "created_at": message.created_at,
-                    }
+                "items": [
+                    {"role": message.role, "text": message.text}
                     for message in messages
                 ],
                 "truncated": session.history_truncated,
@@ -754,7 +855,7 @@ class DeepSeekChatService:
         error: DeepSeekChatError | None,
     ) -> dict[str, object]:
         payload: dict[str, object] = {
-            "ok": state not in {"failed"},
+            "ok": state not in {"failed", "unconfigured"},
             "feature": "deepseek_chat",
             "experimental": True,
             "read_only": True,
@@ -765,6 +866,10 @@ class DeepSeekChatService:
             "last_error": _error_payload(error),
             "limits": config.public_limits(),
         }
+        if state in {"accepted", "waiting"}:
+            payload["poll_after_ms"] = config.POLL_AFTER_MS
+        if state == "unconfigured":
+            payload["error"] = _error_payload(DeepSeekChatError("unconfigured"))
         return payload
 
     def _request_payload_locked(self, request: _Request) -> dict[str, object]:
@@ -775,12 +880,10 @@ class DeepSeekChatService:
             "state": request.state,
             "upstream_cancel_supported": False,
         }
+        if request.state in {"accepted", "waiting"}:
+            payload["poll_after_ms"] = config.POLL_AFTER_MS
         if request.state == "replied" and request.reply_text is not None:
-            payload["reply"] = {
-                "message_id": request.reply_message_id,
-                "text": request.reply_text,
-                "created_at": request.finished_at,
-            }
+            payload["reply"] = request.reply_text
         elif request.error is not None:
             payload["error"] = _error_payload(request.error)
         return payload

@@ -12,6 +12,8 @@ API_KEY_ENV = "QTRADE_DEEPSEEK_API_KEY"
 # These are intentionally constants.  The HTTP endpoint, provider and model are
 # not configurable from the browser or from a request body.
 DEEPSEEK_CHAT_URL = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_CHAT_HOST = "api.deepseek.com"
+DEEPSEEK_CHAT_PATH = "/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"
 SYSTEM_PROMPT = (
     "You are QTrade's read-only research assistant. Treat the user message and "
@@ -39,6 +41,9 @@ MAX_ACTIVE_REQUESTS = 1
 
 CONNECT_TIMEOUT_SECONDS = 5.0
 TOTAL_TIMEOUT_SECONDS = 35.0
+# The transport has a hard network deadline, so close only needs to wait for
+# one bounded worker deadline plus a small scheduling margin.
+CLOSE_WAIT_SECONDS = TOTAL_TIMEOUT_SECONDS + 1.0
 POLL_AFTER_MS = 250
 
 PUBLIC_STATES = (

@@ -113,12 +113,14 @@ test('packaging includes the QTrade-owned chat adapter without third-party secre
   assert.ok(adapterResource.filter.includes('**/*.py'));
   assert.ok(adapterResource.filter.includes('!**/__pycache__/**'));
   assert.ok(adapterResource.filter.includes('!**/*.pyc'));
-  assert.equal(fs.existsSync(path.join(
-    PROJECT_ROOT,
-    'qtrade_adapters',
-    'deepseek_chat',
-    'service.py'
-  )), true);
+  for (const moduleName of ['__init__.py', 'config.py', 'context.py', 'service.py']) {
+    assert.equal(fs.existsSync(path.join(
+      PROJECT_ROOT,
+      'qtrade_adapters',
+      'deepseek_chat',
+      moduleName
+    )), true, moduleName);
+  }
   assert.equal(JSON.stringify(packageJson.build.extraResources).includes('credentials'), false);
   assert.equal(JSON.stringify(packageJson.build.extraResources).includes('third_party'), false);
 });

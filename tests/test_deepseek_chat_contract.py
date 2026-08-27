@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import ast
 from concurrent.futures import Future
+from contextlib import closing
 import json
 from pathlib import Path
+import sqlite3
+import socket
+import ssl
 import threading
+import time
 from types import SimpleNamespace
 from urllib.error import URLError
 from urllib.request import ProxyHandler, Request, build_opener
@@ -24,7 +29,9 @@ from qtrade_adapters.deepseek_chat.service import (
     DeepSeekChatError,
     DeepSeekChatService,
     TransportResponse,
+    UrllibTransport,
 )
+import qtrade_adapters.deepseek_chat.service as deepseek_service_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,6 +103,71 @@ class _FakeTransport:
         if self.error is not None:
             raise self.error
         return self.response
+
+
+class _FakeSocket:
+    def __init__(self):
+        self.timeouts = []
+
+    def settimeout(self, value):
+        self.timeouts.append(value)
+
+
+class _FakeResponse:
+    def __init__(self, chunks, status=200):
+        self.chunks = list(chunks)
+        self.status = status
+        self.read_sizes = []
+
+    def read(self, amount):
+        self.read_sizes.append(amount)
+        if self.chunks:
+            return self.chunks.pop(0)
+        return b""
+
+
+class _FakeHTTPSConnection:
+    instances = []
+    response = _FakeResponse([b"{}"])
+
+    def __init__(self, host, timeout, context):
+        self.host = host
+        self.timeout = timeout
+        self.context = context
+        self.sock = _FakeSocket()
+        self.headers = []
+        self.request_line = None
+        self.sent_body = None
+        self.connected = False
+        self.closed = False
+        self.__class__.instances.append(self)
+
+    def connect(self):
+        self.connected = True
+
+    def putrequest(self, method, path, *, skip_accept_encoding=False):
+        self.request_line = (method, path, skip_accept_encoding)
+
+    def putheader(self, name, value):
+        self.headers.append((name, value))
+
+    def endheaders(self):
+        return None
+
+    def send(self, body):
+        self.sent_body = body
+
+    def getresponse(self):
+        return self.__class__.response
+
+    def close(self):
+        self.closed = True
+
+
+def _install_fake_https(monkeypatch, response):
+    _FakeHTTPSConnection.instances = []
+    _FakeHTTPSConnection.response = response
+    monkeypatch.setattr(deepseek_service_module, "HTTPSConnection", _FakeHTTPSConnection)
 
 
 def _reply(text="safe reply") -> TransportResponse:
@@ -177,7 +249,10 @@ def _http_json(opener, port, path, method="GET", body=None):
             )
     except Exception as error:
         if hasattr(error, "read"):
-            return error.code, dict(error.headers), json.loads(error.read().decode("utf-8"))
+            try:
+                return error.code, dict(error.headers), json.loads(error.read().decode("utf-8"))
+            finally:
+                error.close()
         raise
 
 
@@ -193,6 +268,119 @@ def _start_api_server(monkeypatch, service):
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     return httpd, thread
+
+
+def _post_with_transport():
+    return UrllibTransport().post(
+        url=config.DEEPSEEK_CHAT_URL,
+        body=b'{"messages":[]}',
+        api_key="test-only-key",
+        connect_timeout=config.CONNECT_TIMEOUT_SECONDS,
+        total_timeout=config.TOTAL_TIMEOUT_SECONDS,
+        cancel_event=threading.Event(),
+    )
+
+
+def test_fixed_transport_is_verified_direct_https_without_proxy_or_redirect(monkeypatch):
+    response = _FakeResponse([b'{"ok":', b"true}", b""], status=302)
+    _install_fake_https(monkeypatch, response)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+
+    result = _post_with_transport()
+
+    assert result == TransportResponse(302, b'{"ok":true}')
+    assert len(_FakeHTTPSConnection.instances) == 1
+    connection = _FakeHTTPSConnection.instances[0]
+    assert connection.host == config.DEEPSEEK_CHAT_HOST
+    assert connection.timeout == config.CONNECT_TIMEOUT_SECONDS
+    assert connection.request_line == ("POST", config.DEEPSEEK_CHAT_PATH, True)
+    assert dict(connection.headers)["Authorization"] == "Bearer test-only-key"
+    assert connection.sent_body == b'{"messages":[]}'
+    assert connection.context.check_hostname is True
+    assert connection.context.verify_mode == ssl.CERT_REQUIRED
+    assert connection.closed is True
+    assert all(0 < value <= config.TOTAL_TIMEOUT_SECONDS for value in connection.sock.timeouts)
+
+
+def test_fixed_transport_rejects_non_fixed_url_without_connecting(monkeypatch):
+    _install_fake_https(monkeypatch, _FakeResponse([b"{}"]))
+    with pytest.raises(OSError):
+        UrllibTransport().post(
+            url="https://127.0.0.1/redirect",
+            body=b"{}",
+            api_key="test-only-key",
+            connect_timeout=5,
+            total_timeout=35,
+            cancel_event=threading.Event(),
+        )
+    assert _FakeHTTPSConnection.instances == []
+
+
+def test_fixed_transport_stops_slow_drip_at_hard_deadline(monkeypatch):
+    class _AdvancingClock:
+        value = 0.0
+
+        def __call__(self):
+            return self.value
+
+    clock = _AdvancingClock()
+
+    class _SlowResponse(_FakeResponse):
+        def read(self, amount):
+            self.read_sizes.append(amount)
+            clock.value = config.TOTAL_TIMEOUT_SECONDS + 1
+            return b"x"
+
+    _install_fake_https(monkeypatch, _SlowResponse([]))
+    monkeypatch.setattr(deepseek_service_module, "_monotonic", clock)
+
+    with pytest.raises(TimeoutError):
+        _post_with_transport()
+    assert _FakeHTTPSConnection.instances[0].closed is True
+
+
+def test_fixed_transport_bounds_response_reads_to_16_kib(monkeypatch):
+    response = _FakeResponse([b"x" * (config.MAX_RESPONSE_BYTES + 1)])
+    _install_fake_https(monkeypatch, response)
+
+    result = _post_with_transport()
+
+    assert len(result.body) == config.MAX_RESPONSE_BYTES + 1
+    assert len(response.read_sizes) == 1
+    assert _FakeHTTPSConnection.instances[0].closed is True
+
+
+@pytest.mark.parametrize("phase", ["connect", "read"])
+def test_fixed_transport_socket_timeouts_map_to_bounded_timeout(monkeypatch, phase):
+    class _TimeoutClock:
+        value = 0.0
+
+        def __call__(self):
+            return self.value
+
+    clock = _TimeoutClock()
+
+    class _TimeoutConnection(_FakeHTTPSConnection):
+        def connect(self):
+            if phase == "connect":
+                raise socket.timeout("provider secret")
+            super().connect()
+
+    class _TimeoutResponse(_FakeResponse):
+        def read(self, amount):
+            self.read_sizes.append(amount)
+            clock.value = config.TOTAL_TIMEOUT_SECONDS + 1
+            raise socket.timeout("provider secret")
+
+    response = _TimeoutResponse([])
+    _TimeoutConnection.response = response
+    _TimeoutConnection.instances = []
+    monkeypatch.setattr(deepseek_service_module, "HTTPSConnection", _TimeoutConnection)
+    monkeypatch.setattr(deepseek_service_module, "_monotonic", clock)
+    with pytest.raises(TimeoutError):
+        _post_with_transport()
+    assert _TimeoutConnection.instances[0].closed is True
 
 
 def test_disabled_status_reads_no_key_creates_no_executor_or_network(monkeypatch):
@@ -217,6 +405,59 @@ def test_disabled_status_reads_no_key_creates_no_executor_or_network(monkeypatch
     assert executor_created == []
     assert transport.calls == []
     service.close()
+
+
+def test_disabled_import_status_and_shutdown_leave_external_db_renameable(tmp_path, monkeypatch):
+    cache = tmp_path / "data" / "cache"
+    cache.mkdir(parents=True)
+    bars = cache / "bars.db"
+    with closing(sqlite3.connect(bars)) as connection:
+        connection.execute("CREATE TABLE marker(value INTEGER)")
+        connection.commit()
+
+    monkeypatch.setenv(config.FEATURE_ENV, "0")
+    monkeypatch.setenv(config.API_KEY_ENV, "test-only-key")
+    monkeypatch.setattr(server, "DEEPSEEK_CHAT_SERVICE", None)
+    service = server.get_deepseek_chat_service()
+
+    assert service.status()["state"] == "disabled"
+    assert service._executor is None
+    service.close()
+
+    renamed = cache / "bars-renamed.db"
+    bars.rename(renamed)
+    renamed.unlink()
+
+
+def test_mainboard_adapter_closes_read_only_connections_before_cache_cleanup(tmp_path):
+    cache = tmp_path / "data" / "cache"
+    cache.mkdir(parents=True)
+    with closing(sqlite3.connect(cache / "stock_basic.db")) as connection:
+        connection.execute(
+            "CREATE TABLE stock_basic(code TEXT, name TEXT, out_date TEXT, status TEXT)"
+        )
+        connection.execute("INSERT INTO stock_basic VALUES ('000001.SZ', 'Synthetic', '', '1')")
+        connection.commit()
+    with closing(sqlite3.connect(cache / "bars.db")) as connection:
+        connection.execute(
+            "CREATE TABLE bar_meta(code TEXT, adjust TEXT, rows INTEGER, end_date TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE daily_bar(code TEXT, date TEXT, open REAL, high REAL, low REAL, close REAL, volume REAL, adjust TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO bar_meta VALUES ('000001.SZ', 'qfq', 130, '2026-08-25')"
+        )
+        connection.commit()
+
+    from qtrade_adapters.deepseek_harness.market_data import MainboardMarketDataAdapter
+
+    adapter = MainboardMarketDataAdapter(tmp_path)
+    assert adapter.universe_summary()["source"] == "external_sqlite"
+
+    renamed = cache / "bars-renamed.db"
+    (cache / "bars.db").rename(renamed)
+    renamed.unlink()
 
 
 def test_unconfigured_status_is_local_and_does_not_start_work(monkeypatch):
@@ -246,14 +487,17 @@ def test_send_is_accepted_then_replied_with_no_tool_fields(monkeypatch):
     session_id = ready["session_id"]
     accepted = service.send_payload({"session_id": session_id, "text": "show status"})
     assert accepted["state"] == "accepted"
-    assert service.poll(accepted["request_id"])["state"] == "accepted"
+    assert 250 <= accepted["poll_after_ms"] <= 1_000
+    accepted_poll = service.poll(accepted["request_id"])
+    assert accepted_poll["state"] == "accepted"
+    assert accepted_poll["poll_after_ms"] == accepted["poll_after_ms"]
     assert transport.calls == []
 
     _run_request(service, executor)
     result = service.poll(accepted["request_id"], session_id)
     assert result["state"] == "replied"
-    assert result["reply"]["text"] == "plain text"
-    assert result["reply"]["message_id"]
+    assert result["reply"] == "plain text"
+    assert isinstance(result["reply"], str)
     assert service.status(session_id)["state"] == "ready"
 
     call = transport.calls[0]
@@ -279,7 +523,9 @@ def test_send_is_accepted_then_replied_with_no_tool_fields(monkeypatch):
     assert "600519" not in body_text
     assert "absolute_path" not in body_text
     assert "source_token" not in body_text
-    assert service.history(session_id)["messages"][-1]["text"] == "plain text"
+    history = service.history(session_id)
+    assert "messages" not in history
+    assert history["items"][-1] == {"role": "assistant", "text": "plain text"}
     clock.advance(config.MIN_SEND_INTERVAL_SECONDS + 0.1)
     service.close()
 
@@ -403,7 +649,7 @@ def test_markup_reply_is_kept_as_plain_text_for_text_only_ui(monkeypatch):
     _run_request(service, executor)
     result = service.poll(request["request_id"])
     assert result["state"] == "replied"
-    assert result["reply"]["text"] == "<script>alert(1)</script>"
+    assert result["reply"] == "<script>alert(1)</script>"
     service.close()
 
 
@@ -452,7 +698,7 @@ def test_queued_cancel_is_idempotent_and_never_networks(monkeypatch):
     )["state"] == "failed"
     executor.run_next()
     assert service.poll(accepted["request_id"])["state"] == "failed"
-    assert service.history(session_id)["messages"][0]["role"] == "user"
+    assert service.history(session_id)["items"][0]["role"] == "user"
     service.close()
 
 
@@ -475,6 +721,9 @@ def test_inflight_cancel_discards_late_reply(monkeypatch):
     worker = threading.Thread(target=service._run_request, args=(request_id,))
     worker.start()
     assert started.wait(timeout=3)
+    waiting = service.poll(request_id)
+    assert waiting["state"] == "waiting"
+    assert 250 <= waiting["poll_after_ms"] <= 1_000
     cancelled = service.cancel(session_id=session_id, request_id=request_id)
     assert cancelled["state"] == "failed"
     assert cancelled["error"]["code"] == "client_cancelled"
@@ -488,6 +737,82 @@ def test_inflight_cancel_discards_late_reply(monkeypatch):
     service.close()
 
 
+def test_close_cancels_worker_and_clears_process_local_transcript(monkeypatch):
+    started = threading.Event()
+    finished = threading.Event()
+
+    class _CooperativeTransport:
+        def post(self, **kwargs):
+            started.set()
+            try:
+                kwargs["cancel_event"].wait(timeout=10)
+                return _reply("late reply")
+            finally:
+                finished.set()
+
+    service = DeepSeekChatService(
+        transport=_CooperativeTransport(),
+        context_provider=lambda: _context(),
+        id_factory=_Ids(),
+    )
+    monkeypatch.setenv(config.FEATURE_ENV, "1")
+    monkeypatch.setenv(config.API_KEY_ENV, "test-only-key")
+    session_id = service.status()["session_id"]
+    service.send(session_id=session_id, text="close me")
+    assert started.wait(timeout=3)
+
+    started_at = time.monotonic()
+    service.close()
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < config.CLOSE_WAIT_SECONDS
+    assert finished.is_set()
+    assert service._sessions == {}
+    assert service._requests == {}
+    assert service._inflight == set()
+    assert service._executor is None
+    service.close()
+
+
+def test_close_uses_bounded_nonwaiting_executor_shutdown(monkeypatch):
+    class _NeverFuture:
+        def __init__(self):
+            self.cancelled = False
+            self.timeout = None
+
+        def cancel(self):
+            return False
+
+        def result(self, timeout=None):
+            self.timeout = timeout
+            raise TimeoutError
+
+    class _BoundedExecutor:
+        def __init__(self):
+            self.future = _NeverFuture()
+            self.shutdown_args = None
+
+        def submit(self, _function, *_args):
+            return self.future
+
+        def shutdown(self, *, wait=False, cancel_futures=False):
+            if wait:
+                raise AssertionError("service close must not wait in executor shutdown")
+            self.shutdown_args = (wait, cancel_futures)
+
+    executor = _BoundedExecutor()
+    service, _clock, _manual = _make_service(monkeypatch, executor=executor)
+    session_id = service.status()["session_id"]
+    service.send(session_id=session_id, text="bounded close")
+
+    service.close()
+
+    assert executor.shutdown_args == (False, True)
+    assert executor.future.timeout is not None
+    assert service._sessions == {}
+    assert service._requests == {}
+
+
 def test_history_is_bounded_to_ten_turns(monkeypatch):
     service, clock, executor = _make_service(monkeypatch)
     session_id = service.status()["session_id"]
@@ -497,9 +822,9 @@ def test_history_is_bounded_to_ten_turns(monkeypatch):
         assert service.poll(accepted["request_id"])["state"] == "replied"
         clock.advance(config.MIN_SEND_INTERVAL_SECONDS + 0.01)
     history = service.history(session_id)
-    assert len(history["messages"]) <= config.MAX_HISTORY_MESSAGES
+    assert len(history["items"]) <= config.MAX_HISTORY_MESSAGES
     assert (
-        sum(len(item["text"].encode("utf-8")) for item in history["messages"])
+        sum(len(item["text"].encode("utf-8")) for item in history["items"])
         <= config.MAX_HISTORY_BYTES
     )
     assert history["truncated"] is True
@@ -564,6 +889,90 @@ def test_server_routes_are_before_external_bridge_and_do_not_inherit_cors(monkey
         )
         assert missing_status == 404
         assert missing["error"] == "not_found"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=3)
+        service.close()
+
+
+def test_server_backend_responses_match_frozen_ui_contract(monkeypatch):
+    transport = _FakeTransport(response=_reply("plain text"))
+    service, _clock, executor = _make_service(monkeypatch, transport=transport)
+    httpd, thread = _start_api_server(monkeypatch, service)
+    opener = build_opener(ProxyHandler({}))
+    try:
+        port = httpd.server_address[1]
+        status, _headers, status_body = _http_json(
+            opener, port, "/api/deepseek-chat/status"
+        )
+        assert status == 200
+        assert status_body["state"] == "ready"
+        session_id = status_body["session_id"]
+
+        accepted_status, _headers, accepted = _http_json(
+            opener,
+            port,
+            "/api/deepseek-chat/send",
+            method="POST",
+            body={"session_id": session_id, "text": "hello"},
+        )
+        assert accepted_status == 202
+        assert set(accepted) == {
+            "ok",
+            "request_id",
+            "session_id",
+            "state",
+            "poll_after_ms",
+            "upstream_cancel_supported",
+        }
+        assert accepted["state"] == "accepted"
+        assert 250 <= accepted["poll_after_ms"] <= 1_000
+
+        _run_request(service, executor)
+        poll_status, _headers, replied = _http_json(
+            opener,
+            port,
+            f"/api/deepseek-chat/poll?request_id={accepted['request_id']}&session_id={session_id}",
+        )
+        assert poll_status == 200
+        assert replied["state"] == "replied"
+        assert replied["reply"] == "plain text"
+        assert isinstance(replied["reply"], str)
+
+        history_status, _headers, history = _http_json(
+            opener,
+            port,
+            f"/api/deepseek-chat/history?session_id={session_id}&limit=20",
+        )
+        assert history_status == 200
+        assert "messages" not in history
+        assert history["items"] == [
+            {"role": "user", "text": "hello"},
+            {"role": "assistant", "text": "plain text"},
+        ]
+        assert all(set(item) == {"role", "text"} for item in history["items"])
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=3)
+        service.close()
+
+
+def test_server_reports_unconfigured_with_stable_error_and_503(monkeypatch):
+    monkeypatch.setenv(config.FEATURE_ENV, "1")
+    monkeypatch.delenv(config.API_KEY_ENV, raising=False)
+    service = DeepSeekChatService(transport=_FakeTransport(response=_reply()))
+    httpd, thread = _start_api_server(monkeypatch, service)
+    opener = build_opener(ProxyHandler({}))
+    try:
+        status, _headers, body = _http_json(
+            opener, httpd.server_address[1], "/api/deepseek-chat/status"
+        )
+        assert status == 503
+        assert body["state"] == "unconfigured"
+        assert body["error"]["code"] == "unconfigured"
+        assert body["error"]["retryable"] is False
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -673,7 +1082,9 @@ def test_chat_source_has_no_process_or_dynamic_code_surface():
             assert node.func.id.lower() not in banned_calls
     assert "third_party" not in source
     assert "quantapi" not in source
-    assert "ProxyHandler({})" in source
+    assert "HTTPSConnection" in source
+    assert "create_default_context" in source
+    assert "ProxyHandler" not in source
     assert '"tools":' not in source
     assert '"functions":' not in source
     assert '"function_call":' not in source

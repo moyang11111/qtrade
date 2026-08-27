@@ -8,6 +8,7 @@ copying it into QTrade or making network requests.  See
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import closing
 from pathlib import Path
 import re
 import sqlite3
@@ -157,7 +158,7 @@ class MainboardMarketDataAdapter:
             "trade_status", "trading_status",
         )
         try:
-            with self._connect(path) as connection:
+            with closing(self._connect(path)) as connection:
                 schema = self._find_table(
                     connection,
                     "stock_basic",
@@ -193,7 +194,7 @@ class MainboardMarketDataAdapter:
         if not path.exists():
             return []
         try:
-            with self._connect(path) as connection:
+            with closing(self._connect(path)) as connection:
                 bar_schema = self._bar_schema(connection)
                 if bar_schema is None:
                     self.last_error = "bars_schema_unsupported"
@@ -439,7 +440,7 @@ class MainboardMarketDataAdapter:
         if not path.exists():
             return []
         try:
-            with self._connect(path) as connection:
+            with closing(self._connect(path)) as connection:
                 schema = self._bar_schema(connection)
                 if schema is None:
                     return []
