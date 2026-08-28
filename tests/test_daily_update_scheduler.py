@@ -101,6 +101,59 @@ def test_packaged_daily_script_imports_freshness_from_external_cwd(tmp_path):
     assert output[-1] == "qtrade_adapters.deepseek_harness.freshness"
 
 
+def test_packaged_resources_shape_imports_freshness_without_project_path(tmp_path):
+    """A resources/qtrade copy must be self-locating when launched standalone."""
+
+    packaged_root = tmp_path / "resources" / "qtrade"
+    packaged_script = packaged_root / "scripts" / "daily_update_1830.py"
+    packaged_script.parent.mkdir(parents=True)
+    packaged_script.write_bytes(Path(daily_update.__file__).read_bytes())
+
+    adapter_root = packaged_root / "qtrade_adapters"
+    harness_root = adapter_root / "deepseek_harness"
+    harness_root.mkdir(parents=True)
+    (adapter_root / "__init__.py").write_text("", encoding="utf-8")
+    (harness_root / "__init__.py").write_text("from . import freshness\n", encoding="utf-8")
+    (harness_root / "freshness.py").write_text("\"\"\"packaged import probe\"\"\"\n", encoding="utf-8")
+
+    outside_cwd = tmp_path / "outside-cwd"
+    outside_cwd.mkdir()
+    probe = (
+        "import json\n"
+        "import runpy\n"
+        "import sys\n"
+        f"namespace = runpy.run_path({str(packaged_script)!r}, run_name='qtrade_packaged_probe')\n"
+        "module = namespace.get('freshness')\n"
+        "print(json.dumps({\n"
+        "    'root': str(namespace['ROOT']),\n"
+        "    'path0': sys.path[0],\n"
+        "    'freshness': module.__name__ if module is not None else None,\n"
+        "    'freshness_file': str(module.__file__) if module is not None else None,\n"
+        "    'third_party_on_path': any('third_party' in entry.lower() for entry in sys.path if entry),\n"
+        "}))\n"
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=outside_cwd,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert Path(payload["root"]).resolve() == packaged_root.resolve()
+    assert Path(payload["path0"]).resolve() == packaged_root.resolve()
+    assert payload["freshness"] == "qtrade_adapters.deepseek_harness.freshness"
+    assert Path(payload["freshness_file"]).resolve() == (harness_root / "freshness.py").resolve()
+    assert payload["third_party_on_path"] is False
+
+
 def test_calendar_cache_is_used_when_api_fails(tmp_path, monkeypatch):
     deck = _configure_daily(monkeypatch, tmp_path)
     cache = tmp_path / "cache.json"
