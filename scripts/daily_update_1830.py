@@ -19,12 +19,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
+# Resolve the project root before importing QTrade-owned adapters. When this
+# file is launched from a packaged ``scripts`` directory, Python's first path
+# is not the resource root and the current working directory is not reliable.
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 try:
     from qtrade_adapters.deepseek_harness import freshness
 except ModuleNotFoundError:  # pragma: no cover - isolated script packaging probe
     freshness = None
 
-ROOT = Path(__file__).resolve().parent.parent
 DECK = ROOT / "third_party" / "deepseek-harness-quant"
 DECK_ENV = "QTRADE_DECK_DIR"
 PY = sys.executable or "python"

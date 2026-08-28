@@ -2,6 +2,9 @@
 
 import datetime as dt
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -66,6 +69,36 @@ def test_dry_run_lists_complete_plan_and_writes_structured_status(tmp_path, monk
     ]
     assert payload["outputs"] == {"portal": False, "decision": False, "factors": False, "sync": False}
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_packaged_daily_script_imports_freshness_from_external_cwd(tmp_path):
+    """The standalone script must find adapters without cwd/PYTHONPATH help."""
+
+    script = Path(daily_update.__file__).resolve()
+    probe = (
+        "import runpy\n"
+        f"namespace = runpy.run_path({str(script)!r}, run_name='qtrade_probe')\n"
+        "print(namespace['ROOT'])\n"
+        "module = namespace.get('freshness')\n"
+        "print(module.__name__ if module is not None else 'NONE')\n"
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    output = result.stdout.splitlines()
+    assert Path(output[-2]).resolve() == daily_update.ROOT
+    assert output[-1] == "qtrade_adapters.deepseek_harness.freshness"
 
 
 def test_calendar_cache_is_used_when_api_fails(tmp_path, monkeypatch):
