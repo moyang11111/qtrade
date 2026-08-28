@@ -35,6 +35,7 @@ import webbrowser
 from pathlib import Path
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 import qtrade_base_bridge
+from qtrade_adapters.deepseek_harness import runtime as update_runtime
 
 import pandas as pd
 import numpy as np
@@ -2782,6 +2783,10 @@ DEEPSEEK_CHAT_HISTORY_PATH = f"{DEEPSEEK_CHAT_PREFIX}/history"
 DEEPSEEK_CHAT_CANCEL_PATH = f"{DEEPSEEK_CHAT_PREFIX}/cancel"
 
 UPDATE_STATUS_PATH = Path(__file__).resolve().parent / "logs" / "daily_update_1830.status.json"
+UPDATE_RUN_PATH = "/api/update/run"
+UPDATE_RUN_STATUS_PATH = f"{UPDATE_RUN_PATH}/status"
+MANUAL_UPDATE_MAX_BODY_BYTES = 1024
+MANUAL_UPDATE_CONTROLLER = None
 _UPDATE_STATUS_STATES = frozenset({"running", "skip", "success", "failure"})
 _UPDATE_STATUS_REASONS = frozenset({
     "started",
@@ -2962,6 +2967,125 @@ def get_factor_library() -> FactorLibrary:
         path = FACTOR_LIBRARY_FILE or resolve_factor_library_path()
         FACTOR_LIBRARY = FactorLibrary(path, qtrade_base_bridge.base_dir())
     return FACTOR_LIBRARY
+
+
+def get_manual_update_controller():
+    """Lazily create the server-owned single-flight manual update controller."""
+
+    global MANUAL_UPDATE_CONTROLLER
+    if MANUAL_UPDATE_CONTROLLER is None:
+        MANUAL_UPDATE_CONTROLLER = update_runtime.ManualUpdateController(
+            base_dir_fn=qtrade_base_bridge.base_dir,
+            project_root=Path(__file__).resolve().parent,
+            status_file=UPDATE_STATUS_PATH,
+        )
+    return MANUAL_UPDATE_CONTROLLER
+
+
+_MANUAL_UPDATE_STATES = frozenset({"idle", "accepted", "running", "success", "skip", "failure"})
+_MANUAL_UPDATE_REASONS = frozenset({
+    "accepted",
+    "running",
+    "before_cutoff",
+    "already_running",
+    "already_success",
+    "lock_busy",
+    "calendar_unavailable",
+    "calendar_cache",
+    "calendar_cache_closed",
+    "calendar_api",
+    "calendar_api_closed",
+    "weekend",
+    "deck_missing",
+    "step_failed",
+    "update_failed",
+    "status_unavailable",
+    "completed",
+})
+_MANUAL_UPDATE_OUTPUTS = ("portal", "factors", "decision", "sync")
+
+
+def _safe_manual_update_payload(payload) -> dict:
+    """Return only the stable fields exposed to the native control console."""
+
+    fallback = {
+        "schema_version": 1,
+        "accepted": False,
+        "state": "idle",
+        "trade_date": None,
+        "started_at": None,
+        "finished_at": None,
+        "reason": "status_unavailable",
+        "outputs": {key: False for key in _MANUAL_UPDATE_OUTPUTS},
+        "freshness": {},
+        "retry": {"attempt": 0, "max_attempts": 3, "next_attempt_at": None},
+    }
+    if not isinstance(payload, dict):
+        return fallback
+
+    result = dict(fallback)
+    state = payload.get("state")
+    result["state"] = state if isinstance(state, str) and state in _MANUAL_UPDATE_STATES else "idle"
+    result["accepted"] = result["state"] == "accepted"
+    trade_date = payload.get("trade_date")
+    if isinstance(trade_date, str) and _UPDATE_STATUS_DATE.fullmatch(trade_date[:10]):
+        result["trade_date"] = trade_date[:10]
+    for key in ("started_at", "finished_at"):
+        value = payload.get(key)
+        if isinstance(value, str) and _UPDATE_STATUS_TIMESTAMP.fullmatch(value[:32]):
+            result[key] = value[:32]
+    reason = payload.get("reason")
+    if isinstance(reason, str) and reason.startswith("calendar_unavailable:"):
+        result["reason"] = "calendar_unavailable"
+    elif isinstance(reason, str) and reason in _MANUAL_UPDATE_REASONS:
+        result["reason"] = reason
+    elif result["state"] == "failure":
+        result["reason"] = "update_failed"
+
+    outputs = payload.get("outputs")
+    if isinstance(outputs, dict):
+        result["outputs"] = {key: outputs.get(key) is True for key in _MANUAL_UPDATE_OUTPUTS}
+
+    freshness = payload.get("freshness")
+    if isinstance(freshness, dict):
+        clean_freshness = {}
+        for group in ("portal", "factors", "decision", "sync"):
+            item = freshness.get(group)
+            if not isinstance(item, dict):
+                continue
+            clean = {"verified": item.get("verified") is True}
+            as_of = item.get("as_of")
+            clean["as_of"] = as_of[:10] if isinstance(as_of, str) and _UPDATE_STATUS_DATE.fullmatch(as_of[:10]) else None
+            source = item.get("source")
+            clean["source"] = source if isinstance(source, str) and source in _UPDATE_STATUS_FRESHNESS_SOURCES else "unavailable"
+            fresh_reason = item.get("reason")
+            clean["reason"] = (
+                fresh_reason
+                if isinstance(fresh_reason, str) and fresh_reason in _UPDATE_STATUS_FRESHNESS_REASONS
+                else "unavailable"
+            )
+            for key in _UPDATE_STATUS_FRESHNESS_COUNTS:
+                count = item.get(key)
+                if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                    clean[key] = count
+            for key in ("pitch_verified", "portal", "factors", "decision"):
+                if isinstance(item.get(key), bool):
+                    clean[key] = item[key]
+            clean_freshness[group] = clean
+        result["freshness"] = clean_freshness
+
+    retry = payload.get("retry")
+    if isinstance(retry, dict):
+        clean_retry = dict(fallback["retry"])
+        for key in ("attempt", "max_attempts"):
+            value = retry.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                clean_retry[key] = value
+        next_attempt = retry.get("next_attempt_at")
+        if isinstance(next_attempt, str) and _UPDATE_STATUS_TIMESTAMP.fullmatch(next_attempt[:32]):
+            clean_retry["next_attempt_at"] = next_attempt[:32]
+        result["retry"] = clean_retry
+    return result
 
 
 def _deepseek_health_context() -> dict[str, str]:
@@ -3274,6 +3398,112 @@ class APIHandler(SimpleHTTPRequestHandler):
             return self._factor_path_error()
         return self._json({"deleted": True, "id": parts[0]})
 
+    def _read_manual_update_body(self) -> dict | None:
+        """Read the deliberately empty JSON object accepted by the run API."""
+
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            self._manual_json(
+                {"error": "unsupported_media_type", "message": "application/json is required"},
+                status=415,
+            )
+            return None
+        length_text = self.headers.get("Content-Length", "")
+        try:
+            length = int(length_text)
+        except (TypeError, ValueError):
+            self._manual_json(
+                {"error": "invalid_request", "message": "request body length is required"},
+                status=400,
+            )
+            return None
+        if length < 0 or length > MANUAL_UPDATE_MAX_BODY_BYTES:
+            self.close_connection = True
+            self._manual_json(
+                {"error": "request_too_large", "message": "request body is too large"},
+                status=413,
+            )
+            return None
+        if length == 0:
+            self._manual_json(
+                {"error": "invalid_request", "message": "request body must be an empty JSON object"},
+                status=400,
+            )
+            return None
+        try:
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                self._manual_json(
+                    {"error": "invalid_request", "message": "request body is incomplete"},
+                    status=400,
+                )
+                return None
+            payload = json.loads(
+                raw.decode("utf-8"),
+                object_pairs_hook=self._reject_duplicate_json_pairs,
+            )
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+            self._manual_json(
+                {"error": "invalid_request", "message": "request body must be valid JSON"},
+                status=400,
+            )
+            return None
+        if not isinstance(payload, dict):
+            self._manual_json(
+                {"error": "invalid_request", "message": "request body must be an object"},
+                status=400,
+            )
+            return None
+        if payload:
+            self._manual_json(
+                {"error": "unknown_field", "message": "manual update accepts only an empty JSON object"},
+                status=400,
+            )
+            return None
+        return payload
+
+    def _update_run(self):
+        body = self._read_manual_update_body()
+        if body is None:
+            return
+        try:
+            payload = _safe_manual_update_payload(get_manual_update_controller().start())
+        except Exception:
+            payload = _safe_manual_update_payload({"state": "failure", "reason": "update_failed"})
+        state = payload["state"]
+        reason = payload["reason"]
+        if reason in {"already_running", "lock_busy"}:
+            status = 409
+            payload["error"] = reason
+        elif state in {"accepted", "running"}:
+            status = 202
+        elif state == "failure":
+            status = 503
+        else:
+            status = 200
+        self._manual_json(payload, status=status)
+
+    def _update_run_status(self, query):
+        if query:
+            return self._manual_json(
+                {"error": "unknown_field", "message": "update status does not accept query fields"},
+                status=400,
+            )
+        try:
+            payload = get_manual_update_controller().status()
+        except Exception:
+            payload = {"state": "idle", "reason": "status_unavailable"}
+        self._manual_json(_safe_manual_update_payload(payload))
+
+    def _manual_method_not_allowed(self, message="method is not supported"):
+        return self._manual_json(
+            {"error": "method_not_allowed", "message": message},
+            status=405,
+        )
+
+    def _manual_json(self, data, status=200):
+        return self._json(data, status=status, cors=False, no_store=True)
+
     @staticmethod
     def _is_deepseek_chat_path(path: str) -> bool:
         return path == DEEPSEEK_CHAT_PREFIX or path.startswith(DEEPSEEK_CHAT_PREFIX + "/")
@@ -3450,6 +3680,15 @@ class APIHandler(SimpleHTTPRequestHandler):
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+        if path == UPDATE_RUN_PATH:
+            if parsed.query:
+                return self._manual_json(
+                    {"error": "unknown_field", "message": "update run does not accept query fields"},
+                    status=400,
+                )
+            return self._update_run()
+        if path == UPDATE_RUN_STATUS_PATH:
+            return self._manual_method_not_allowed("GET is required for update status")
         if self._is_factor_library_path(path):
             return self._factor_post(path)
         if self._is_deepseek_chat_path(path):
@@ -3460,6 +3699,8 @@ class APIHandler(SimpleHTTPRequestHandler):
 
     def do_PUT(self):
         path = urllib.parse.urlparse(self.path).path
+        if path in {UPDATE_RUN_PATH, UPDATE_RUN_STATUS_PATH}:
+            return self._manual_method_not_allowed()
         if self._is_factor_library_path(path):
             return self._factor_put(path)
         if self._is_deepseek_chat_path(path):
@@ -3472,6 +3713,8 @@ class APIHandler(SimpleHTTPRequestHandler):
 
     def do_DELETE(self):
         path = urllib.parse.urlparse(self.path).path
+        if path in {UPDATE_RUN_PATH, UPDATE_RUN_STATUS_PATH}:
+            return self._manual_method_not_allowed()
         if self._is_factor_library_path(path):
             return self._factor_delete(path)
         if self._is_deepseek_chat_path(path):
@@ -3484,6 +3727,8 @@ class APIHandler(SimpleHTTPRequestHandler):
 
     def do_PATCH(self):
         path = urllib.parse.urlparse(self.path).path
+        if path in {UPDATE_RUN_PATH, UPDATE_RUN_STATUS_PATH}:
+            return self._manual_method_not_allowed()
         if self._is_factor_library_path(path):
             self._json({"error": "method_not_allowed", "message": "PATCH is not supported"}, status=405)
             return
@@ -3499,7 +3744,11 @@ class APIHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
-        path, query = parsed.path, urllib.parse.parse_qs(parsed.query)
+        path, query = parsed.path, urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        if path == UPDATE_RUN_PATH:
+            return self._manual_method_not_allowed("POST is required for update run")
+        if path == UPDATE_RUN_STATUS_PATH:
+            return self._update_run_status(query)
         if self._is_factor_library_path(path):
             return self._factor_get(path)
         if self._is_deepseek_chat_path(path):
@@ -3535,6 +3784,12 @@ class APIHandler(SimpleHTTPRequestHandler):
         if path.endswith(('.css', '.js', '.html')):
             self._nocache = True
         return super().do_GET()
+
+    def do_OPTIONS(self):
+        path = urllib.parse.urlparse(self.path).path
+        if path in {UPDATE_RUN_PATH, UPDATE_RUN_STATUS_PATH}:
+            return self._manual_method_not_allowed()
+        return self.send_error(501, "Unsupported method")
 
     def send_header(self, keyword, value):
         super().send_header(keyword, value)
@@ -3733,7 +3988,7 @@ class APIHandler(SimpleHTTPRequestHandler):
 
     # ---------- 工具 ----------
 
-    def _json(self, data, status=200, *, cors=True):
+    def _json(self, data, status=200, *, cors=True, no_store=False):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -3742,6 +3997,8 @@ class APIHandler(SimpleHTTPRequestHandler):
             self.send_header("Connection", "close")
         if cors:
             self.send_header("Access-Control-Allow-Origin", "*")
+        if no_store:
+            self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -3906,6 +4163,8 @@ def main():
     finally:
         if DEEPSEEK_CHAT_SERVICE is not None:
             DEEPSEEK_CHAT_SERVICE.close()
+        if MANUAL_UPDATE_CONTROLLER is not None:
+            MANUAL_UPDATE_CONTROLLER.stop()
 
 
 if __name__ == "__main__":

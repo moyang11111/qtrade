@@ -9,6 +9,25 @@
     factorLibrary: '/api/factor-library',
     harness: '/api/harness/status',
   });
+  const MANUAL_UPDATE_PATH = '/api/update/run';
+  const MANUAL_UPDATE_STATUS_PATH = '/api/update/run/status';
+  const MANUAL_UPDATE_POLL_MS = 1000;
+  const MANUAL_UPDATE_MAX_WAIT_MS = 2 * 60 * 60 * 1000;
+  const MANUAL_UPDATE_STATES = new Set([
+    'idle', 'accepted', 'running', 'success', 'skip', 'failure',
+  ]);
+  const MANUAL_UPDATE_REASONS = new Set([
+    'accepted', 'running', 'before_cutoff', 'already_running', 'already_success',
+    'lock_busy', 'calendar_unavailable', 'calendar_cache', 'calendar_cache_closed',
+    'calendar_api', 'calendar_api_closed', 'weekend', 'deck_missing', 'step_failed',
+    'update_failed', 'status_unavailable', 'completed',
+  ]);
+  const MANUAL_UPDATE_ERROR_CODES = new Set([
+    'before_cutoff', 'already_running', 'lock_busy', 'request_too_large',
+    'unknown_field', 'invalid_request', 'unsupported_media_type', 'status_unavailable',
+    'update_failed',
+  ]);
+  const MANUAL_UPDATE_OUTPUTS = ['portal', 'factors', 'decision', 'sync'];
   const NAVIGATION_PAGES = new Set([
     'market', 'portal', 'pitch', 'factorboard', 'factors', 'autopaper',
   ]);
@@ -50,6 +69,10 @@
     notice: document.getElementById('controlNotice'),
     refresh: document.getElementById('controlRefresh'),
     copy: document.getElementById('controlCopy'),
+    manualUpdate: document.getElementById('manualUpdateButton'),
+    manualUpdateHint: document.getElementById('manualUpdateHint'),
+    manualUpdateStatus: document.getElementById('manualUpdateStatus'),
+    manualUpdateOutputs: document.getElementById('manualUpdateOutputs'),
     system: document.getElementById('systemBody'),
     pipeline: document.getElementById('pipelineBody'),
     universe: document.getElementById('universeBody'),
@@ -77,6 +100,17 @@
     requestId: 0,
     lastSuccessToken: null,
     timer: null,
+    manual: {
+      value: null,
+      requestInFlight: false,
+      requestController: null,
+      statusInFlight: false,
+      statusController: null,
+      statusPromise: null,
+      pollTimer: null,
+      pollDeadline: 0,
+      pollToken: 0,
+    },
   };
   const chatState = {
     value: 'idle',
@@ -177,6 +211,99 @@
     if (typeof update.trade_date !== 'string' || typeof update.finished_at !== 'string') return null;
     if (!update.trade_date || !update.finished_at) return null;
     return `${update.trade_date}|${update.finished_at}`;
+  }
+
+  function safeManualState(value) {
+    return typeof value === 'string' && MANUAL_UPDATE_STATES.has(value) ? value : 'idle';
+  }
+
+  function manualStateLabel(value) {
+    return {
+      idle: '等待运行',
+      accepted: '已接收',
+      running: '更新中',
+      success: '已成功',
+      skip: '已跳过',
+      failure: '失败',
+    }[safeManualState(value)];
+  }
+
+  function manualReasonLabel(value) {
+    return {
+      accepted: '已接收，正在准备完整流水线。',
+      running: '正在按门户、因子、决策、同步顺序运行。',
+      before_cutoff: '18:30 后可运行。',
+      already_running: '已有更新正在运行，请稍候。',
+      already_success: '当天已成功更新，无需重复运行。',
+      lock_busy: '更新锁被占用，请稍候重试。',
+      calendar_unavailable: '无法确认交易日，已安全停止。',
+      calendar_cache: '使用交易日历缓存。',
+      calendar_cache_closed: '交易日历显示今日休市。',
+      calendar_api: '交易日历确认今日为交易日。',
+      calendar_api_closed: '交易日历显示今日休市。',
+      weekend: '周末不运行更新。',
+      deck_missing: '研究底座不可用。',
+      step_failed: '流水线步骤失败，后续步骤已停止。',
+      update_failed: '更新失败，请检查数据状态后重试。',
+      status_unavailable: '更新状态暂不可用，请稍后重试。',
+      completed: '完整流水线已完成。',
+    }[value] || '状态需核对。';
+  }
+
+  function safeManualReason(value) {
+    if (typeof value === 'string' && value.startsWith('calendar_unavailable:')) {
+      return 'calendar_unavailable';
+    }
+    return typeof value === 'string' && MANUAL_UPDATE_REASONS.has(value)
+      ? value : 'status_unavailable';
+  }
+
+  function manualErrorMessage(error) {
+    const code = error && error.code;
+    if (code === 'before_cutoff') return '18:30 后可运行。';
+    if (code === 'already_running' || code === 'lock_busy') return '已有更新正在运行，请稍候。';
+    if (code === 'request_too_large' || code === 'unknown_field' || code === 'invalid_request') {
+      return '请求格式不受支持。';
+    }
+    if (error && error.status === 415) return '当前服务不支持手动更新请求。';
+    return '手动更新暂不可用，请稍后重试。';
+  }
+
+  function safeManualPayload(value) {
+    const payload = asObject(value) || {};
+    const stateValue = safeManualState(payload.state);
+    const outputs = asObject(payload.outputs) || {};
+    const tradeDate = safeDate(payload.trade_date);
+    const freshness = asObject(payload.freshness) || {};
+    const retry = asObject(payload.retry) || {};
+    const clean = {
+      state: stateValue,
+      trade_date: tradeDate === '未确认' ? null : tradeDate,
+      started_at: typeof payload.started_at === 'string'
+        && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(payload.started_at)
+        ? payload.started_at.slice(0, 32) : null,
+      finished_at: typeof payload.finished_at === 'string'
+        && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(payload.finished_at)
+        ? payload.finished_at.slice(0, 32) : null,
+      reason: safeManualReason(payload.reason),
+      outputs: Object.fromEntries(MANUAL_UPDATE_OUTPUTS.map((key) => [key, outputs[key] === true])),
+      freshness: Object.fromEntries(['portal', 'factors', 'decision', 'sync'].flatMap((key) => {
+        const item = asObject(freshness[key]);
+        if (!item) return [];
+        return [[key, {
+          verified: item.verified === true,
+          as_of: safeDate(item.as_of) === '未确认' ? null : safeDate(item.as_of),
+          source: typeof item.source === 'string' ? item.source.slice(0, 32) : 'unavailable',
+          reason: typeof item.reason === 'string' ? item.reason.slice(0, 64) : 'unavailable',
+        }]];
+      })),
+      retry: {
+        attempt: Number.isInteger(retry.attempt) && retry.attempt >= 0 ? retry.attempt : 0,
+        max_attempts: Number.isInteger(retry.max_attempts) && retry.max_attempts >= 0
+          ? retry.max_attempts : 3,
+      },
+    };
+    return clean;
   }
 
   function clampPollAfterMs(value) {
@@ -633,6 +760,159 @@
     return asObject(payload) || payload;
   }
 
+  async function fetchManualJson(path, options = {}) {
+    const response = await fetch(path, {
+      ...options,
+      headers: { Accept: 'application/json', ...(options.headers || {}) },
+    });
+    let payload = {};
+    try {
+      payload = await response.json();
+    } catch {
+      payload = {};
+    }
+    if (!response.ok) {
+      const error = new Error('manual update request failed');
+      error.status = response.status;
+      const object = asObject(payload);
+      if (object && typeof object.error === 'string' && MANUAL_UPDATE_ERROR_CODES.has(object.error)) {
+        error.code = object.error;
+      }
+      if (object && typeof object.reason === 'string' && MANUAL_UPDATE_REASONS.has(object.reason)) {
+        error.code = object.reason;
+      }
+      throw error;
+    }
+    return asObject(payload) || {};
+  }
+
+  function renderManualUpdate(result) {
+    if (!els.manualUpdateStatus || !els.manualUpdate) return;
+    if (!result || !result.ok) {
+      state.manual.value = null;
+      els.manualUpdate.disabled = true;
+      els.manualUpdateStatus.textContent = '手动更新暂不可用，请稍后刷新。';
+      els.manualUpdateStatus.dataset.state = 'error';
+      if (els.manualUpdateOutputs) {
+        const labels = { portal: '门户', factors: '因子', decision: '决策', sync: '同步' };
+        document.querySelectorAll('[data-update-output]').forEach((node) => {
+          node.textContent = `${labels[node.dataset.updateOutput] || '结果'}：未确认`;
+          node.dataset.state = '';
+        });
+      }
+      return;
+    }
+    const payload = safeManualPayload(result.value);
+    state.manual.value = payload;
+    const stateValue = payload.state;
+    const active = stateValue === 'accepted' || stateValue === 'running';
+    els.manualUpdate.disabled = active;
+    els.manualUpdateStatus.textContent = `状态：${manualStateLabel(stateValue)} · 目标日期：${payload.trade_date || '未确认'} · ${manualReasonLabel(payload.reason)}`;
+    els.manualUpdateStatus.dataset.state = stateValue === 'success' ? 'good' : stateValue === 'failure' ? 'error' : '';
+    const outputs = asObject(payload.outputs) || {};
+    const labels = { portal: '门户', factors: '因子', decision: '决策', sync: '同步' };
+    if (els.manualUpdateOutputs) {
+      document.querySelectorAll('[data-update-output]').forEach((node) => {
+        const key = node.dataset.updateOutput;
+        const done = outputs[key] === true;
+        node.textContent = `${labels[key] || '结果'}：${done ? '已完成' : '未完成'}`;
+        node.dataset.state = done ? 'good' : stateValue === 'failure' ? 'error' : '';
+      });
+    }
+  }
+
+  function clearManualUpdatePollTimer() {
+    if (state.manual.pollTimer !== null) {
+      window.clearTimeout(state.manual.pollTimer);
+      state.manual.pollTimer = null;
+    }
+  }
+
+  function stopManualUpdatePolling() {
+    state.manual.pollToken += 1;
+    clearManualUpdatePollTimer();
+    if (state.manual.statusController) state.manual.statusController.abort();
+    state.manual.statusController = null;
+    state.manual.statusPromise = null;
+  }
+
+  function requestManualStatus() {
+    if (state.manual.statusPromise) return state.manual.statusPromise;
+    const controller = new AbortController();
+    state.manual.statusController = controller;
+    state.manual.statusInFlight = true;
+    state.manual.statusPromise = fetchManualJson(MANUAL_UPDATE_STATUS_PATH, { signal: controller.signal })
+      .then((payload) => ({ ok: true, value: payload }))
+      .catch((error) => {
+        if (error && error.name === 'AbortError') return { ok: false, aborted: true, error };
+        return { ok: false, error };
+      })
+      .finally(() => {
+        state.manual.statusInFlight = false;
+        state.manual.statusController = null;
+        state.manual.statusPromise = null;
+      });
+    return state.manual.statusPromise;
+  }
+
+  function scheduleManualUpdatePoll() {
+    clearManualUpdatePollTimer();
+    if (Date.now() >= state.manual.pollDeadline) {
+      renderManualUpdate({ ok: false, error: new Error('manual update timeout') });
+      return;
+    }
+    const token = state.manual.pollToken;
+    state.manual.pollTimer = window.setTimeout(() => {
+      state.manual.pollTimer = null;
+      if (token !== state.manual.pollToken) return;
+      void requestManualStatus().then((result) => {
+        if (token !== state.manual.pollToken) return;
+        if (!result.aborted) renderManualUpdate(result);
+        const next = state.manual.value && state.manual.value.state;
+        if (next === 'accepted' || next === 'running') scheduleManualUpdatePoll();
+        else void refresh();
+      });
+    }, MANUAL_UPDATE_POLL_MS);
+  }
+
+  function beginManualUpdatePolling() {
+    state.manual.pollToken += 1;
+    state.manual.pollDeadline = Date.now() + MANUAL_UPDATE_MAX_WAIT_MS;
+    scheduleManualUpdatePoll();
+  }
+
+  async function runManualUpdate() {
+    if (!els.manualUpdate || els.manualUpdate.disabled || state.manual.requestInFlight) return;
+    state.manual.requestInFlight = true;
+    state.manual.requestController = new AbortController();
+    els.manualUpdate.disabled = true;
+    if (els.manualUpdateStatus) {
+      els.manualUpdateStatus.textContent = '正在提交完整更新…';
+      els.manualUpdateStatus.dataset.state = '';
+    }
+    try {
+      const payload = await fetchManualJson(MANUAL_UPDATE_PATH, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+        signal: state.manual.requestController.signal,
+      });
+      renderManualUpdate({ ok: true, value: payload });
+      const next = safeManualState(payload.state);
+      if (next === 'accepted' || next === 'running') beginManualUpdatePolling();
+    } catch (error) {
+      if (!error || error.name !== 'AbortError') {
+        renderManualUpdate({ ok: false, error });
+        if (els.manualUpdateStatus) els.manualUpdateStatus.textContent = manualErrorMessage(error);
+      }
+    } finally {
+      state.manual.requestInFlight = false;
+      state.manual.requestController = null;
+      const next = state.manual.value && state.manual.value.state;
+      if (next !== 'accepted' && next !== 'running' && els.manualUpdate) els.manualUpdate.disabled = false;
+    }
+  }
+
   async function readCards(signal) {
     const keys = Object.keys(API_PATHS);
     const results = await Promise.all(keys.map(async (key) => {
@@ -745,7 +1025,7 @@
     ]);
   }
 
-  function render(results, requestId) {
+  function render(results, requestId, manualResult) {
     if (requestId !== state.requestId) return;
     state.data = results;
     renderSystem(results.health);
@@ -754,6 +1034,7 @@
     renderOpportunities(results.autoPaper);
     renderFactors(results.factorLibrary);
     renderHarness(results.harness);
+    renderManualUpdate(manualResult);
     const failed = Object.values(results).some((result) => !result.ok);
     els.state.textContent = failed ? '部分状态不可用' : '状态已读取';
     els.state.dataset.state = failed ? 'error' : 'ok';
@@ -773,8 +1054,11 @@
     state.controller = controller;
     els.refresh.disabled = true;
     els.state.textContent = '正在读取状态…';
-    state.refreshPromise = readCards(controller.signal)
-      .then((results) => render(results, requestId))
+    state.refreshPromise = Promise.all([
+      readCards(controller.signal),
+      requestManualStatus(),
+    ])
+      .then(([results, manualResult]) => render(results, requestId, manualResult))
       .catch((error) => {
         if (!error || error.name !== 'AbortError') {
           els.state.textContent = '状态读取失败';
@@ -856,6 +1140,7 @@
 
   els.refresh.addEventListener('click', () => { void refresh(); });
   els.copy.addEventListener('click', () => { void copyDiagnostics(); });
+  if (els.manualUpdate) els.manualUpdate.addEventListener('click', () => { void runManualUpdate(); });
   document.querySelectorAll('[data-qtrade-page]').forEach((button) => {
     button.addEventListener('click', () => navigate(button.dataset.qtradePage));
   });
@@ -870,6 +1155,8 @@
   window.addEventListener('pagehide', () => {
     if (state.timer !== null) window.clearInterval(state.timer);
     if (state.controller) state.controller.abort();
+    stopManualUpdatePolling();
+    if (state.manual.requestController) state.manual.requestController.abort();
     stopChat();
   }, { once: true });
   if (typeof window !== 'undefined') window.QTradeDeepSeekChat = DeepSeekChat;
