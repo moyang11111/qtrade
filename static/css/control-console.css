@@ -142,6 +142,37 @@ h2 {
 
 .control-notice[hidden] { display: none; }
 
+.control-update-actions {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 13px;
+  border-top: 1px solid var(--qt-line);
+}
+
+.control-update-actions .control-button { justify-self: start; }
+
+.control-update-hint,
+.control-update-status {
+  margin: 0;
+  color: var(--qt-text-secondary);
+  font-size: 12px;
+}
+
+.control-update-status[data-state="error"] { color: var(--qt-color-signal); }
+.control-update-status[data-state="good"] { color: var(--qt-color-down); }
+
+.control-update-outputs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  color: var(--qt-text-dim);
+  font-size: 11px;
+}
+
+.control-update-outputs span[data-state="good"] { color: var(--qt-color-down); }
+.control-update-outputs span[data-state="error"] { color: var(--qt-color-signal); }
+
 .deepseek-chat-panel {
   margin: 14px 0;
   padding: 17px 22px;
