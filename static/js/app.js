@@ -1062,6 +1062,36 @@
     hideAllOverlays();
     setRailActive('market');
   }
+
+  const CONTROL_NAVIGATION_PAGES = new Set([
+    'market', 'portal', 'pitch', 'factorboard', 'factors', 'autopaper',
+  ]);
+
+  function switchPage(page) {
+    if (!CONTROL_NAVIGATION_PAGES.has(page)) return false;
+    if (page === 'market') showMarketPage();
+    else if (page === 'portal') showEmbedPage('pagePortal', 'portal');
+    else if (page === 'pitch') showEmbedPage('pagePitch', 'pitch');
+    else if (page === 'factorboard') openFactorBoard();
+    else if (page === 'factors') void openFactorPage();
+    else if (page === 'autopaper') {
+      hideAllOverlays();
+      if (window.AutoPaper) window.AutoPaper.open();
+      setRailActive('autopaper');
+    }
+    return true;
+  }
+
+  function handleControlNavigationMessage(event) {
+    if (event.origin !== window.location.origin) return;
+    const controlFrame = $('iframeControl');
+    if (!controlFrame || event.source !== controlFrame.contentWindow) return;
+    const message = event.data;
+    if (!message || typeof message !== 'object' || message.type !== 'qtrade:navigate') return;
+    if (typeof message.page !== 'string' || !CONTROL_NAVIGATION_PAGES.has(message.page)) return;
+    switchPage(message.page);
+  }
+
   async function openFactorPage() {
     hideAllOverlays();
     els.pageFactors.hidden = false;
@@ -1136,18 +1166,14 @@
     document.querySelectorAll('.deck-item').forEach(btn => {
       btn.addEventListener('click', () => {
         const page = btn.dataset.page;
-        if (page === 'market') showMarketPage();
-        else if (page === 'portal') showEmbedPage('pagePortal', 'portal');
-        else if (page === 'pitch') showEmbedPage('pagePitch', 'pitch');
-        else if (page === 'control') showEmbedPage('pageControl', 'control');
-        else if (page === 'factorboard') showEmbedPage('pageFactorBoard', 'factorboard');
-        else if (page === 'factors') openFactorPage();
+        if (switchPage(page)) return;
+        if (page === 'control') showEmbedPage('pageControl', 'control');
         else if (page === 'risk') openRiskPage();
         else if (page === 'backtest') { hideAllOverlays(); openBacktest(); }
         else if (page === 'training') { hideAllOverlays(); if (window.Training) window.Training.open(); }
-        else if (page === 'autopaper') { hideAllOverlays(); if (window.AutoPaper) window.AutoPaper.open(); }
       });
     });
+    window.addEventListener('message', handleControlNavigationMessage);
     const fClose = $('btnFactorClose'); if (fClose) fClose.addEventListener('click', showMarketPage);
     const rClose = $('btnRiskClose'); if (rClose) rClose.addEventListener('click', showMarketPage);
     const pClose = $('btnPortalClose'); if (pClose) pClose.addEventListener('click', showMarketPage);
@@ -1258,7 +1284,7 @@
 
     // 获取后端模式（实时/CSV），显示徽标
     try {
-      const h = await fetch(API + '/api/health').then(r => r.json());
+      const h = await fetch('/api/health').then(r => r.json());
       if (h.mode === 'live') $('liveBadge').hidden = false;
     } catch (e) { /* 忽略 */ }
 
