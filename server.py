@@ -57,6 +57,9 @@ from qtrade_adapters.deepseek_harness.factor_library import (
     MAX_BODY_BYTES,
     resolve_factor_library_path,
 )
+from qtrade_adapters.deepseek_chat import config as deepseek_chat_config
+from qtrade_adapters.deepseek_chat.context import ContextProvider, build_context
+from qtrade_adapters.deepseek_chat.service import DeepSeekChatError, DeepSeekChatService
 
 # ============================================================================
 # 实时数据源（腾讯）
@@ -2769,6 +2772,14 @@ AUTO_PAPER: AutoPaperTrader = None
 FACTOR_LIBRARY: FactorLibrary | None = None
 FACTOR_LIBRARY_FILE: Path | None = None
 FACTOR_LIBRARY_PREFIX = "/api/factor-library"
+DEEPSEEK_CHAT_SERVICE: DeepSeekChatService | None = None
+
+DEEPSEEK_CHAT_PREFIX = "/api/deepseek-chat"
+DEEPSEEK_CHAT_STATUS_PATH = f"{DEEPSEEK_CHAT_PREFIX}/status"
+DEEPSEEK_CHAT_SEND_PATH = f"{DEEPSEEK_CHAT_PREFIX}/send"
+DEEPSEEK_CHAT_POLL_PATH = f"{DEEPSEEK_CHAT_PREFIX}/poll"
+DEEPSEEK_CHAT_HISTORY_PATH = f"{DEEPSEEK_CHAT_PREFIX}/history"
+DEEPSEEK_CHAT_CANCEL_PATH = f"{DEEPSEEK_CHAT_PREFIX}/cancel"
 
 UPDATE_STATUS_PATH = Path(__file__).resolve().parent / "logs" / "daily_update_1830.status.json"
 _UPDATE_STATUS_STATES = frozenset({"running", "skip", "success", "failure"})
@@ -2951,6 +2962,108 @@ def get_factor_library() -> FactorLibrary:
         path = FACTOR_LIBRARY_FILE or resolve_factor_library_path()
         FACTOR_LIBRARY = FactorLibrary(path, qtrade_base_bridge.base_dir())
     return FACTOR_LIBRARY
+
+
+def _deepseek_health_context() -> dict[str, str]:
+    """Return only the health enum allowed in the chat context."""
+
+    return {"status": "ok" if SERVICE is not None else "unavailable"}
+
+
+def _deepseek_business_date_context() -> dict[str, str | None]:
+    """Reduce update status to a date and a small freshness enum."""
+
+    status = read_update_status()
+    freshness = status.get("freshness")
+    portal = freshness.get("portal") if isinstance(freshness, dict) else None
+    portal = portal if isinstance(portal, dict) else {}
+    as_of = portal.get("as_of") or status.get("trade_date")
+    if not isinstance(as_of, str):
+        as_of = None
+    if portal.get("verified") is True:
+        freshness_value = "fresh"
+    elif as_of and status.get("state") in {"running", "failure"}:
+        freshness_value = "stale"
+    else:
+        freshness_value = "unknown"
+    return {"as_of": as_of, "freshness": freshness_value}
+
+
+def _deepseek_mainboard_context() -> dict[str, object]:
+    """Read the existing typed universe summary and discard all other fields."""
+
+    if SERVICE is None:
+        return {}
+    try:
+        summary = SERVICE.universe_summary
+    except Exception:
+        return {}
+    return summary if isinstance(summary, dict) else {}
+
+
+def _deepseek_opportunities_context() -> dict[str, object]:
+    """Expose an opportunity count without exposing its symbol members."""
+
+    if SERVICE is None:
+        return {}
+    try:
+        count = len(getattr(SERVICE, "_candidate_symbols", ()))
+    except Exception:
+        count = 0
+    return {"count": count, "categories": {"screened": count}}
+
+
+def _deepseek_factors_context() -> dict[str, object]:
+    """Reduce saved factor plans to counts and a business date."""
+
+    if FACTOR_LIBRARY is None:
+        return {}
+    try:
+        items = FACTOR_LIBRARY.list_items()
+    except Exception:
+        return {}
+    if not isinstance(items, list):
+        return {}
+    dates = sorted(
+        item.get("as_of")
+        for item in items
+        if isinstance(item, dict) and isinstance(item.get("as_of"), str)
+    )
+    as_of = dates[-1] if dates else None
+    business_date = _deepseek_business_date_context().get("as_of")
+    if as_of and business_date:
+        freshness = "fresh" if as_of == business_date else "stale"
+    else:
+        freshness = "unknown"
+    return {
+        "scheme_count": len(items),
+        "active_count": len(items),
+        "as_of": as_of,
+        "freshness": freshness,
+    }
+
+
+def _build_deepseek_context() -> dict[str, object]:
+    """Build the exact context sent by the QTrade-owned chat service."""
+
+    return build_context(
+        ContextProvider(
+            health=_deepseek_health_context,
+            business_date=_deepseek_business_date_context,
+            mainboard=_deepseek_mainboard_context,
+            opportunities=_deepseek_opportunities_context,
+            factors=_deepseek_factors_context,
+        )
+    )
+
+
+def get_deepseek_chat_service() -> DeepSeekChatService:
+    """Lazily create the service; construction never reads a key or starts a worker."""
+
+    global DEEPSEEK_CHAT_SERVICE
+    if DEEPSEEK_CHAT_SERVICE is None:
+        DEEPSEEK_CHAT_SERVICE = DeepSeekChatService(context_provider=_build_deepseek_context)
+    return DEEPSEEK_CHAT_SERVICE
 
 
 class APIHandler(SimpleHTTPRequestHandler):
@@ -3161,11 +3274,186 @@ class APIHandler(SimpleHTTPRequestHandler):
             return self._factor_path_error()
         return self._json({"deleted": True, "id": parts[0]})
 
+    @staticmethod
+    def _is_deepseek_chat_path(path: str) -> bool:
+        return path == DEEPSEEK_CHAT_PREFIX or path.startswith(DEEPSEEK_CHAT_PREFIX + "/")
+
+    @staticmethod
+    def _reject_duplicate_json_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON field")
+            result[key] = value
+        return result
+
+    def _read_deepseek_body(self) -> dict | None:
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            self._json(
+                {"error": "unsupported_media_type", "message": "application/json is required"},
+                status=415,
+                cors=False,
+            )
+            return None
+        length_text = self.headers.get("Content-Length", "")
+        try:
+            length = int(length_text)
+        except (TypeError, ValueError):
+            self._json(
+                {"error": "invalid_request", "message": "request body length is required"},
+                status=400,
+                cors=False,
+            )
+            return None
+        if length < 0 or length > deepseek_chat_config.MAX_REQUEST_BODY_BYTES:
+            # The oversized body has not been consumed.  Closing this HTTP
+            # connection prevents a client from reusing a socket whose unread
+            # bytes could otherwise be mistaken for the next request (and is
+            # especially important on Windows).
+            self.close_connection = True
+            self._json(
+                {"error": "request_too_large", "message": "request body is too large"},
+                status=413,
+                cors=False,
+            )
+            return None
+        if length == 0:
+            self._json(
+                {"error": "invalid_request", "message": "request body must be an object"},
+                status=400,
+                cors=False,
+            )
+            return None
+        try:
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                self._json(
+                    {"error": "invalid_request", "message": "request body is incomplete"},
+                    status=400,
+                    cors=False,
+                )
+                return None
+            payload = json.loads(
+                raw.decode("utf-8"),
+                object_pairs_hook=self._reject_duplicate_json_pairs,
+            )
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+            self._json(
+                {"error": "invalid_request", "message": "request body must be valid JSON"},
+                status=400,
+                cors=False,
+            )
+            return None
+        if not isinstance(payload, dict):
+            self._json(
+                {"error": "invalid_request", "message": "request body must be an object"},
+                status=400,
+                cors=False,
+            )
+            return None
+        return payload
+
+    @staticmethod
+    def _query_value(query: dict, name: str, *, required: bool = True) -> str | None:
+        values = query.get(name)
+        if values is None:
+            if required:
+                raise DeepSeekChatError("invalid_request")
+            return None
+        if len(values) != 1 or not isinstance(values[0], str) or not values[0]:
+            raise DeepSeekChatError("invalid_request")
+        return values[0]
+
+    def _deepseek_error(self, error: DeepSeekChatError):
+        return self._json(
+            {"error": error.code, "message": error.public_message},
+            status=error.status_code,
+            cors=False,
+        )
+
+    def _deepseek_get(self, path: str, query: dict):
+        service = get_deepseek_chat_service()
+        try:
+            if path == DEEPSEEK_CHAT_STATUS_PATH:
+                unknown = set(query) - {"session_id"}
+                if unknown:
+                    raise DeepSeekChatError("unknown_field")
+                session_id = self._query_value(query, "session_id", required=False)
+                result = service.status(session_id)
+                status = 503 if result.get("state") == "unconfigured" else 200
+                return self._json(result, status=status, cors=False)
+            if path == DEEPSEEK_CHAT_POLL_PATH:
+                unknown = set(query) - {"request_id", "session_id"}
+                if unknown:
+                    raise DeepSeekChatError("unknown_field")
+                request_id = self._query_value(query, "request_id")
+                session_id = self._query_value(query, "session_id", required=False)
+                return self._json(service.poll(request_id, session_id), cors=False)
+            if path == DEEPSEEK_CHAT_HISTORY_PATH:
+                unknown = set(query) - {"session_id", "limit"}
+                if unknown:
+                    raise DeepSeekChatError("unknown_field")
+                session_id = self._query_value(query, "session_id")
+                limit_text = self._query_value(query, "limit", required=False)
+                limit = None
+                if limit_text is not None:
+                    try:
+                        limit = int(limit_text)
+                    except ValueError:
+                        raise DeepSeekChatError("invalid_request") from None
+                return self._json(service.history(session_id, limit), cors=False)
+            if path in {DEEPSEEK_CHAT_SEND_PATH, DEEPSEEK_CHAT_CANCEL_PATH}:
+                return self._json(
+                    {"error": "method_not_allowed", "message": "GET is not supported"},
+                    status=405,
+                    cors=False,
+                )
+            return self._json(
+                {"error": "not_found", "message": "DeepSeek chat resource not found"},
+                status=404,
+                cors=False,
+            )
+        except DeepSeekChatError as error:
+            return self._deepseek_error(error)
+        except Exception:
+            return self._deepseek_error(DeepSeekChatError("internal_error"))
+
+    def _deepseek_post(self, path: str):
+        if path not in {DEEPSEEK_CHAT_SEND_PATH, DEEPSEEK_CHAT_CANCEL_PATH}:
+            return self._json(
+                {"error": "method_not_allowed", "message": "POST is not supported"},
+                status=405,
+                cors=False,
+            )
+        body = self._read_deepseek_body()
+        if body is None:
+            return
+        service = get_deepseek_chat_service()
+        try:
+            if path == DEEPSEEK_CHAT_SEND_PATH:
+                result = service.send_payload(body)
+                return self._json(result, status=202, cors=False)
+            unknown = set(body) - {"session_id", "request_id"}
+            if unknown or set(body) != {"session_id", "request_id"}:
+                raise DeepSeekChatError("unknown_field" if unknown else "invalid_request")
+            result = service.cancel(
+                session_id=body["session_id"],
+                request_id=body["request_id"],
+            )
+            return self._json(result, cors=False)
+        except DeepSeekChatError as error:
+            return self._deepseek_error(error)
+        except Exception:
+            return self._deepseek_error(DeepSeekChatError("internal_error"))
+
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         if self._is_factor_library_path(path):
             return self._factor_post(path)
+        if self._is_deepseek_chat_path(path):
+            return self._deepseek_post(path)
         if qtrade_base_bridge.QtradeDeckHandler(self).handle_post(path):
             return
         self._json({"error": "unsupported POST method"}, status=404)
@@ -3174,12 +3462,24 @@ class APIHandler(SimpleHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         if self._is_factor_library_path(path):
             return self._factor_put(path)
+        if self._is_deepseek_chat_path(path):
+            return self._json(
+                {"error": "method_not_allowed", "message": "PUT is not supported"},
+                status=405,
+                cors=False,
+            )
         self._json({"error": "unsupported method"}, status=405)
 
     def do_DELETE(self):
         path = urllib.parse.urlparse(self.path).path
         if self._is_factor_library_path(path):
             return self._factor_delete(path)
+        if self._is_deepseek_chat_path(path):
+            return self._json(
+                {"error": "method_not_allowed", "message": "DELETE is not supported"},
+                status=405,
+                cors=False,
+            )
         self._json({"error": "unsupported method"}, status=405)
 
     def do_PATCH(self):
@@ -3187,6 +3487,12 @@ class APIHandler(SimpleHTTPRequestHandler):
         if self._is_factor_library_path(path):
             self._json({"error": "method_not_allowed", "message": "PATCH is not supported"}, status=405)
             return
+        if self._is_deepseek_chat_path(path):
+            return self._json(
+                {"error": "method_not_allowed", "message": "PATCH is not supported"},
+                status=405,
+                cors=False,
+            )
         self._json({"error": "unsupported method"}, status=405)
 
     # ---------- 路由 ----------
@@ -3196,6 +3502,8 @@ class APIHandler(SimpleHTTPRequestHandler):
         path, query = parsed.path, urllib.parse.parse_qs(parsed.query)
         if self._is_factor_library_path(path):
             return self._factor_get(path)
+        if self._is_deepseek_chat_path(path):
+            return self._deepseek_get(path, query)
         # 复用 deepseek-harness-quant 门户/决策/控制台（同端口）
         if self._try_base_deck(path):
             return
@@ -3425,12 +3733,15 @@ class APIHandler(SimpleHTTPRequestHandler):
 
     # ---------- 工具 ----------
 
-    def _json(self, data, status=200):
+    def _json(self, data, status=200, *, cors=True):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", len(body))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        if cors:
+            self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
 
@@ -3592,6 +3903,9 @@ def main():
     except KeyboardInterrupt:
         print("\n👋 再见!")
         server.shutdown()
+    finally:
+        if DEEPSEEK_CHAT_SERVICE is not None:
+            DEEPSEEK_CHAT_SERVICE.close()
 
 
 if __name__ == "__main__":

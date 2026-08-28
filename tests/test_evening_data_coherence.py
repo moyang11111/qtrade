@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from contextlib import closing
 import json
 from pathlib import Path
 import shutil
@@ -23,7 +24,7 @@ def _make_deck(tmp_path: Path, *, bar_date: dt.date = TARGET, codes=None) -> Pat
     codes = codes or ("000001.SZ", "600519.SH")
     cache = tmp_path / "data" / "cache"
     cache.mkdir(parents=True)
-    with sqlite3.connect(cache / "stock_basic.db") as connection:
+    with closing(sqlite3.connect(cache / "stock_basic.db")) as connection:
         connection.execute(
             "CREATE TABLE stock_basic(code TEXT PRIMARY KEY, name TEXT, out_date TEXT, status TEXT)"
         )
@@ -32,7 +33,7 @@ def _make_deck(tmp_path: Path, *, bar_date: dt.date = TARGET, codes=None) -> Pat
             [(code, "Synthetic", "", "1") for code in codes],
         )
         connection.commit()
-    with sqlite3.connect(cache / "bars.db") as connection:
+    with closing(sqlite3.connect(cache / "bars.db")) as connection:
         connection.execute(
             "CREATE TABLE bar_meta(code TEXT, adjust TEXT, start_date TEXT, end_date TEXT, rows INTEGER, updated_at TEXT)"
         )
@@ -115,7 +116,7 @@ def test_portal_requires_target_and_dynamic_coverage(tmp_path):
 
 def test_portal_coverage_drop_fails_closed_and_schema_failure_is_safe(tmp_path):
     deck = _make_deck(tmp_path)
-    with sqlite3.connect(deck / "data" / "cache" / "bars.db") as connection:
+    with closing(sqlite3.connect(deck / "data" / "cache" / "bars.db")) as connection:
         connection.execute("UPDATE bar_meta SET end_date = ? WHERE code = '000001.SZ'", (OLD.isoformat(),))
         connection.commit()
     result = freshness.verify_portal(deck, TARGET, baseline={"coverage": 2})
