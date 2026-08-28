@@ -25,6 +25,37 @@
 
     <div class="control-notice" id="controlNotice" role="status" aria-live="polite" hidden></div>
 
+    <section class="deepseek-chat-panel" id="deepseekChatPanel" aria-labelledby="deepseekChatTitle">
+      <div class="deepseek-chat-heading">
+        <div class="deepseek-chat-copy">
+          <p class="control-card-kicker">OPTIONAL / READ ONLY</p>
+          <h2 id="deepseekChatTitle">DeepSeek 对话 <span class="deepseek-chat-badge">实验性、只读</span></h2>
+          <p class="deepseek-chat-safety">不会执行交易、系统命令、脚本或配置修改。用户文本和脱敏 QTrade 汇总可能发送给 DeepSeek，并可能产生费用。</p>
+          <p class="deepseek-chat-safety">本面板不显示或输入密钥；功能状态由本地 QTrade 服务决定。</p>
+        </div>
+        <div class="deepseek-chat-actions">
+          <span class="control-state" id="deepseekChatState" role="status" aria-live="polite">正在读取状态…</span>
+          <button class="control-button" id="deepseekChatToggle" type="button" aria-expanded="false" aria-controls="deepseekChatBody">展开面板</button>
+        </div>
+      </div>
+      <div class="deepseek-chat-body" id="deepseekChatBody" hidden>
+        <p class="deepseek-chat-notice" id="deepseekChatNotice" role="status" aria-live="polite"></p>
+        <ol class="deepseek-chat-history" id="deepseekChatHistory" aria-label="对话记录"></ol>
+        <div class="deepseek-chat-compose">
+          <label class="deepseek-chat-label" for="deepseekChatInput">发送只读问题
+            <textarea id="deepseekChatInput" maxlength="2000" rows="4" disabled placeholder="功能就绪后输入问题"></textarea>
+          </label>
+          <div class="deepseek-chat-compose-footer">
+            <span class="deepseek-chat-counter" id="deepseekChatCounter" aria-live="polite">0 / 2000</span>
+            <div class="deepseek-chat-buttons">
+              <button class="control-button control-button-primary" id="deepseekChatSend" type="button" disabled>发送</button>
+              <button class="control-button" id="deepseekChatCancel" type="button" disabled hidden>停止等待</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section class="control-grid" aria-label="QTrade 状态卡片">
       <article class="control-card" id="cardSystem">
         <div class="control-card-heading">
