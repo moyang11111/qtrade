@@ -8,6 +8,7 @@ and local integrations, including dynamic path monkeypatching in tests.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from qtrade_adapters.deepseek_harness import config as _config
@@ -29,6 +30,12 @@ DEFAULT_SRC_BASE = _config.DEFAULT_SRC_BASE
 HARNESS_PORT = _config.HARNESS_PORT
 
 
+def _harness_port() -> int:
+    """Resolve the bridge port while retaining façade monkeypatch compatibility."""
+
+    return _config.resolve_harness_port(env=os.environ, default=HARNESS_PORT)
+
+
 def base_dir() -> Path:
     """Return the selected base while honoring façade-level monkeypatches."""
 
@@ -46,7 +53,7 @@ class QtradeDeckHandler(_AdapterQtradeDeckHandler):
             handler,
             base_dir_fn=base_dir,
             prepare_sys_path_fn=_config.prepare_sys_path,
-            harness_port_fn=lambda: HARNESS_PORT,
+            harness_port_fn=_harness_port,
         )
 
 
@@ -74,7 +81,7 @@ def ensure_harness():
     return _runtime.ensure_harness(
         base_dir_fn=base_dir,
         default_src_base=DEFAULT_SRC_BASE,
-        harness_port=HARNESS_PORT,
+        harness_port=_harness_port(),
     )
 
 
