@@ -55,7 +55,7 @@ jobs:
       - name: Verify Windows update lifecycle tests in isolation
         if: runner.os == 'Windows'
         run: >-
-          python -m pytest -q
+          python -m pytest -q --full-trace
           tests/test_daily_update_scheduler.py
           tests/test_manual_update_controls.py
           tests/test_manual_update_lifecycle.py
