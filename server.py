@@ -2782,6 +2782,8 @@ DEEPSEEK_CHAT_SEND_PATH = f"{DEEPSEEK_CHAT_PREFIX}/send"
 DEEPSEEK_CHAT_POLL_PATH = f"{DEEPSEEK_CHAT_PREFIX}/poll"
 DEEPSEEK_CHAT_HISTORY_PATH = f"{DEEPSEEK_CHAT_PREFIX}/history"
 DEEPSEEK_CHAT_CANCEL_PATH = f"{DEEPSEEK_CHAT_PREFIX}/cancel"
+_DEEPSEEK_REJECTION_DRAIN_TIMEOUT_SECONDS = 1.0
+_DEEPSEEK_REJECTION_DRAIN_MAX_BYTES = deepseek_chat_config.MAX_REQUEST_BODY_BYTES * 4
 
 UPDATE_STATUS_PATH = Path(__file__).resolve().parent / "logs" / "daily_update_1830.status.json"
 UPDATE_RUN_PATH = "/api/update/run"
@@ -3606,6 +3608,67 @@ class APIHandler(SimpleHTTPRequestHandler):
             result[key] = value
         return result
 
+    def _declared_deepseek_body_length(self) -> int:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            return 0
+        return max(0, length)
+
+    def _discard_deepseek_body(self, declared_length: int) -> None:
+        """Boundedly consume an already-rejected request before closing it."""
+        if declared_length <= 0:
+            return
+        limit = min(declared_length, _DEEPSEEK_REJECTION_DRAIN_MAX_BYTES)
+        connection = getattr(self, "connection", None)
+        set_timeout = getattr(connection, "settimeout", None)
+        get_timeout = getattr(connection, "gettimeout", None)
+        if not callable(set_timeout) or not callable(get_timeout):
+            return
+        try:
+            original_timeout = get_timeout()
+        except (OSError, ValueError):
+            return
+
+        deadline = time.monotonic() + _DEEPSEEK_REJECTION_DRAIN_TIMEOUT_SECONDS
+        consumed = 0
+        try:
+            while consumed < limit:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    set_timeout(remaining)
+                    chunk = self.rfile.read(min(4096, limit - consumed))
+                except (OSError, TimeoutError, ValueError):
+                    break
+                if not chunk:
+                    break
+                consumed += len(chunk)
+        finally:
+            try:
+                set_timeout(original_timeout)
+            except (OSError, ValueError):
+                pass
+
+    def _deepseek_reject(self, status: int, message: str, *, body_length: int | None = None):
+        """Send a safe terminal rejection, then discard bounded unread body bytes."""
+        self.close_connection = True
+        if body_length is None:
+            body_length = self._declared_deepseek_body_length()
+        try:
+            error = "request_too_large" if status == 413 else "method_not_allowed"
+            self._json(
+                {"error": error, "message": message},
+                status=status,
+                cors=False,
+                no_store=True,
+            )
+            self.wfile.flush()
+        finally:
+            self._discard_deepseek_body(body_length)
+        return None
+
     def _read_deepseek_body(self) -> dict | None:
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
@@ -3626,17 +3689,7 @@ class APIHandler(SimpleHTTPRequestHandler):
             )
             return None
         if length < 0 or length > deepseek_chat_config.MAX_REQUEST_BODY_BYTES:
-            # The oversized body has not been consumed.  Closing this HTTP
-            # connection prevents a client from reusing a socket whose unread
-            # bytes could otherwise be mistaken for the next request (and is
-            # especially important on Windows).
-            self.close_connection = True
-            self._json(
-                {"error": "request_too_large", "message": "request body is too large"},
-                status=413,
-                cors=False,
-            )
-            return None
+            return self._deepseek_reject(413, "request body is too large", body_length=length)
         if length == 0:
             self._json(
                 {"error": "invalid_request", "message": "request body must be an object"},
@@ -3740,11 +3793,7 @@ class APIHandler(SimpleHTTPRequestHandler):
 
     def _deepseek_post(self, path: str):
         if path not in {DEEPSEEK_CHAT_SEND_PATH, DEEPSEEK_CHAT_CANCEL_PATH}:
-            return self._json(
-                {"error": "method_not_allowed", "message": "POST is not supported"},
-                status=405,
-                cors=False,
-            )
+            return self._deepseek_reject(405, "POST is not supported")
         body = self._read_deepseek_body()
         if body is None:
             return
@@ -3800,11 +3849,7 @@ class APIHandler(SimpleHTTPRequestHandler):
         if self._is_factor_library_path(path):
             return self._factor_put(path)
         if self._is_deepseek_chat_path(path):
-            return self._json(
-                {"error": "method_not_allowed", "message": "PUT is not supported"},
-                status=405,
-                cors=False,
-            )
+            return self._deepseek_reject(405, "PUT is not supported")
         self._json({"error": "unsupported method"}, status=405)
 
     def do_DELETE(self):
@@ -3814,11 +3859,7 @@ class APIHandler(SimpleHTTPRequestHandler):
         if self._is_factor_library_path(path):
             return self._factor_delete(path)
         if self._is_deepseek_chat_path(path):
-            return self._json(
-                {"error": "method_not_allowed", "message": "DELETE is not supported"},
-                status=405,
-                cors=False,
-            )
+            return self._deepseek_reject(405, "DELETE is not supported")
         self._json({"error": "unsupported method"}, status=405)
 
     def do_PATCH(self):
@@ -3829,11 +3870,7 @@ class APIHandler(SimpleHTTPRequestHandler):
             self._json({"error": "method_not_allowed", "message": "PATCH is not supported"}, status=405)
             return
         if self._is_deepseek_chat_path(path):
-            return self._json(
-                {"error": "method_not_allowed", "message": "PATCH is not supported"},
-                status=405,
-                cors=False,
-            )
+            return self._deepseek_reject(405, "PATCH is not supported")
         self._json({"error": "unsupported method"}, status=405)
 
     # ---------- 路由 ----------
