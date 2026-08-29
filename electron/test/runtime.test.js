@@ -476,6 +476,18 @@ test('factor library storage is passed separately from the data cache', () => {
   ]);
 });
 
+test('backend arguments pass the server-owned state directory explicitly', () => {
+  const args = runtime.buildServerArguments({
+    python: { args: [] },
+    serverScript: 'server.py',
+    port: 43212,
+    stateDir: 'C:\\Users\\Test\\AppData\\state',
+  });
+  assert.deepEqual(args.slice(-2), [
+    '--state-dir', 'C:\\Users\\Test\\AppData\\state',
+  ]);
+});
+
 test('cleanup is idempotent for repeated callers', async () => {
   let calls = 0;
   const cleanup = runtime.createIdempotentCleanup(async () => {
@@ -504,6 +516,74 @@ test('child cleanup does not issue duplicate kills', async () => {
 
   const stop = runtime.createChildStopper(child);
   await Promise.all([stop(), stop()]);
+  assert.equal(child.killCalls, 1);
+});
+
+test('manual update shutdown uses the fixed local stop endpoint', async () => {
+  const request = new EventEmitter();
+  const observed = { options: null, body: null };
+  request.end = (body) => {
+    observed.body = body;
+    observed.callback({ statusCode: 200, resume() {} });
+  };
+  const result = await runtime.requestManualUpdateStop({
+    host: '127.0.0.1',
+    port: 43213,
+    requestImpl(options, callback) {
+      observed.options = options;
+      observed.callback = callback;
+      return request;
+    },
+  });
+
+  assert.equal(result, true);
+  assert.equal(observed.options.host, '127.0.0.1');
+  assert.equal(observed.options.port, 43213);
+  assert.equal(observed.options.path, '/api/update/run/stop');
+  assert.equal(observed.options.method, 'POST');
+  assert.equal(observed.options.agent, false);
+  assert.equal(observed.body, '{}');
+});
+
+test('backend stop performs the graceful handshake once and carries stateDir', async () => {
+  const child = new EventEmitter();
+  child.exitCode = null;
+  child.signalCode = null;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.killCalls = 0;
+  child.kill = () => {
+    child.killCalls += 1;
+    child.exitCode = 0;
+    child.emit('exit', 0, null);
+    child.emit('close', 0);
+    return true;
+  };
+  let spawnArgs;
+  const shutdowns = [];
+  const running = await runtime.startBackend({
+    paths: runtime.resolveRuntimePaths({ rootOverride: PROJECT_ROOT }),
+    python: { command: 'test-python', args: [] },
+    stateDir: 'C:\\Users\\Test\\AppData\\state',
+    spawnImpl: (command, args) => {
+      spawnArgs = { command, args };
+      return child;
+    },
+    requestHealthImpl: async () => ({
+      ok: true,
+      payload: { status: 'ok', mode: 'csv', symbols: 0 },
+    }),
+    requestShutdownImpl: async (options) => { shutdowns.push(options); },
+    startupTimeoutMs: 100,
+    pollIntervalMs: 1,
+  });
+
+  assert.ok(spawnArgs.args.includes('--state-dir'));
+  assert.equal(spawnArgs.args[spawnArgs.args.indexOf('--state-dir') + 1], 'C:\\Users\\Test\\AppData\\state');
+  await Promise.all([running.stop(), running.stop()]);
+  assert.equal(shutdowns.length, 1);
+  assert.equal(shutdowns[0].port, running.port);
+  assert.equal(shutdowns[0].timeoutMs, 1_500);
   assert.equal(child.killCalls, 1);
 });
 
@@ -544,6 +624,7 @@ test('preload, package resources, and launcher are present and portable', () => 
   const mainSource = fs.readFileSync(path.join(PROJECT_ROOT, 'electron', 'main.js'), 'utf8');
   assert.match(mainSource, /dialog\.showErrorBox/);
   assert.match(mainSource, /slice\(0, 240\)/);
+  assert.match(mainSource, /stateDir: path\.join\(userDataPath, 'state'\)/);
   const adapterEntry = packageJson.build.extraResources.find(
     (entry) => entry.to === 'qtrade/qtrade_adapters'
   );

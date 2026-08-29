@@ -193,6 +193,19 @@ def _install_fake_https(monkeypatch, response):
     monkeypatch.setattr(deepseek_service_module, "HTTPSConnection", _FakeHTTPSConnection)
 
 
+def _local_verified_context(*_args, **_kwargs):
+    """Build the test TLS contract without enumerating the Windows cert store."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    return context
+
+
+@pytest.fixture(autouse=True)
+def _patch_test_tls_context(monkeypatch):
+    monkeypatch.setattr(ssl, "create_default_context", _local_verified_context)
+
+
 def _reply(text="safe reply") -> TransportResponse:
     body = json.dumps(
         {"choices": [{"message": {"role": "assistant", "content": text}}]},
@@ -353,6 +366,8 @@ def test_fixed_transport_controls_stdlib_response_file_after_connection_close(mo
             b"HTTP/1.1 200 OK\r\nConnection: close\r\n"
             b"Content-Length: 2\r\n\r\nok"
         )
+        server_socket.shutdown(socket.SHUT_WR)
+        server_socket.close()
         response = HTTPResponse(client_socket)
         response.begin()
         observed_timeouts = []

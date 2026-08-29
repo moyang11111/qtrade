@@ -25,6 +25,7 @@ import io
 import json
 import time
 import os
+import math
 import socket
 import argparse
 import re
@@ -2787,9 +2788,12 @@ _DEEPSEEK_REJECTION_DRAIN_MAX_BYTES = deepseek_chat_config.MAX_REQUEST_BODY_BYTE
 UPDATE_STATUS_PATH = Path(__file__).resolve().parent / "logs" / "daily_update_1830.status.json"
 UPDATE_RUN_PATH = "/api/update/run"
 UPDATE_RUN_STATUS_PATH = f"{UPDATE_RUN_PATH}/status"
+UPDATE_RUN_STOP_PATH = f"{UPDATE_RUN_PATH}/stop"
+UPDATE_LOG_PATH = UPDATE_STATUS_PATH.with_name("daily_update_1830.log")
+UPDATE_LOCK_PATH = UPDATE_STATUS_PATH.with_name("daily_update_1830.lock")
 MANUAL_UPDATE_MAX_BODY_BYTES = 1024
 MANUAL_UPDATE_CONTROLLER = None
-_UPDATE_STATUS_STATES = frozenset({"running", "skip", "success", "failure"})
+_UPDATE_STATUS_STATES = frozenset({"running", "skip", "success", "failure", "aborted", "timed_out"})
 _UPDATE_STATUS_REASONS = frozenset({
     "started",
     "pipeline_running",
@@ -2807,6 +2811,13 @@ _UPDATE_STATUS_REASONS = frozenset({
     "status_unavailable",
     "update_failed",
     "calendar_unavailable",
+    "aborted",
+    "application_shutdown",
+    "manual_stop",
+    "stale_running",
+    "timeout",
+    "process_timeout",
+    "freshness_capture_failed",
 })
 _UPDATE_STATUS_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _UPDATE_STATUS_TIMESTAMP = re.compile(
@@ -2860,6 +2871,18 @@ _UPDATE_STATUS_FRESHNESS_COUNTS = (
     "pool_count",
     "pitch_count",
 )
+
+
+def configure_update_state_dir(path: str | Path | None) -> Path:
+    """Use a writable server-owned directory for update lifecycle artifacts."""
+
+    global UPDATE_STATUS_PATH, UPDATE_LOG_PATH, UPDATE_LOCK_PATH
+    state_dir = Path(path).expanduser() if path else UPDATE_STATUS_PATH.parent
+    state_dir = state_dir.resolve()
+    UPDATE_STATUS_PATH = state_dir / "daily_update_1830.status.json"
+    UPDATE_LOG_PATH = state_dir / "daily_update_1830.log"
+    UPDATE_LOCK_PATH = state_dir / "daily_update_1830.lock"
+    return state_dir
 
 
 def read_update_status(path: Path | None = None) -> dict:
@@ -2980,14 +3003,23 @@ def get_manual_update_controller():
             base_dir_fn=qtrade_base_bridge.base_dir,
             project_root=Path(__file__).resolve().parent,
             status_file=UPDATE_STATUS_PATH,
+            lock_path=UPDATE_STATUS_PATH.with_name("daily_update_1830.manual.lock"),
+            pipeline_lock_path=UPDATE_LOCK_PATH,
+            log_file=UPDATE_LOG_PATH,
         )
     return MANUAL_UPDATE_CONTROLLER
 
 
-_MANUAL_UPDATE_STATES = frozenset({"idle", "accepted", "running", "success", "skip", "failure"})
+_MANUAL_UPDATE_STATES = frozenset({
+    "idle", "accepted", "running", "success", "skip", "failure", "aborted", "timed_out",
+})
 _MANUAL_UPDATE_REASONS = frozenset({
     "accepted",
     "running",
+    "started",
+    "pipeline_running",
+    "forced",
+    "dry_run",
     "before_cutoff",
     "already_running",
     "already_success",
@@ -3003,8 +3035,31 @@ _MANUAL_UPDATE_REASONS = frozenset({
     "update_failed",
     "status_unavailable",
     "completed",
+    "aborted",
+    "application_shutdown",
+    "manual_stop",
+    "stale_running",
+    "timeout",
+    "process_timeout",
+    "freshness_capture_failed",
 })
 _MANUAL_UPDATE_OUTPUTS = ("portal", "factors", "decision", "sync")
+_MANUAL_UPDATE_STEPS = frozenset({
+    "calendar",
+    "resolve_deck",
+    "freshness",
+    "portal",
+    "portal_freshness",
+    "factors",
+    "factor_freshness",
+    "decision_scan",
+    "decision_pool_freshness",
+    "decision_pitch_v2",
+    "decision_freshness",
+    "sync",
+    "sync_freshness",
+    "pipeline",
+})
 
 
 def _safe_manual_update_payload(payload) -> dict:
@@ -3021,6 +3076,10 @@ def _safe_manual_update_payload(payload) -> dict:
         "outputs": {key: False for key in _MANUAL_UPDATE_OUTPUTS},
         "freshness": {},
         "retry": {"attempt": 0, "max_attempts": 3, "next_attempt_at": None},
+        "step": None,
+        "heartbeat_at": None,
+        "elapsed_seconds": 0.0,
+        "progress": {"completed": 0, "total": 0, "current": None},
     }
     if not isinstance(payload, dict):
         return fallback
@@ -3036,6 +3095,26 @@ def _safe_manual_update_payload(payload) -> dict:
         value = payload.get(key)
         if isinstance(value, str) and _UPDATE_STATUS_TIMESTAMP.fullmatch(value[:32]):
             result[key] = value[:32]
+    heartbeat = payload.get("heartbeat_at")
+    if isinstance(heartbeat, str) and _UPDATE_STATUS_TIMESTAMP.fullmatch(heartbeat[:32]):
+        result["heartbeat_at"] = heartbeat[:32]
+    step = payload.get("step")
+    if isinstance(step, str) and step in _MANUAL_UPDATE_STEPS:
+        result["step"] = step
+    elapsed = payload.get("elapsed_seconds")
+    if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool) and math.isfinite(elapsed) and elapsed >= 0:
+        result["elapsed_seconds"] = min(float(elapsed), 86_400.0)
+    progress = payload.get("progress")
+    if isinstance(progress, dict):
+        completed = progress.get("completed")
+        total = progress.get("total")
+        current = progress.get("current")
+        if isinstance(completed, int) and not isinstance(completed, bool) and completed >= 0:
+            result["progress"]["completed"] = min(completed, 100)
+        if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
+            result["progress"]["total"] = min(total, 100)
+        if isinstance(current, str) and current in _MANUAL_UPDATE_STEPS:
+            result["progress"]["current"] = current
     reason = payload.get("reason")
     if isinstance(reason, str) and reason.startswith("calendar_unavailable:"):
         result["reason"] = "calendar_unavailable"
@@ -3485,6 +3564,16 @@ class APIHandler(SimpleHTTPRequestHandler):
             status = 200
         self._manual_json(payload, status=status)
 
+    def _update_run_stop(self):
+        body = self._read_manual_update_body()
+        if body is None:
+            return
+        try:
+            payload = _safe_manual_update_payload(get_manual_update_controller().stop())
+        except Exception:
+            payload = _safe_manual_update_payload({"state": "failure", "reason": "update_failed"})
+        self._manual_json(payload, status=200)
+
     def _update_run_status(self, query):
         if query:
             return self._manual_json(
@@ -3736,6 +3825,13 @@ class APIHandler(SimpleHTTPRequestHandler):
                     status=400,
                 )
             return self._update_run()
+        if path == UPDATE_RUN_STOP_PATH:
+            if parsed.query:
+                return self._manual_json(
+                    {"error": "unknown_field", "message": "update stop does not accept query fields"},
+                    status=400,
+                )
+            return self._update_run_stop()
         if path == UPDATE_RUN_STATUS_PATH:
             return self._manual_method_not_allowed("GET is required for update status")
         if self._is_factor_library_path(path):
@@ -3748,7 +3844,7 @@ class APIHandler(SimpleHTTPRequestHandler):
 
     def do_PUT(self):
         path = urllib.parse.urlparse(self.path).path
-        if path in {UPDATE_RUN_PATH, UPDATE_RUN_STATUS_PATH}:
+        if path in {UPDATE_RUN_PATH, UPDATE_RUN_STATUS_PATH, UPDATE_RUN_STOP_PATH}:
             return self._manual_method_not_allowed()
         if self._is_factor_library_path(path):
             return self._factor_put(path)
@@ -3758,7 +3854,7 @@ class APIHandler(SimpleHTTPRequestHandler):
 
     def do_DELETE(self):
         path = urllib.parse.urlparse(self.path).path
-        if path in {UPDATE_RUN_PATH, UPDATE_RUN_STATUS_PATH}:
+        if path in {UPDATE_RUN_PATH, UPDATE_RUN_STATUS_PATH, UPDATE_RUN_STOP_PATH}:
             return self._manual_method_not_allowed()
         if self._is_factor_library_path(path):
             return self._factor_delete(path)
@@ -3768,7 +3864,7 @@ class APIHandler(SimpleHTTPRequestHandler):
 
     def do_PATCH(self):
         path = urllib.parse.urlparse(self.path).path
-        if path in {UPDATE_RUN_PATH, UPDATE_RUN_STATUS_PATH}:
+        if path in {UPDATE_RUN_PATH, UPDATE_RUN_STATUS_PATH, UPDATE_RUN_STOP_PATH}:
             return self._manual_method_not_allowed()
         if self._is_factor_library_path(path):
             self._json({"error": "method_not_allowed", "message": "PATCH is not supported"}, status=405)
@@ -3784,6 +3880,8 @@ class APIHandler(SimpleHTTPRequestHandler):
         path, query = parsed.path, urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
         if path == UPDATE_RUN_PATH:
             return self._manual_method_not_allowed("POST is required for update run")
+        if path == UPDATE_RUN_STOP_PATH:
+            return self._manual_method_not_allowed("POST is required for update stop")
         if path == UPDATE_RUN_STATUS_PATH:
             return self._update_run_status(query)
         if self._is_factor_library_path(path):
@@ -3824,7 +3922,7 @@ class APIHandler(SimpleHTTPRequestHandler):
 
     def do_OPTIONS(self):
         path = urllib.parse.urlparse(self.path).path
-        if path in {UPDATE_RUN_PATH, UPDATE_RUN_STATUS_PATH}:
+        if path in {UPDATE_RUN_PATH, UPDATE_RUN_STATUS_PATH, UPDATE_RUN_STOP_PATH}:
             return self._manual_method_not_allowed()
         return self.send_error(501, "Unsupported method")
 
@@ -4082,7 +4180,17 @@ def _ensure_base_harness():
 
 def _maybe_auto_update():
     """Qtrade 启动时自动增量更新（一天最多一次；全量回填完成后才启用）。"""
-    qtrade_base_bridge.maybe_auto_update()
+    # Keep automatic lifecycle artifacts beside the server-owned userData
+    # state, rather than writing caches or logs into packaged resources.
+    environment = dict(os.environ)
+    environment["QTRADE_UPDATE_STATE_DIR"] = str(UPDATE_STATUS_PATH.parent)
+    return update_runtime.maybe_auto_update(
+        base_dir_fn=qtrade_base_bridge.base_dir,
+        env=environment,
+        project_root=Path(__file__).resolve().parent,
+        status_file=UPDATE_STATUS_PATH,
+        log_file=UPDATE_LOG_PATH,
+    )
 
 
 def main():
@@ -4107,10 +4215,16 @@ def main():
         default=None,
         help="因子方案 JSON 存储路径（优先于 QTRADE_FACTOR_LIBRARY_FILE）",
     )
+    parser.add_argument(
+        "--state-dir",
+        default=None,
+        help="QTrade 更新状态与诊断日志目录（由桌面运行时固定传入）",
+    )
     parser.add_argument("--single-instance", action="store_true",
                         help="后台服务模式：端口被占用时直接退出（不换端口），防止重复进程")
     args = parser.parse_args()
 
+    configure_update_state_dir(args.state_dir)
     data_dir = find_data_dir(args.data_dir)
     live = not args.csv_only
     FACTOR_LIBRARY_FILE = resolve_factor_library_path(args.factor_library_file)
@@ -4202,6 +4316,7 @@ def main():
             DEEPSEEK_CHAT_SERVICE.close()
         if MANUAL_UPDATE_CONTROLLER is not None:
             MANUAL_UPDATE_CONTROLLER.stop()
+        update_runtime.stop_auto_update()
 
 
 if __name__ == "__main__":

@@ -382,6 +382,57 @@ function requestHealth({
   });
 }
 
+function requestManualUpdateStop({
+  host = '127.0.0.1',
+  port,
+  timeoutMs = 1_500,
+  requestImpl = http.request,
+} = {}) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(ok);
+    };
+
+    let request;
+    try {
+      request = requestImpl({
+        host,
+        port,
+        path: '/api/update/run/stop',
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          'Content-Length': 2,
+        },
+        agent: false,
+      }, (response) => {
+        if (typeof response.resume === 'function') response.resume();
+        finish(response.statusCode === 200);
+      });
+    } catch {
+      finish(false);
+      return;
+    }
+
+    timer = setTimeout(() => {
+      try { request.destroy(); } catch { /* already closed */ }
+      finish(false);
+    }, timeoutMs);
+    request.on('error', () => finish(false));
+    try {
+      request.end('{}');
+    } catch {
+      finish(false);
+    }
+  });
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -400,7 +451,22 @@ function createIdempotentCleanup(cleanup) {
   };
 }
 
-function createChildStopper(child, { killTimeoutMs = 5_000 } = {}) {
+function terminateChildTree(child) {
+  if (process.platform !== 'win32' || !child || !Number.isInteger(child.pid) || child.pid <= 0) return false;
+  try {
+    spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+      shell: false,
+      windowsHide: true,
+      stdio: 'ignore',
+      timeout: 1_000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function createChildStopper(child, { killTimeoutMs = 5_000, treeKillImpl = terminateChildTree } = {}) {
   return createIdempotentCleanup(() => new Promise((resolve) => {
     if (!child || processHasExited(child)) {
       resolve();
@@ -429,6 +495,7 @@ function createChildStopper(child, { killTimeoutMs = 5_000 } = {}) {
       }
       finish();
     }, killTimeoutMs);
+    try { treeKillImpl(child); } catch { /* fallback to the exact child below */ }
     try {
       child.kill();
     } catch {
@@ -456,6 +523,7 @@ function buildServerArguments({
   port,
   dataDir,
   factorLibraryFile,
+  stateDir,
   csvOnly = false,
 } = {}) {
   const args = [
@@ -473,6 +541,9 @@ function buildServerArguments({
   }
   if (factorLibraryFile) {
     args.push('--factor-library-file', factorLibraryFile);
+  }
+  if (stateDir) {
+    args.push('--state-dir', stateDir);
   }
   if (csvOnly) {
     args.push('--csv-only');
@@ -534,10 +605,13 @@ async function startBackend({
   cwd,
   dataDir,
   factorLibraryFile,
+  stateDir,
   csvOnly = false,
   preferredPort = 0,
   spawnImpl = spawn,
   requestHealthImpl = requestHealth,
+  requestShutdownImpl = requestManualUpdateStop,
+  shutdownTimeoutMs = 1_500,
   startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
 } = {}) {
@@ -553,6 +627,7 @@ async function startBackend({
     port,
     dataDir,
     factorLibraryFile,
+    stateDir,
     csvOnly,
   });
   let child;
@@ -569,7 +644,10 @@ async function startBackend({
   }
 
   captureProcessOutput(child, output);
-  const stop = createChildStopper(child);
+  const stop = createIdempotentCleanup(async () => {
+    await requestShutdownImpl({ port, timeoutMs: shutdownTimeoutMs });
+    await createChildStopper(child)();
+  });
   try {
     await waitForBackend({
       child,
@@ -616,6 +694,7 @@ module.exports = {
   pythonCandidates,
   requiredRuntimeResources,
   requestHealth,
+  requestManualUpdateStop,
   resolveDataDirectory,
   resolveFactorLibraryFile,
   resolveRuntimePaths,

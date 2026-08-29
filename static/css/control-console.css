@@ -162,6 +162,13 @@ h2 {
 .control-update-status[data-state="error"] { color: var(--qt-color-signal); }
 .control-update-status[data-state="good"] { color: var(--qt-color-down); }
 
+.control-update-progress {
+  margin: 6px 0 0;
+  color: var(--qt-text-dim);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
 .control-update-outputs {
   display: flex;
   flex-wrap: wrap;

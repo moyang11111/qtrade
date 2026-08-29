@@ -12,15 +12,20 @@
   const MANUAL_UPDATE_PATH = '/api/update/run';
   const MANUAL_UPDATE_STATUS_PATH = '/api/update/run/status';
   const MANUAL_UPDATE_POLL_MS = 1000;
-  const MANUAL_UPDATE_MAX_WAIT_MS = 2 * 60 * 60 * 1000;
+  // The service may retry three runs of five bounded 7200-second commands,
+  // with two five-minute retry gaps. Keep polling slightly longer so a live
+  // job is never shown as failed merely because the client deadline elapsed.
+  const MANUAL_UPDATE_MAX_WAIT_MS = (3 * 5 * 7200 + 2 * 300 + 60) * 1000;
   const MANUAL_UPDATE_STATES = new Set([
-    'idle', 'accepted', 'running', 'success', 'skip', 'failure',
+    'idle', 'accepted', 'running', 'success', 'skip', 'failure', 'aborted', 'timed_out',
   ]);
   const MANUAL_UPDATE_REASONS = new Set([
     'accepted', 'running', 'before_cutoff', 'already_running', 'already_success',
     'lock_busy', 'calendar_unavailable', 'calendar_cache', 'calendar_cache_closed',
     'calendar_api', 'calendar_api_closed', 'weekend', 'deck_missing', 'step_failed',
-    'update_failed', 'status_unavailable', 'completed',
+    'update_failed', 'status_unavailable', 'completed', 'aborted', 'application_shutdown',
+    'manual_stop', 'stale_running', 'timeout', 'process_timeout',
+    'freshness_capture_failed',
   ]);
   const MANUAL_UPDATE_ERROR_CODES = new Set([
     'before_cutoff', 'already_running', 'lock_busy', 'request_too_large',
@@ -72,6 +77,7 @@
     manualUpdate: document.getElementById('manualUpdateButton'),
     manualUpdateHint: document.getElementById('manualUpdateHint'),
     manualUpdateStatus: document.getElementById('manualUpdateStatus'),
+    manualUpdateProgress: document.getElementById('manualUpdateProgress'),
     manualUpdateOutputs: document.getElementById('manualUpdateOutputs'),
     system: document.getElementById('systemBody'),
     pipeline: document.getElementById('pipelineBody'),
@@ -201,6 +207,9 @@
       completed: '流水线完成', dry_run: '演练状态', pipeline_running: '流水线运行中',
       started: '已启动', calendar_unavailable: '交易日历不可确认', deck_missing: '底座不可用',
       step_failed: '步骤失败', update_failed: '更新失败', status_unavailable: '状态文件不可用',
+      aborted: '已中止', application_shutdown: '应用关闭，更新已中止',
+      manual_stop: '已停止等待', stale_running: '发现过期任务，已安全中止',
+      timeout: '步骤超时', process_timeout: '任务超时',
       weekend: '非交易日', calendar_cache: '使用日历缓存', calendar_cache_closed: '日历显示休市',
       calendar_api: '日历接口确认交易日', calendar_api_closed: '日历接口显示休市',
     }[value] || '状态需核对';
@@ -225,6 +234,8 @@
       success: '已成功',
       skip: '已跳过',
       failure: '失败',
+      aborted: '已中止',
+      timed_out: '已超时',
     }[safeManualState(value)];
   }
 
@@ -247,6 +258,12 @@
       update_failed: '更新失败，请检查数据状态后重试。',
       status_unavailable: '更新状态暂不可用，请稍后重试。',
       completed: '完整流水线已完成。',
+      aborted: '任务已中止，未完成的步骤不会继续。',
+      application_shutdown: '应用正在关闭，任务已安全中止。',
+      manual_stop: '已停止等待，未宣称上游任务已取消。',
+      stale_running: '发现过期任务，已安全中止，可重新检查。',
+      timeout: '步骤超过时限，后续步骤已停止。',
+      process_timeout: '任务超过时限，后续步骤已停止。',
     }[value] || '状态需核对。';
   }
 
@@ -262,6 +279,7 @@
     const code = error && error.code;
     if (code === 'before_cutoff') return '18:30 后可运行。';
     if (code === 'already_running' || code === 'lock_busy') return '已有更新正在运行，请稍候。';
+    if (code === 'timeout' || code === 'process_timeout') return '更新超时，后续步骤已停止。';
     if (code === 'request_too_large' || code === 'unknown_field' || code === 'invalid_request') {
       return '请求格式不受支持。';
     }
@@ -301,6 +319,19 @@
         attempt: Number.isInteger(retry.attempt) && retry.attempt >= 0 ? retry.attempt : 0,
         max_attempts: Number.isInteger(retry.max_attempts) && retry.max_attempts >= 0
           ? retry.max_attempts : 3,
+      },
+      step: typeof payload.step === 'string' && /^[a-z][a-z0-9_]{0,47}$/.test(payload.step)
+        ? payload.step : null,
+      elapsed_seconds: Number.isFinite(payload.elapsed_seconds) && payload.elapsed_seconds >= 0
+        ? Math.min(Number(payload.elapsed_seconds), 86400) : 0,
+      progress: {
+        completed: Number.isInteger(payload.progress?.completed) && payload.progress.completed >= 0
+          ? Math.min(payload.progress.completed, 100) : 0,
+        total: Number.isInteger(payload.progress?.total) && payload.progress.total >= 0
+          ? Math.min(payload.progress.total, 100) : 0,
+        current: typeof payload.progress?.current === 'string'
+          && /^[a-z][a-z0-9_]{0,47}$/.test(payload.progress.current)
+          ? payload.progress.current : null,
       },
     };
     return clean;
@@ -793,6 +824,7 @@
       els.manualUpdate.disabled = true;
       els.manualUpdateStatus.textContent = '手动更新暂不可用，请稍后刷新。';
       els.manualUpdateStatus.dataset.state = 'error';
+      if (els.manualUpdateProgress) els.manualUpdateProgress.textContent = '进度：未确认';
       if (els.manualUpdateOutputs) {
         const labels = { portal: '门户', factors: '因子', decision: '决策', sync: '同步' };
         document.querySelectorAll('[data-update-output]').forEach((node) => {
@@ -808,7 +840,16 @@
     const active = stateValue === 'accepted' || stateValue === 'running';
     els.manualUpdate.disabled = active;
     els.manualUpdateStatus.textContent = `状态：${manualStateLabel(stateValue)} · 目标日期：${payload.trade_date || '未确认'} · ${manualReasonLabel(payload.reason)}`;
-    els.manualUpdateStatus.dataset.state = stateValue === 'success' ? 'good' : stateValue === 'failure' ? 'error' : '';
+    els.manualUpdateStatus.dataset.state = stateValue === 'success' ? 'good'
+      : ['failure', 'aborted', 'timed_out'].includes(stateValue) ? 'error' : '';
+    if (els.manualUpdateProgress) {
+      const progress = payload.progress || {};
+      const current = progress.current ? ` · 当前步骤：${progress.current}` : '';
+      const elapsed = Number.isFinite(payload.elapsed_seconds)
+        ? ` · 已用 ${Math.floor(payload.elapsed_seconds)} 秒` : '';
+      els.manualUpdateProgress.textContent =
+        `进度：${progress.completed || 0}/${progress.total || 0}${current}${elapsed}`;
+    }
     const outputs = asObject(payload.outputs) || {};
     const labels = { portal: '门户', factors: '因子', decision: '决策', sync: '同步' };
     if (els.manualUpdateOutputs) {
@@ -858,6 +899,14 @@
   function scheduleManualUpdatePoll() {
     clearManualUpdatePollTimer();
     if (Date.now() >= state.manual.pollDeadline) {
+      const current = state.manual.value && state.manual.value.state;
+      if (current === 'accepted' || current === 'running') {
+        if (els.manualUpdateStatus) {
+          els.manualUpdateStatus.textContent = '任务仍在运行，状态可通过刷新继续查看。';
+          els.manualUpdateStatus.dataset.state = '';
+        }
+        return;
+      }
       renderManualUpdate({ ok: false, error: new Error('manual update timeout') });
       return;
     }
