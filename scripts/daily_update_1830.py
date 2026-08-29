@@ -8,6 +8,7 @@ fail-fast pipeline. The adapter runtime only decides when to invoke it.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import datetime
 import json
 import os
@@ -240,6 +241,8 @@ def read_status(path: Path) -> dict[str, object] | None:
 def _pid_is_alive(value: object) -> bool:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         return False
+    if os.name == "nt":
+        return _windows_pid_is_alive(value)
     try:
         os.kill(value, 0)
     except PermissionError:
@@ -247,6 +250,54 @@ def _pid_is_alive(value: object) -> bool:
     except (OSError, ProcessLookupError):
         return False
     return True
+
+
+def _windows_pid_is_alive(pid: int) -> bool:
+    """Check a Windows PID without sending a console signal."""
+
+    process_handle = None
+    kernel32 = None
+    try:
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        process_handle = kernel32.OpenProcess(
+            0x00100000 | 0x00001000,
+            False,
+            pid,
+        )
+        if not process_handle:
+            # ERROR_INVALID_PARAMETER means the PID no longer exists. Access
+            # denied and all other inspection failures fail safe as alive.
+            return ctypes.get_last_error() != 87
+
+        wait_result = kernel32.WaitForSingleObject(process_handle, 0)
+        if wait_result == 0:
+            return False
+        if wait_result != 0x00000102:
+            return True
+
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(process_handle, ctypes.byref(exit_code)):
+            return True
+        return exit_code.value == 259
+    except (AttributeError, OSError, TypeError, ValueError, ctypes.ArgumentError):
+        return True
+    finally:
+        if process_handle and kernel32 is not None:
+            try:
+                kernel32.CloseHandle(process_handle)
+            except (AttributeError, OSError, TypeError, ValueError, ctypes.ArgumentError):
+                pass
 
 
 def _status_time(value: object) -> datetime.datetime | None:

@@ -534,6 +534,30 @@ def test_windows_owned_child_process_is_stopped_within_short_bound():
             process.wait(timeout=2)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows PID probe contract")
+def test_windows_pid_probe_does_not_send_console_signal_and_tracks_child():
+    assert update_runtime._pid_is_alive(os.getpid()) is True
+    assert daily_update._pid_is_alive(os.getpid()) is True
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    try:
+        assert update_runtime._pid_is_alive(process.pid) is True
+        assert daily_update._pid_is_alive(process.pid) is True
+        process.terminate()
+        process.wait(timeout=3)
+        assert update_runtime._pid_is_alive(process.pid) is False
+        assert daily_update._pid_is_alive(process.pid) is False
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=2)
+
+
 def test_manual_progress_and_stop_payload_strip_private_fields(tmp_path):
     payload = {
         "state": "running",
