@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from concurrent.futures import Future
 from contextlib import closing
-from http.client import HTTPResponse
+from http.client import HTTPConnection, HTTPResponse
 import json
 from pathlib import Path
 import sqlite3
@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 from types import SimpleNamespace
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
 import pytest
@@ -277,6 +277,21 @@ def _http_json(opener, port, path, method="GET", body=None):
             finally:
                 error.close()
         raise
+
+
+def _loopback_json(port, path, *, method="GET", body=None):
+    connection = HTTPConnection("127.0.0.1", port, timeout=3)
+    try:
+        headers = {} if body is None else {"Content-Type": "application/json"}
+        connection.request(method, path, body=body, headers=headers)
+        response = connection.getresponse()
+        return (
+            response.status,
+            dict(response.headers),
+            json.loads(response.read().decode("utf-8")),
+        )
+    finally:
+        connection.close()
 
 
 def _start_api_server(monkeypatch, service):
@@ -1191,39 +1206,122 @@ def test_server_reports_unconfigured_with_stable_error_and_503(monkeypatch):
 def test_server_rejects_oversized_body_and_wrong_methods(monkeypatch):
     service, _clock, _executor = _make_service(monkeypatch)
     httpd, thread = _start_api_server(monkeypatch, service)
-    opener = build_opener(ProxyHandler({}))
     try:
         port = httpd.server_address[1]
-        status, _headers, body = _http_json(
-            opener,
+        oversized = json.dumps(
+            {"session_id": "x", "text": "x" * config.MAX_REQUEST_BODY_BYTES},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        status, headers, body = _loopback_json(
             port,
             "/api/deepseek-chat/send",
             method="POST",
-            body={"session_id": "x", "text": "x" * config.MAX_REQUEST_BODY_BYTES},
+            body=oversized,
         )
         assert status == 413
         assert body["error"] == "request_too_large"
-        method_status, _method_headers, method_body = _http_json(
-            opener,
-            port,
-            "/api/deepseek-chat/status",
-            method="POST",
-            body={},
-        )
-        assert method_status == 405
-        assert method_body["error"] == "method_not_allowed"
-        for method in ("PUT", "DELETE", "PATCH"):
-            unsupported_status, unsupported_headers, unsupported_body = _http_json(
-                opener,
+        assert headers["Connection"].lower() == "close"
+        assert headers["Cache-Control"] == "no-store"
+        assert "Access-Control-Allow-Origin" not in headers
+
+        for method in ("POST", "PUT", "DELETE", "PATCH"):
+            method_status, method_headers, method_body = _loopback_json(
                 port,
                 "/api/deepseek-chat/status",
                 method=method,
-                body={},
+                body=b"{}",
             )
-            assert unsupported_status == 405
-            assert unsupported_body["error"] == "method_not_allowed"
-            assert "Access-Control-Allow-Origin" not in unsupported_headers
+            assert method_status == 405
+            assert method_body["error"] == "method_not_allowed"
+            assert method_headers["Connection"].lower() == "close"
+            assert method_headers["Cache-Control"] == "no-store"
+            assert "Access-Control-Allow-Origin" not in method_headers
+
+        normal_status, _normal_headers, normal_body = _loopback_json(
+            port,
+            "/api/deepseek-chat/status",
+        )
+        assert normal_status == 200
+        assert normal_body["state"] == "ready"
     finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=3)
+        service.close()
+
+
+def test_rejected_http_error_is_readable_and_closed(monkeypatch):
+    service, _clock, _executor = _make_service(monkeypatch)
+    httpd, thread = _start_api_server(monkeypatch, service)
+    opener = build_opener(ProxyHandler({}))
+    try:
+        oversized = json.dumps(
+            {"session_id": "x", "text": "x" * config.MAX_REQUEST_BODY_BYTES},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        request = Request(
+            f"http://127.0.0.1:{httpd.server_address[1]}/api/deepseek-chat/send",
+            data=oversized,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with pytest.raises(HTTPError) as raised:
+            opener.open(request, timeout=3)
+        error = raised.value
+        try:
+            assert error.code == 413
+            assert error.headers["Connection"].lower() == "close"
+            assert json.loads(error.read().decode("utf-8")) == {
+                "error": "request_too_large",
+                "message": "request body is too large",
+            }
+        finally:
+            error.close()
+
+        status, _headers, body = _loopback_json(
+            httpd.server_address[1],
+            "/api/deepseek-chat/status",
+        )
+        assert status == 200
+        assert body["state"] == "ready"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=3)
+        service.close()
+
+
+def test_slow_incomplete_rejection_closes_within_deadline(monkeypatch):
+    service, _clock, _executor = _make_service(monkeypatch)
+    httpd, thread = _start_api_server(monkeypatch, service)
+    port = httpd.server_address[1]
+    client = socket.create_connection(("127.0.0.1", port), timeout=3)
+    client.settimeout(3)
+    try:
+        request = (
+            b"POST /api/deepseek-chat/send HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: 65536\r\n\r\n"
+            b"{"
+        )
+        started = time.monotonic()
+        client.sendall(request)
+        response = bytearray()
+        while True:
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            response.extend(chunk)
+        elapsed = time.monotonic() - started
+        assert elapsed < 3
+        assert b" 413 " in response
+        assert b'"error": "request_too_large"' in response
+        status, _headers, body = _loopback_json(port, "/api/deepseek-chat/status")
+        assert status == 200
+        assert body["state"] == "ready"
+    finally:
+        client.close()
         httpd.shutdown()
         httpd.server_close()
         thread.join(timeout=3)
