@@ -11,9 +11,14 @@ import argparse
 import datetime
 import json
 import os
+import queue
+import re
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,14 +46,55 @@ DEFAULT_LOCK = ROOT / "logs" / "daily_update_1830.lock"
 DEFAULT_CALENDAR_CACHE = ROOT / "logs" / "cache" / "trading_calendar.json"
 STATUS_SCHEMA_VERSION = 1
 STEP_TIMEOUT_SECONDS = 7200
+HEARTBEAT_INTERVAL_SECONDS = 5.0
+LOG_MAX_BYTES = 256 * 1024
+OBSERVABLE_ENV = "QTRADE_UPDATE_OBSERVABLE"
+STALE_STATUS_SECONDS = 15 * 60
+PIPELINE_STEP_COUNT = 10
 
 
-def log(msg: str) -> None:
-    line = f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {msg}"
+def _redact_log_text(value: object) -> str:
+    """Keep local diagnostics useful without copying secrets or host paths."""
+
+    text = str(value)
+    text = re.sub(
+        r"(?i)(api[_-]?key|authorization|token|secret|password)(\s*[:=]\s*)[^\s,;]+",
+        r"\1\2<redacted>",
+        text,
+    )
+    text = re.sub(r"(?i)\bsk-[a-z0-9_-]{8,}\b", "<redacted>", text)
+    text = re.sub(r"(?i)(?:[a-z]:[\\/]|/(?:users|home|tmp)/)[^\s\"']*", "<path>", text)
+    return text[:2000]
+
+
+def _rotate_log_if_needed() -> None:
+    try:
+        if LOG.exists() and LOG.stat().st_size < LOG_MAX_BYTES:
+            return
+        if LOG.exists():
+            rotated = LOG.with_name(f"{LOG.name}.1")
+            try:
+                rotated.unlink()
+            except FileNotFoundError:
+                pass
+            os.replace(LOG, rotated)
+    except OSError:
+        # A diagnostic log must never prevent the data pipeline from recording
+        # its structured status.
+        return
+
+
+def log(msg: str, *, redact: bool = True) -> None:
+    rendered = _redact_log_text(msg) if redact else str(msg)
+    line = f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {rendered}"
     print(line, flush=True)
-    LOG.parent.mkdir(parents=True, exist_ok=True)
-    with LOG.open("a", encoding="utf-8") as stream:
-        stream.write(line + "\n")
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        _rotate_log_if_needed()
+        with LOG.open("a", encoding="utf-8") as stream:
+            stream.write(line + "\n")
+    except OSError:
+        return
 
 
 def resolve_deck_dir(cli_value=None):
@@ -181,6 +227,70 @@ def read_status(path: Path) -> dict[str, object] | None:
         return None
 
 
+def _pid_is_alive(value: object) -> bool:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return False
+    try:
+        os.kill(value, 0)
+    except PermissionError:
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+    return True
+
+
+def _status_time(value: object) -> datetime.datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _running_status_is_stale(payload: dict[str, object], *, now: datetime.datetime) -> bool:
+    if payload.get("state") != "running":
+        return False
+    heartbeat = _status_time(payload.get("heartbeat_at"))
+    started = _status_time(payload.get("started_at"))
+    reference = heartbeat or started
+    if reference is None:
+        return not _pid_is_alive(payload.get("owner_pid"))
+    age = (now - reference).total_seconds()
+    if age <= STALE_STATUS_SECONDS:
+        return False
+    owner_pid = payload.get("owner_pid")
+    return not _pid_is_alive(owner_pid)
+
+
+def recover_stale_status(
+    status_path: Path,
+    lock_path: Path,
+    *,
+    now: datetime.datetime | None = None,
+) -> dict[str, object] | None:
+    """Mark only an old, ownerless QTrade status as aborted.
+
+    The lock is deliberately never removed here. A live or unknown lease is
+    left untouched and the normal atomic lock path remains authoritative.
+    """
+
+    payload = read_status(status_path)
+    current = datetime.datetime.now() if now is None else now
+    if not payload or Path(lock_path).exists() or not _running_status_is_stale(payload, now=current):
+        return payload
+    values = dict(payload)
+    values.update({
+        "schema_version": STATUS_SCHEMA_VERSION,
+        "state": "aborted",
+        "reason": "stale_running",
+        "finished_at": current.isoformat(timespec="seconds"),
+        "heartbeat_at": current.isoformat(timespec="seconds"),
+    })
+    _atomic_write_json(Path(status_path), values)
+    return values
+
+
 def write_status(path: Path, **values: object) -> None:
     """Atomically publish a structured update status record."""
 
@@ -197,6 +307,11 @@ def write_status(path: Path, **values: object) -> None:
         "freshness": {},
         "output_meta": {},
         "retry": {"attempt": 0, "max_attempts": 3, "next_attempt_at": None},
+        "job_id": None,
+        "owner_pid": None,
+        "heartbeat_at": None,
+        "elapsed_seconds": 0.0,
+        "progress": {"completed": 0, "total": PIPELINE_STEP_COUNT, "current": None},
     }
     required.update(values)
     _atomic_write_json(Path(path), required)
@@ -268,20 +383,158 @@ class CommandResult:
     error: str | None = None
 
 
-def _execute(cmd: list[object], dry: bool, deck_dir: Path | None = None) -> CommandResult:
-    command_text = " ".join(str(value) for value in cmd)
-    log("RUN: " + command_text)
+def _terminate_step_process(process) -> None:
+    """Terminate only the exact process group created for one pipeline step."""
+
+    pid = getattr(process, "pid", None)
+    if os.name == "nt" and isinstance(pid, int) and pid > 0:
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                shell=False,
+                timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        process.terminate()
+    except (AttributeError, OSError):
+        pass
+    try:
+        process.wait(timeout=1)
+        return
+    except (AttributeError, OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        process.kill()
+    except (AttributeError, OSError):
+        pass
+
+
+def _execute_observable(
+    cmd: list[object],
+    *,
+    deck_dir: Path | None,
+    step_name: str,
+    heartbeat: Callable[[], None] | None,
+) -> CommandResult:
+    """Run a manual step with bounded output capture and periodic heartbeats."""
+
+    try:
+        process = subprocess.Popen(
+            [str(value) for value in cmd],
+            cwd=str(deck_dir or DECK),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            shell=False,
+            bufsize=1,
+        )
+    except Exception as error:  # noqa: BLE001 - record a stable step failure
+        log(f"FAIL: {step_name} 启动失败：{type(error).__name__}")
+        return CommandResult(False, None, "launch_failed")
+
+    output_queue: queue.Queue[bytes | None] = queue.Queue()
+    stream = getattr(process, "stdout", None)
+
+    def read_output() -> None:
+        if stream is None or not hasattr(stream, "readline"):
+            output_queue.put(None)
+            return
+        try:
+            while True:
+                chunk = stream.readline()
+                if not chunk:
+                    break
+                output_queue.put(chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8", "replace"))
+        finally:
+            output_queue.put(None)
+
+    reader = threading.Thread(
+        target=read_output,
+        name="qtrade-update-output",
+        daemon=True,
+    )
+    reader.start()
+    deadline = time.monotonic() + STEP_TIMEOUT_SECONDS
+    next_heartbeat = time.monotonic() + HEARTBEAT_INTERVAL_SECONDS
+    finished = False
+    try:
+        while True:
+            try:
+                chunk = output_queue.get(timeout=0.25)
+            except queue.Empty:
+                chunk = None
+            if chunk:
+                text = chunk.decode("utf-8", "replace").strip()
+                if text:
+                    log(f"STEP {step_name}: {text}")
+            returncode = process.poll()
+            now = time.monotonic()
+            if heartbeat is not None and now >= next_heartbeat:
+                heartbeat()
+                next_heartbeat = now + HEARTBEAT_INTERVAL_SECONDS
+            if returncode is not None:
+                finished = True
+                break
+            if now >= deadline:
+                _terminate_step_process(process)
+                log(f"FAIL: {step_name} 超时")
+                return CommandResult(False, None, "timeout")
+    except Exception as error:  # noqa: BLE001 - terminate before returning
+        _terminate_step_process(process)
+        log(f"FAIL: {step_name} 等待失败：{type(error).__name__}")
+        return CommandResult(False, None, "process_error")
+    finally:
+        if not finished and getattr(process, "poll", lambda: None)() is None:
+            _terminate_step_process(process)
+        reader.join(timeout=1)
+
+    returncode = getattr(process, "returncode", None)
+    if returncode is None:
+        returncode = process.poll()
+    returncode = int(returncode or 0)
+    if returncode != 0:
+        log(f"FAIL: {step_name} 返回 {returncode}")
+        return CommandResult(False, returncode, "returncode")
+    return CommandResult(True, 0)
+
+
+def _execute(
+    cmd: list[object],
+    dry: bool,
+    deck_dir: Path | None = None,
+    *,
+    step_name: str | None = None,
+    heartbeat: Callable[[], None] | None = None,
+) -> CommandResult:
+    name = step_name or "pipeline"
+    if dry:
+        # The dry-run is an explicit local planning aid; retain its historical
+        # command preview while real/manual execution logs stay name-only.
+        log("RUN: " + " ".join(str(value) for value in cmd), redact=False)
+    else:
+        log("RUN: " + name)
     if dry:
         return CommandResult(True, 0)
+    if os.environ.get(OBSERVABLE_ENV) == "1":
+        return _execute_observable(
+            cmd,
+            deck_dir=deck_dir,
+            step_name=name,
+            heartbeat=heartbeat,
+        )
     try:
         result = subprocess.run(cmd, cwd=str(deck_dir or DECK), timeout=STEP_TIMEOUT_SECONDS)
     except Exception as error:  # noqa: BLE001 - record and stop the pipeline
-        log(f"FAIL: 步骤执行异常：{command_text}：{error}")
-        return CommandResult(False, None, str(error))
+        log(f"FAIL: 步骤执行异常：{type(error).__name__}（{name}）")
+        return CommandResult(False, None, "process_error")
     returncode = getattr(result, "returncode", 0)
     if returncode != 0:
-        log(f"FAIL: 步骤返回 {returncode}: {command_text}")
-        return CommandResult(False, returncode, f"returncode={returncode}")
+        log(f"FAIL: 步骤返回 {returncode}（{name}）")
+        return CommandResult(False, returncode, "returncode")
     return CommandResult(True, 0)
 
 
@@ -297,7 +550,6 @@ def _step(name: str, group: str, command: list[object]) -> dict[str, object]:
         "group": group,
         "state": "pending",
         "returncode": None,
-        "command": [str(value) for value in command],
     }
 
 
@@ -313,10 +565,21 @@ def _pipeline(
     before_artifacts: freshness.ArtifactSnapshot | None = None,
     portal_baseline: dict[str, object] | None = None,
     freshness_state: dict[str, dict[str, object]] | None = None,
+    job_id: str | None = None,
+    started_monotonic: float | None = None,
+    now_provider: Callable[[], datetime.datetime] | None = None,
 ) -> bool:
     freshness_state = {} if freshness_state is None else freshness_state
+    started_monotonic = time.monotonic() if started_monotonic is None else started_monotonic
+    now_provider = datetime.datetime.now if now_provider is None else now_provider
 
     def publish(step: str | None = None) -> None:
+        completed_steps = sum(
+            entry.get("state") in {"success", "planned"}
+            for entry in steps
+            if isinstance(entry, dict)
+        )
+        heartbeat_at = now_provider().isoformat(timespec="seconds")
         write_status(
             status_path,
             trade_date=target.isoformat(),
@@ -329,12 +592,28 @@ def _pipeline(
             outputs=outputs,
             freshness=freshness_state,
             output_meta=freshness_state,
+            job_id=job_id,
+            owner_pid=os.getpid(),
+            heartbeat_at=heartbeat_at,
+            elapsed_seconds=round(max(0.0, time.monotonic() - started_monotonic), 3),
+            progress={
+                "completed": completed_steps,
+                "total": PIPELINE_STEP_COUNT,
+                "current": step,
+            },
         )
 
     def execute(name: str, group: str, command: list[object]) -> bool:
         entry = _step(name, group, command)
         steps.append(entry)
-        result = _execute(command, dry, deck)
+        publish(name)
+        result = _execute(
+            command,
+            dry,
+            deck,
+            step_name=name,
+            heartbeat=lambda: publish(name),
+        )
         entry["state"] = "planned" if dry else ("success" if result.ok else "failure")
         entry["returncode"] = result.returncode
         if result.error:
@@ -346,12 +625,13 @@ def _pipeline(
         return True
 
     def verify(name: str, group: str, result: dict[str, object]) -> bool:
+        entry = _step(name, group, [])
+        steps.append(entry)
+        publish(name)
         safe_result = {key: value for key, value in result.items() if not key.startswith("_")}
         freshness_state[group] = safe_result
-        entry = _step(name, group, [])
         entry["state"] = "success" if result.get("verified") else "failure"
         entry["reason"] = result.get("reason", "verification_failed")
-        steps.append(entry)
         publish(name)
         if not result.get("verified"):
             log(f"FAIL: {group} 新鲜度校验失败：{result.get('reason', 'unknown')}")
@@ -448,19 +728,28 @@ def main(
     lock_path: Path | None = None,
     now_fn: Callable[[], datetime.datetime] | None = None,
 ):
+    global LOG
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry", "--dry-run", dest="dry", action="store_true", help="只检查日期并列出命令")
     parser.add_argument("--force", action="store_true", help="手动越过交易日历与同日成功检查")
     parser.add_argument("--date", type=_parse_date, help="目标日期 YYYY-MM-DD，默认今天")
     parser.add_argument("--deck-dir", help=f"底座目录（优先于 {DECK_ENV}，默认项目内 third_party 路径）")
     parser.add_argument("--status-file", help="结构化状态 JSON 路径")
+    parser.add_argument("--log-file", help="有界诊断日志路径")
     args = parser.parse_args(argv)
 
     target = args.date or _date_value(today) or datetime.date.today()
+    now_provider = now_fn or datetime.datetime.now
+    if args.log_file:
+        LOG = Path(args.log_file).expanduser()
     status = _status_path(status_file or args.status_file)
     lock = _lock_path(lock_path)
     cache = _calendar_cache_path(cache_path)
     previous = read_status(status)
+    previous = recover_stale_status(status, lock, now=now_provider())
+    if previous and previous.get("state") == "running":
+        log(f"已有更新任务运行中，安全停止本次请求：{target}")
+        return 1
     if (
         not args.force
         and previous
@@ -478,7 +767,7 @@ def main(
             state="skip",
             reason="weekend",
             started_at=None,
-            finished_at=None,
+            finished_at=now_provider().isoformat(timespec="seconds"),
             step=None,
         )
         return 0
@@ -492,7 +781,7 @@ def main(
             state="failure",
             reason="deck_missing",
             started_at=None,
-            finished_at=None,
+            finished_at=now_provider().isoformat(timespec="seconds"),
             step="resolve_deck",
         )
         return 1
@@ -507,13 +796,14 @@ def main(
                     state="skip",
                     reason="lock_busy",
                     started_at=None,
-                    finished_at=None,
+                    finished_at=now_provider().isoformat(timespec="seconds"),
                     step=None,
                 )
             return 1
 
-        now_provider = now_fn or datetime.datetime.now
         started_at = now_provider().isoformat(timespec="seconds")
+        started_monotonic = time.monotonic()
+        job_id = uuid.uuid4().hex
         steps: list[dict[str, object]] = []
         outputs = {"portal": False, "decision": False, "factors": False, "sync": False}
         freshness_state: dict[str, dict[str, object]] = {}
@@ -524,11 +814,16 @@ def main(
             reason="forced" if args.force else "started",
             started_at=started_at,
             finished_at=None,
-            step=None,
+            step="calendar",
             steps=steps,
             outputs=outputs,
             freshness=freshness_state,
             output_meta=freshness_state,
+            job_id=job_id,
+            owner_pid=os.getpid(),
+            heartbeat_at=started_at,
+            elapsed_seconds=0.0,
+            progress={"completed": 0, "total": PIPELINE_STEP_COUNT, "current": "calendar"},
         )
 
         if args.force:
@@ -551,6 +846,11 @@ def main(
                 step="calendar",
                 steps=steps,
                 outputs=outputs,
+                job_id=job_id,
+                owner_pid=os.getpid(),
+                heartbeat_at=now_provider().isoformat(timespec="seconds"),
+                elapsed_seconds=round(max(0.0, time.monotonic() - started_monotonic), 3),
+                progress={"completed": 0, "total": PIPELINE_STEP_COUNT, "current": "calendar"},
             )
             return 1
         if not calendar_state:
@@ -565,6 +865,11 @@ def main(
                 step="calendar",
                 steps=steps,
                 outputs=outputs,
+                job_id=job_id,
+                owner_pid=os.getpid(),
+                heartbeat_at=now_provider().isoformat(timespec="seconds"),
+                elapsed_seconds=round(max(0.0, time.monotonic() - started_monotonic), 3),
+                progress={"completed": 0, "total": PIPELINE_STEP_COUNT, "current": "calendar"},
             )
             return 0
 
@@ -581,8 +886,32 @@ def main(
                 step="freshness",
                 steps=steps,
                 outputs=outputs,
+                job_id=job_id,
+                owner_pid=os.getpid(),
+                heartbeat_at=now_provider().isoformat(timespec="seconds"),
+                elapsed_seconds=round(max(0.0, time.monotonic() - started_monotonic), 3),
+                progress={"completed": 0, "total": PIPELINE_STEP_COUNT, "current": "freshness"},
             )
             return 1
+        if not args.dry:
+            write_status(
+                status,
+                trade_date=target.isoformat(),
+                state="running",
+                reason="pipeline_running",
+                started_at=started_at,
+                finished_at=None,
+                step="freshness",
+                steps=steps,
+                outputs=outputs,
+                freshness=freshness_state,
+                output_meta=freshness_state,
+                job_id=job_id,
+                owner_pid=os.getpid(),
+                heartbeat_at=now_provider().isoformat(timespec="seconds"),
+                elapsed_seconds=round(max(0.0, time.monotonic() - started_monotonic), 3),
+                progress={"completed": 0, "total": PIPELINE_STEP_COUNT, "current": "freshness"},
+            )
         before_artifacts = freshness.capture_artifacts(deck) if freshness is not None else None
         portal_baseline = freshness.capture_portal_baseline(deck) if freshness is not None else None
         try:
@@ -597,19 +926,32 @@ def main(
                 before_artifacts=before_artifacts,
                 portal_baseline=portal_baseline,
                 freshness_state=freshness_state,
+                job_id=job_id,
+                started_monotonic=started_monotonic,
+                now_provider=now_provider,
             )
-        except Exception as error:  # noqa: BLE001 - status must record unexpected failures
-            log(f"FAIL: 更新流程异常：{error}")
+        except KeyboardInterrupt:
+            log("FAIL: 更新流程被中断")
             completed = False
             if not steps or steps[-1].get("state") != "failure":
-                steps.append({"name": "pipeline", "state": "failure", "error": str(error)})
+                steps.append({"name": "pipeline", "state": "failure", "error": "interrupted"})
+        except Exception as error:  # noqa: BLE001 - status must record unexpected failures
+            log(f"FAIL: 更新流程异常：{type(error).__name__}")
+            completed = False
+            if not steps or steps[-1].get("state") != "failure":
+                steps.append({"name": "pipeline", "state": "failure", "error": "process_error"})
 
         if not completed:
+            failure_reason = "step_failed"
+            if steps and steps[-1].get("error") == "timeout":
+                failure_reason = "timeout"
+            elif steps and steps[-1].get("error") == "interrupted":
+                failure_reason = "aborted"
             write_status(
                 status,
                 trade_date=target.isoformat(),
                 state="failure",
-                reason="step_failed",
+                reason=failure_reason,
                 started_at=started_at,
                 finished_at=now_provider().isoformat(timespec="seconds"),
                 step=steps[-1].get("name") if steps else "pipeline",
@@ -617,6 +959,15 @@ def main(
                 outputs=outputs,
                 freshness=freshness_state,
                 output_meta=freshness_state,
+                job_id=job_id,
+                owner_pid=os.getpid(),
+                heartbeat_at=now_provider().isoformat(timespec="seconds"),
+                elapsed_seconds=round(max(0.0, time.monotonic() - started_monotonic), 3),
+                progress={
+                    "completed": sum(entry.get("state") == "success" for entry in steps),
+                    "total": PIPELINE_STEP_COUNT,
+                    "current": steps[-1].get("name") if steps else "pipeline",
+                },
             )
             return 1
 
@@ -634,6 +985,11 @@ def main(
             outputs=outputs,
             freshness=freshness_state,
             output_meta=freshness_state,
+            job_id=job_id,
+            owner_pid=os.getpid(),
+            heartbeat_at=now_provider().isoformat(timespec="seconds"),
+            elapsed_seconds=round(max(0.0, time.monotonic() - started_monotonic), 3),
+            progress={"completed": PIPELINE_STEP_COUNT, "total": PIPELINE_STEP_COUNT, "current": None},
         )
         return 0
 

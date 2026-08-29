@@ -115,6 +115,7 @@ async function bootstrap() {
     cwd: userDataPath,
     dataDir,
     factorLibraryFile: resolveFactorLibraryFile(userDataPath),
+    stateDir: path.join(userDataPath, 'state'),
     csvOnly: process.env.QTRADE_ELECTRON_CSV_ONLY === '1',
     preferredPort: requestedPort(process.env),
   });

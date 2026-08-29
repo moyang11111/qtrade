@@ -281,8 +281,8 @@ def test_manual_controller_stop_interrupts_only_its_child_and_discards_late_resu
     assert not worker.is_alive()
     assert processes.process.terminated.is_set()
     assert not (tmp_path / "manual.lock").exists()
-    assert controller.status()["state"] == "failure"
-    assert controller.status()["reason"] == "update_failed"
+    assert controller.status()["state"] == "aborted"
+    assert controller.status()["reason"] == "application_shutdown"
 
 
 def test_manual_controller_discards_late_completion_after_stop(tmp_path):
@@ -307,13 +307,13 @@ def test_manual_controller_discards_late_completion_after_stop(tmp_path):
 
     controller.stop(timeout=0.01)
     assert worker.is_alive()
-    assert controller.status()["state"] == "failure"
+    assert controller.status()["state"] == "aborted"
 
     release.set()
     worker.join(timeout=1)
     assert not worker.is_alive()
     assert status.exists()
-    assert controller.status()["state"] == "failure"
+    assert controller.status()["state"] == "aborted"
     assert not lock.exists()
 
 
@@ -432,6 +432,7 @@ class _Probe:
     _reject_duplicate_json_pairs = staticmethod(server.APIHandler._reject_duplicate_json_pairs)
     _read_manual_update_body = server.APIHandler._read_manual_update_body
     _update_run = server.APIHandler._update_run
+    _update_run_stop = server.APIHandler._update_run_stop
     _update_run_status = server.APIHandler._update_run_status
 
     def __init__(self, body=b"", headers=None, path=""):
@@ -512,7 +513,35 @@ def test_manual_update_api_returns_safe_state_and_fixed_status_codes(monkeypatch
     assert _probe_json(status_probe)["state"] == "accepted"
 
 
-@pytest.mark.parametrize("path", [server.UPDATE_RUN_PATH, server.UPDATE_RUN_STATUS_PATH])
+def test_manual_update_stop_is_fixed_json_and_no_store(monkeypatch):
+    class FakeController:
+        def stop(self):
+            return {
+                "state": "aborted",
+                "reason": "application_shutdown",
+                "command": "private command",
+            }
+
+    monkeypatch.setattr(server, "get_manual_update_controller", lambda: FakeController())
+    probe = _Probe(
+        b"{}",
+        {"Content-Type": "application/json", "Content-Length": "2"},
+    )
+    probe._update_run_stop()
+
+    assert probe.responses[0]["status"] == 200
+    assert probe.responses[0]["Cache-Control"] == "no-store"
+    assert "Access-Control-Allow-Origin" not in probe.responses[0]
+    payload = _probe_json(probe)
+    assert payload["state"] == "aborted"
+    assert payload["reason"] == "application_shutdown"
+    assert "command" not in payload
+
+
+@pytest.mark.parametrize(
+    "path",
+    [server.UPDATE_RUN_PATH, server.UPDATE_RUN_STATUS_PATH, server.UPDATE_RUN_STOP_PATH],
+)
 @pytest.mark.parametrize("method", ["do_PUT", "do_DELETE", "do_PATCH", "do_OPTIONS"])
 def test_manual_update_methods_are_no_store_and_not_cors(path, method):
     probe = _Probe(path=path)
@@ -526,6 +555,16 @@ def test_manual_update_methods_are_no_store_and_not_cors(path, method):
 
 def test_manual_update_run_get_is_method_not_allowed():
     probe = _Probe(path=server.UPDATE_RUN_PATH)
+
+    server.APIHandler.do_GET(probe)
+
+    assert probe.responses[0]["status"] == 405
+    assert probe.responses[0]["Cache-Control"] == "no-store"
+    assert "Access-Control-Allow-Origin" not in probe.responses[0]
+
+
+def test_manual_update_stop_get_is_method_not_allowed():
+    probe = _Probe(path=server.UPDATE_RUN_STOP_PATH)
 
     server.APIHandler.do_GET(probe)
 
@@ -619,7 +658,8 @@ def test_manual_update_dom_flow_uses_fixed_payload_and_safe_states():
 
         const ids = [
           'controlState', 'controlNotice', 'controlRefresh', 'controlCopy',
-          'manualUpdateButton', 'manualUpdateHint', 'manualUpdateStatus', 'manualUpdateOutputs',
+          'manualUpdateButton', 'manualUpdateHint', 'manualUpdateStatus', 'manualUpdateProgress',
+          'manualUpdateOutputs',
           'systemBody', 'pipelineBody', 'universeBody', 'opportunityBody',
           'factorBody', 'harnessBody', 'deepseekChatPanel', 'deepseekChatBody',
           'deepseekChatState', 'deepseekChatToggle', 'deepseekChatNotice',
