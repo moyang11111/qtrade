@@ -759,6 +759,29 @@ def main(
         log(f"今天 {target} 已成功更新，跳过重复执行")
         return 0
 
+    deck = resolve_deck_dir(args.deck_dir)
+    # A real run must fail early when the fixed pipeline entry points are not
+    # present.  Dry-run remains a planning aid and may list the intended
+    # commands for an otherwise incomplete fixture.
+    if not args.dry and deck.exists() and (args.deck_dir or os.environ.get(DECK_ENV)):
+        required_scripts = (
+            "auto_update_daily.py",
+            "build_factor_pool_engine.py",
+            "sync_data_to_roaming.py",
+        )
+        if any(not (deck / "scripts" / name).is_file() for name in required_scripts):
+            log("FAIL: 底座运行脚本不完整，安全停止")
+            write_status(
+                status,
+                trade_date=target.isoformat(),
+                state="failure",
+                reason="deck_missing",
+                started_at=None,
+                finished_at=now_provider().isoformat(timespec="seconds"),
+                step="resolve_deck",
+            )
+            return 1
+
     if target.weekday() >= 5 and not args.force:
         log(f"今天 {target} 是周末，跳过自动更新")
         write_status(
@@ -772,7 +795,6 @@ def main(
         )
         return 0
 
-    deck = resolve_deck_dir(args.deck_dir)
     if not deck.exists():
         log(f"FAIL: 底座不存在 {deck}")
         write_status(
