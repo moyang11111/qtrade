@@ -248,8 +248,17 @@ def test_batch_launcher_runs_under_cmd_and_fails_safely(tmp_path):
     fake_python_dir.mkdir(parents=True)
 
     batch_src = repo_root / "scripts" / "daily_update_1830.bat"
-    shutil.copyfile(batch_src, scripts_dir / batch_src.name)
+    batch_path = scripts_dir / batch_src.name
+    shutil.copyfile(batch_src, batch_path)
     shutil.copyfile(repo_root / "scripts" / "daily_update_1830.py", scripts_dir / "daily_update_1830.py")
+
+    # Pin the temporary launcher fixture to a known weekday.  The production
+    # batch remains unchanged; this keeps the CMD integration assertion
+    # independent of the calendar date on which the test runs.
+    batch_bytes = batch_path.read_bytes()
+    command_marker = b'"%PYTHON_EXE%" %PYTHON_ARGS% -X utf8 "%SCRIPT_DIR%daily_update_1830.py"'
+    assert command_marker in batch_bytes
+    batch_path.write_bytes(batch_bytes.replace(command_marker, command_marker + b" --date 2026-08-28", 1))
 
     # Put a runnable copy only in the user-level install pattern; PATH has no Python.
     runtime_exe = Path(sys.executable)
@@ -269,7 +278,6 @@ def test_batch_launcher_runs_under_cmd_and_fails_safely(tmp_path):
         env["PYTHONHOME"] = sys.prefix
     system_root = Path(env.get("SystemRoot", r"C:\Windows"))
     env["PATH"] = str(system_root / "System32")
-    batch_path = scripts_dir / batch_src.name
     cmd = env.get("ComSpec", str(system_root / "System32" / "cmd.exe"))
     result = subprocess.run(
         [cmd, "/d", "/c", str(batch_path)],
