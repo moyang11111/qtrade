@@ -201,6 +201,11 @@ def _local_verified_context(*_args, **_kwargs):
     return context
 
 
+@pytest.fixture(autouse=True)
+def _patch_test_tls_context(monkeypatch):
+    monkeypatch.setattr(ssl, "create_default_context", _local_verified_context)
+
+
 def _reply(text="safe reply") -> TransportResponse:
     body = json.dumps(
         {"choices": [{"message": {"role": "assistant", "content": text}}]},
@@ -330,7 +335,6 @@ def _post_with_transport():
 def test_fixed_transport_is_verified_direct_https_without_proxy_or_redirect(monkeypatch):
     response = _FakeResponse([b'{"ok":', b"true}", b""], status=302)
     _install_fake_https(monkeypatch, response)
-    monkeypatch.setattr(ssl, "create_default_context", _local_verified_context)
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
 
@@ -362,6 +366,8 @@ def test_fixed_transport_controls_stdlib_response_file_after_connection_close(mo
             b"HTTP/1.1 200 OK\r\nConnection: close\r\n"
             b"Content-Length: 2\r\n\r\nok"
         )
+        server_socket.shutdown(socket.SHUT_WR)
+        server_socket.close()
         response = HTTPResponse(client_socket)
         response.begin()
         observed_timeouts = []
