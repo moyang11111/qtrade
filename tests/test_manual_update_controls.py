@@ -293,6 +293,9 @@ def test_manual_controller_discards_late_completion_after_stop(tmp_path):
         started.set()
         release.wait(timeout=2)
         _write_status(kwargs["status_file"], run_date, "success")
+        payload = json.loads(kwargs["status_file"].read_text(encoding="utf-8"))
+        payload["job_id"] = kwargs["job_id"]
+        kwargs["status_file"].write_text(json.dumps(payload), encoding="utf-8")
         return 0
 
     controller, status, lock = _controller(
@@ -314,6 +317,7 @@ def test_manual_controller_discards_late_completion_after_stop(tmp_path):
     assert not worker.is_alive()
     assert status.exists()
     assert controller.status()["state"] == "aborted"
+    assert json.loads(status.read_text(encoding="utf-8"))["state"] == "aborted"
     assert not lock.exists()
 
 
@@ -782,6 +786,8 @@ def test_control_manual_update_contract_has_no_dynamic_command_or_force_input():
     source = CONTROL_JS.read_text(encoding="utf-8")
     assert "body: JSON.stringify({})" in source
     assert "MANUAL_UPDATE_PATH = '/api/update/run'" in source
+    assert "(3 * 5 * 7200 + 2 * 300 + 60) * 1000" in source
+    assert "任务仍在运行，状态可通过刷新继续查看。" in source
     assert '"force"' not in source
     assert "operation:" not in source
     assert '"operation"' not in source

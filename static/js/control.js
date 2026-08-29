@@ -12,7 +12,10 @@
   const MANUAL_UPDATE_PATH = '/api/update/run';
   const MANUAL_UPDATE_STATUS_PATH = '/api/update/run/status';
   const MANUAL_UPDATE_POLL_MS = 1000;
-  const MANUAL_UPDATE_MAX_WAIT_MS = 2 * 60 * 60 * 1000;
+  // The service may retry three runs of five bounded 7200-second commands,
+  // with two five-minute retry gaps. Keep polling slightly longer so a live
+  // job is never shown as failed merely because the client deadline elapsed.
+  const MANUAL_UPDATE_MAX_WAIT_MS = (3 * 5 * 7200 + 2 * 300 + 60) * 1000;
   const MANUAL_UPDATE_STATES = new Set([
     'idle', 'accepted', 'running', 'success', 'skip', 'failure', 'aborted', 'timed_out',
   ]);
@@ -22,6 +25,7 @@
     'calendar_api', 'calendar_api_closed', 'weekend', 'deck_missing', 'step_failed',
     'update_failed', 'status_unavailable', 'completed', 'aborted', 'application_shutdown',
     'manual_stop', 'stale_running', 'timeout', 'process_timeout',
+    'freshness_capture_failed',
   ]);
   const MANUAL_UPDATE_ERROR_CODES = new Set([
     'before_cutoff', 'already_running', 'lock_busy', 'request_too_large',
@@ -895,6 +899,14 @@
   function scheduleManualUpdatePoll() {
     clearManualUpdatePollTimer();
     if (Date.now() >= state.manual.pollDeadline) {
+      const current = state.manual.value && state.manual.value.state;
+      if (current === 'accepted' || current === 'running') {
+        if (els.manualUpdateStatus) {
+          els.manualUpdateStatus.textContent = '任务仍在运行，状态可通过刷新继续查看。';
+          els.manualUpdateStatus.dataset.state = '';
+        }
+        return;
+      }
       renderManualUpdate({ ok: false, error: new Error('manual update timeout') });
       return;
     }

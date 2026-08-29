@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +24,56 @@ class FakeProcesses:
         self.calls.append((command, kwargs))
         code = self.returncodes.pop(0) if self.returncodes else 0
         return SimpleNamespace(returncode=code)
+
+
+class BlockingAutoProcess:
+    def __init__(self):
+        self.pid = 93001
+        self.returncode = None
+        self.started = threading.Event()
+        self.terminated = threading.Event()
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if self.returncode is None:
+            if self.terminated.is_set():
+                self.returncode = -15
+                return self.returncode
+            raise subprocess.TimeoutExpired(["daily_update_1830.py"], timeout)
+        return self.returncode
+
+    def terminate(self):
+        self.terminated.set()
+
+    def kill(self):
+        self.terminated.set()
+        self.returncode = -9
+
+
+class BlockingAutoProcesses:
+    PIPE = object()
+    STDOUT = object()
+    CREATE_NEW_PROCESS_GROUP = 0
+    CREATE_NO_WINDOW = 0
+
+    def __init__(self):
+        self.process = BlockingAutoProcess()
+        self.calls = []
+
+    def Popen(self, command, **kwargs):
+        self.calls.append((command, kwargs))
+        self.process.started.set()
+        return self.process
+
+
+class FailingAutoProcesses:
+    PIPE = object()
+    STDOUT = object()
+
+    def Popen(self, _command, **_kwargs):
+        raise OSError("private path")
 
 
 def _configure_daily(monkeypatch, tmp_path, deck=None):
@@ -337,6 +388,109 @@ def test_failure_stops_following_steps_and_records_exit_code(tmp_path, monkeypat
     assert payload["outputs"]["factors"] is False
 
 
+@pytest.mark.parametrize(
+    ("capture_name", "error_type"),
+    [("capture_artifacts", OSError), ("capture_portal_baseline", RuntimeError)],
+)
+def test_freshness_capture_exception_writes_terminal_status_and_releases_lock(
+    tmp_path, monkeypatch, capture_name, error_type
+):
+    _configure_daily(monkeypatch, tmp_path)
+    target = dt.date(2026, 8, 28)
+    status = tmp_path / "state" / "status.json"
+    lock = tmp_path / "state" / "daily.lock"
+    processes = FakeProcesses()
+    monkeypatch.setattr(daily_update.subprocess, "run", processes.run)
+
+    def raise_capture(_deck):
+        raise error_type("private capture path")
+
+    monkeypatch.setattr(daily_update.freshness, capture_name, raise_capture)
+    if capture_name == "capture_portal_baseline":
+        monkeypatch.setattr(
+            daily_update.freshness,
+            "capture_artifacts",
+            lambda _deck: daily_update.freshness.ArtifactSnapshot({}),
+        )
+
+    result = daily_update.main(
+        ["--force", "--status-file", str(status)],
+        today=target,
+        lock_path=lock,
+    )
+
+    payload = json.loads(status.read_text(encoding="utf-8"))
+    assert result == 1
+    assert processes.calls == []
+    assert payload["state"] == "failure"
+    assert payload["reason"] == "freshness_capture_failed"
+    assert payload["finished_at"]
+    assert not lock.exists()
+    assert "private capture path" not in json.dumps(payload)
+
+
+def test_explicit_incomplete_deck_is_weekend_skip_but_weekday_failure(tmp_path, monkeypatch):
+    deck = tmp_path / "incomplete-deck"
+    deck.mkdir()
+    processes = FakeProcesses()
+    monkeypatch.setattr(daily_update.subprocess, "run", processes.run)
+
+    weekend_status = tmp_path / "weekend.json"
+    weekend = daily_update.main(
+        ["--deck-dir", str(deck), "--status-file", str(weekend_status)],
+        today=dt.date(2026, 8, 29),
+    )
+    assert weekend == 0
+    weekend_payload = json.loads(weekend_status.read_text(encoding="utf-8"))
+    assert weekend_payload["state"] == "skip"
+    assert weekend_payload["reason"] == "weekend"
+    assert processes.calls == []
+
+    weekday_status = tmp_path / "weekday.json"
+    weekday = daily_update.main(
+        ["--deck-dir", str(deck), "--status-file", str(weekday_status)],
+        today=dt.date(2026, 8, 28),
+        calendar_loader=_calendar(dt.date(2026, 8, 28)),
+    )
+    assert weekday == 1
+    weekday_payload = json.loads(weekday_status.read_text(encoding="utf-8"))
+    assert weekday_payload["state"] == "failure"
+    assert weekday_payload["reason"] == "deck_missing"
+    assert weekday_payload["finished_at"]
+    assert processes.calls == []
+
+
+def test_stale_recovery_never_reclaims_legacy_source_tree_lock(tmp_path, monkeypatch):
+    package_root = tmp_path / "package"
+    legacy_logs = package_root / "logs"
+    legacy_logs.mkdir(parents=True)
+    monkeypatch.setattr(daily_update, "ROOT", package_root)
+    monkeypatch.setattr(daily_update, "_pid_is_alive", lambda _pid: False)
+    status = tmp_path / "user-data" / "status.json"
+    status.parent.mkdir()
+    status.write_text(
+        json.dumps(
+            {
+                "state": "running",
+                "owner_pid": 93002,
+                "heartbeat_at": "2026-08-28T10:00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    lock = legacy_logs / "daily_update_1830.lock"
+    lock.write_text("pid=93002\n", encoding="ascii")
+
+    result = daily_update.recover_stale_status(
+        status,
+        lock,
+        now=dt.datetime(2026, 8, 28, 11, 0),
+    )
+
+    assert result["state"] == "running"
+    assert lock.exists()
+
+
 def test_scheduler_waits_until_cutoff_then_runs_once_after_failure():
     calls = []
     scheduler = runtime.DailyUpdateScheduler(lambda date: calls.append(date) or 1)
@@ -426,6 +580,25 @@ def test_run_daily_update_uses_argv_and_explicit_deck_environment(tmp_path):
     assert kwargs.get("shell", False) is False
 
 
+def test_interruptible_start_failure_persists_terminal_status(tmp_path):
+    status = tmp_path / "state" / "status.json"
+    result = runtime.run_daily_update(
+        tmp_path / "deck",
+        dt.date(2026, 8, 28),
+        subprocess_module=FailingAutoProcesses(),
+        project_root=tmp_path / "qtrade",
+        status_file=status,
+        interruptible=True,
+    )
+
+    payload = json.loads(status.read_text(encoding="utf-8"))
+    assert result == 1
+    assert payload["state"] == "failure"
+    assert payload["reason"] == "update_failed"
+    assert payload["finished_at"]
+    assert "private path" not in json.dumps(payload)
+
+
 def test_maybe_auto_update_is_singleton_and_can_stop(tmp_path):
     runtime.stop_auto_update()
     processes = FakeProcesses()
@@ -435,18 +608,103 @@ def test_maybe_auto_update_is_singleton_and_can_stop(tmp_path):
             env={},
             subprocess_module=processes,
             project_root=tmp_path,
+            clock=lambda: dt.datetime(2026, 8, 28, 18, 29),
         )
         second = runtime.maybe_auto_update(
             base_dir_fn=lambda: tmp_path,
             env={},
             subprocess_module=processes,
             project_root=tmp_path,
+            clock=lambda: dt.datetime(2026, 8, 28, 18, 29),
         )
         assert first is second
         assert first is not None
     finally:
         runtime.stop_auto_update()
     assert runtime._AUTO_UPDATE_THREAD is None
+
+
+def test_auto_scheduler_uses_user_state_root_and_stops_owned_child(tmp_path):
+    runtime.stop_auto_update()
+    processes = BlockingAutoProcesses()
+    state_root = tmp_path / "user-data" / "qtrade-state"
+    before = dt.datetime(2026, 8, 28, 18, 29)
+    due = dt.datetime(2026, 8, 28, 18, 30)
+    scheduler = runtime.maybe_auto_update(
+        base_dir_fn=lambda: tmp_path / "deck",
+        env={"QTRADE_UPDATE_STATE_DIR": str(state_root)},
+        subprocess_module=processes,
+        project_root=tmp_path / "qtrade",
+        python_executable="stable-python",
+        clock=lambda: before,
+    )
+    assert scheduler is not None
+    pending = threading.Thread(target=scheduler.run_pending, args=(due,))
+    pending.start()
+    assert processes.process.started.wait(timeout=1)
+    command, kwargs = processes.calls[0]
+    assert command[command.index("--status-file") + 1] == str(
+        state_root / "daily_update_1830.status.json"
+    )
+    assert command[command.index("--log-file") + 1] == str(
+        state_root / "daily_update_1830.log"
+    )
+    assert kwargs["env"]["QTRADE_UPDATE_STATE_DIR"] == str(state_root)
+    assert kwargs["shell"] is False
+
+    runtime.stop_auto_update(timeout=1)
+    pending.join(timeout=1)
+    assert not pending.is_alive()
+    assert processes.process.terminated.is_set()
+    status = state_root / "daily_update_1830.status.json"
+    assert json.loads(status.read_text(encoding="utf-8"))["state"] == "aborted"
+    assert not (state_root / "daily_update_1830.manual.lock").exists()
+    assert runtime._AUTO_UPDATE_THREAD is None
+
+
+def test_manual_and_auto_share_single_flight_lease(tmp_path):
+    runtime.stop_auto_update()
+    state_root = tmp_path / "user-data" / "qtrade-state"
+    shared_lock = state_root / "daily_update_1830.manual.lock"
+    target_time = dt.datetime(2026, 8, 28, 18, 31)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_run(*_args, **_kwargs):
+        entered.set()
+        release.wait(timeout=2)
+        return 0
+
+    manual = runtime.ManualUpdateController(
+        base_dir_fn=lambda: tmp_path / "deck",
+        project_root=tmp_path / "qtrade",
+        status_file=state_root / "daily_update_1830.status.json",
+        lock_path=shared_lock,
+        pipeline_lock_path=state_root / "daily_update_1830.lock",
+        clock=lambda: target_time,
+        run_fn=blocking_run,
+    )
+    scheduler = runtime.maybe_auto_update(
+        base_dir_fn=lambda: tmp_path / "deck",
+        env={"QTRADE_UPDATE_STATE_DIR": str(state_root)},
+        subprocess_module=BlockingAutoProcesses(),
+        project_root=tmp_path / "qtrade",
+        clock=lambda: dt.datetime(2026, 8, 28, 18, 29),
+    )
+    assert scheduler is not None
+    try:
+        assert manual.start(now=target_time)["state"] == "accepted"
+        assert entered.wait(timeout=1)
+        assert scheduler.run_pending(target_time) == 1
+        assert scheduler.last_result == 1
+    finally:
+        release.set()
+        worker = manual._worker
+        if worker is not None:
+            worker.join(timeout=1)
+        manual.stop(timeout=1)
+        runtime.stop_auto_update(timeout=1)
+    assert not shared_lock.exists()
 
 
 def test_no_auto_update_disables_scheduler(tmp_path):

@@ -5,8 +5,10 @@ from __future__ import annotations
 import datetime as dt
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -237,6 +239,39 @@ def test_manual_controller_stop_is_bounded_and_output_is_not_devnull(tmp_path):
     assert second["reason"] == "application_shutdown"
 
 
+def test_manual_run_fn_exception_is_persisted_as_terminal_failure(tmp_path):
+    target_time = dt.datetime(2026, 8, 28, 18, 31)
+
+    def failing_run(*_args, **_kwargs):
+        raise RuntimeError("private path C:/Users/ASUS/secret")
+
+    status = tmp_path / "state" / "status.json"
+    lock = tmp_path / "state" / "manual.lock"
+    controller = update_runtime.ManualUpdateController(
+        base_dir_fn=lambda: tmp_path / "deck",
+        project_root=tmp_path,
+        status_file=status,
+        lock_path=lock,
+        pipeline_lock_path=tmp_path / "state" / "daily.lock",
+        clock=lambda: target_time,
+        run_fn=failing_run,
+    )
+    accepted = controller.start()
+    worker = controller._worker
+    assert accepted["state"] == "accepted"
+    assert worker is not None
+    worker.join(timeout=1)
+    assert not worker.is_alive()
+
+    payload = _read_json(status)
+    assert payload["state"] == "failure"
+    assert payload["reason"] == "update_failed"
+    assert payload["finished_at"]
+    assert controller.status()["state"] == "failure"
+    assert not lock.exists()
+    assert "private path" not in json.dumps(payload)
+
+
 def test_stale_running_recovery_never_removes_a_lock(tmp_path, monkeypatch):
     status = tmp_path / "status.json"
     lock = tmp_path / "daily.lock"
@@ -321,11 +356,107 @@ def test_manual_stale_recovery_reclaims_only_matching_dead_lease(tmp_path, monke
         pipeline_lock_path=tmp_path / "foreign-pipeline.lock",
         clock=lambda: now,
     )
+    monkeypatch.setattr(update_runtime, "_pid_is_alive", lambda pid: pid == 92006)
     with foreign._lock:
         unchanged = foreign._recover_stale_status_locked(now, now.date())
 
     assert unchanged["state"] == "running"
     assert foreign_lock.exists()
+
+
+@pytest.mark.parametrize("status_kind", ["missing", "success", "empty"])
+def test_manual_dead_lease_recovery_does_not_depend_on_status_owner(
+    tmp_path, monkeypatch, status_kind
+):
+    now = dt.datetime(2026, 8, 28, 18, 31)
+    status = tmp_path / status_kind / "status.json"
+    lock = status.with_name("manual.lock")
+    lock.parent.mkdir(parents=True)
+    lock.write_text("pid=92008\n", encoding="ascii")
+    if status_kind == "success":
+        status.write_text(
+            json.dumps({"state": "success", "trade_date": now.date().isoformat()}),
+            encoding="utf-8",
+        )
+    elif status_kind == "empty":
+        status.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(update_runtime, "_pid_is_alive", lambda _pid: False)
+    controller = update_runtime.ManualUpdateController(
+        base_dir_fn=lambda: tmp_path / "deck",
+        project_root=tmp_path,
+        status_file=status,
+        lock_path=lock,
+        pipeline_lock_path=status.with_name("daily_update_1830.lock"),
+        clock=lambda: now,
+        run_fn=lambda *args, **kwargs: pytest.fail("stale recovery must not start a worker"),
+    )
+
+    with controller._lock:
+        recovered = controller._recover_stale_status_locked(now, now.date())
+
+    assert not lock.exists()
+    if status_kind == "success":
+        assert recovered["state"] == "success"
+    else:
+        assert recovered["state"] == "idle"
+
+
+def test_manual_dead_lease_rechecks_identity_and_never_touches_pipeline_lock(tmp_path, monkeypatch):
+    manual = tmp_path / "manual.lock"
+    manual.write_text("pid=92009\n", encoding="ascii")
+    identity = (1, 2)
+    replacement = (92010, (1, 3))
+    reads = iter([(92009, identity), replacement])
+    monkeypatch.setattr(update_runtime, "_pid_is_alive", lambda _pid: False)
+    monkeypatch.setattr(update_runtime, "_read_lease_record", lambda _path: next(reads))
+
+    assert update_runtime._reclaim_dead_lease(manual) is False
+    assert manual.exists()
+
+    pipeline = tmp_path / "daily_update_1830.lock"
+    pipeline.write_text("pid=92011\n", encoding="ascii")
+    controller = update_runtime.ManualUpdateController(
+        base_dir_fn=lambda: tmp_path / "deck",
+        project_root=tmp_path,
+        status_file=tmp_path / "status.json",
+        lock_path=tmp_path / "another-manual.lock",
+        pipeline_lock_path=pipeline,
+        clock=lambda: dt.datetime(2026, 8, 28, 18, 31),
+    )
+    with controller._lock:
+        controller._recover_stale_status_locked(
+            dt.datetime(2026, 8, 28, 18, 31), dt.date(2026, 8, 28)
+        )
+    assert pipeline.exists()
+
+
+def test_late_parent_terminal_write_cannot_replace_newer_job(tmp_path):
+    status = tmp_path / "status.json"
+    status.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "state": "running",
+                "trade_date": "2026-08-28",
+                "job_id": "b" * 32,
+                "finished_at": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    update_runtime._write_parent_terminal_status(
+        status,
+        dt.date(2026, 8, 28),
+        state="aborted",
+        reason="application_shutdown",
+        expected_job_id="a" * 32,
+        now=lambda: dt.datetime(2026, 8, 28, 18, 32),
+    )
+
+    payload = _read_json(status)
+    assert payload["state"] == "running"
+    assert payload["job_id"] == "b" * 32
 
 
 def test_active_running_status_blocks_a_second_manual_controller(tmp_path, monkeypatch):
@@ -376,6 +507,31 @@ def test_windows_managed_stop_targets_only_owned_pid(monkeypatch):
     assert taskkills[0][0] == ["taskkill", "/PID", str(process.pid), "/T", "/F"]
     assert taskkills[0][1]["shell"] is False
     assert process.terminated.is_set()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process-tree contract")
+def test_windows_owned_child_process_is_stopped_within_short_bound():
+    flags = (
+        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=flags,
+    )
+    try:
+        started = time.monotonic()
+        update_runtime._terminate_managed_process(process, subprocess)
+        elapsed = time.monotonic() - started
+        assert elapsed < 4
+        assert process.poll() is not None
+        process.wait(timeout=2)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=2)
 
 
 def test_manual_progress_and_stop_payload_strip_private_fields(tmp_path):

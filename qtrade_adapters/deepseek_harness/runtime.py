@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from . import config
@@ -73,6 +74,7 @@ _MANUAL_UPDATE_REASONS = frozenset({
     "stale_running",
     "timeout",
     "process_timeout",
+    "freshness_capture_failed",
 })
 _MANUAL_UPDATE_FRESHNESS_GROUPS = ("portal", "factors", "decision", "sync")
 _MANUAL_UPDATE_FRESHNESS_SOURCES = frozenset({
@@ -254,11 +256,13 @@ class DailyUpdateScheduler:
         clock=None,
         stop_event=None,
         cutoff: datetime.time = DAILY_UPDATE_TIME,
+        stop_hook=None,
     ):
         self.update_fn = update_fn
         self.clock = clock or datetime.datetime.now
         self.stop_event = stop_event or threading.Event()
         self.cutoff = cutoff
+        self.stop_hook = stop_hook
         self.handled_date: datetime.date | None = None
         self.last_result: int | None = None
 
@@ -276,7 +280,10 @@ class DailyUpdateScheduler:
             result = self.update_fn(current.date())
             self.last_result = 0 if result is None else int(result)
         except Exception as error:  # noqa: BLE001 - one failed day must not spin
-            print(f"[auto-update] 调度执行失败：{error}", flush=True)
+            print(
+                f"[auto-update] 调度执行失败：{type(error).__name__}",
+                flush=True,
+            )
             self.last_result = 1
         return self.last_result
 
@@ -296,6 +303,11 @@ class DailyUpdateScheduler:
 
     def stop(self) -> None:
         self.stop_event.set()
+        if self.stop_hook is not None:
+            try:
+                self.stop_hook()
+            except Exception:  # noqa: BLE001 - shutdown must remain bounded
+                pass
 
 
 def build_daily_update_command(
@@ -524,6 +536,7 @@ def _run_interruptible_command(
     stop_event,
     timeout=DAILY_UPDATE_TIMEOUT_SECONDS,
     log_file: Path | None = None,
+    process_holder=None,
 ) -> tuple[int, bool]:
     """Run one fixed command and interrupt only its managed process group.
 
@@ -553,6 +566,8 @@ def _run_interruptible_command(
         print(f"[auto-update] daily_update_1830 启动失败：{type(error).__name__}", flush=True)
         return 1, False
 
+    if process_holder is not None:
+        process_holder["process"] = process
     reader = _capture_manual_output(process, log_file)
     deadline = time.monotonic() + max(0.0, float(timeout))
     interrupted = False
@@ -560,7 +575,8 @@ def _run_interruptible_command(
         while True:
             returncode = process.poll()
             if returncode is not None:
-                return int(returncode), interrupted
+                stopped = stop_event is not None and stop_event.is_set()
+                return int(returncode), interrupted or stopped
             if stop_event is not None and stop_event.is_set():
                 interrupted = True
                 _terminate_managed_process(process, processes)
@@ -586,6 +602,61 @@ def _run_interruptible_command(
         _close_manual_output(process)
         if reader is not None:
             reader.join(timeout=0.5)
+        if process_holder is not None and process_holder.get("process") is process:
+            process_holder["process"] = None
+
+
+def _write_parent_terminal_status(
+    path: Path,
+    target: datetime.date,
+    *,
+    state: str,
+    reason: str,
+    expected_job_id: str | None = None,
+    now=None,
+) -> None:
+    """Close a child-owned running record after its parent stops it."""
+
+    current = datetime.datetime.now if now is None else now
+    raw = _read_status_record(path) or {}
+    if raw.get("state") in _MANUAL_UPDATE_TERMINAL_STATES:
+        return
+    raw_job_id = raw.get("job_id")
+    if (
+        expected_job_id is not None
+        and isinstance(raw_job_id, str)
+        and raw_job_id != expected_job_id
+    ):
+        # A newer manual generation owns the shared status file.  A stopped
+        # child from an older generation must not publish over it.
+        return
+    safe = read_manual_update_status(path)
+    finished_at = current().isoformat(timespec="seconds")
+    payload = {
+        "schema_version": 1,
+        "trade_date": _safe_date_text(target),
+        "state": state,
+        "reason": _safe_manual_reason(reason, state),
+        "started_at": safe.get("started_at"),
+        "finished_at": finished_at,
+        "step": safe.get("step"),
+        "steps": _safe_step_records(raw.get("steps")),
+        "outputs": safe.get("outputs", {"portal": False, "factors": False, "decision": False, "sync": False}),
+        "freshness": safe.get("freshness", {}),
+        "output_meta": safe.get("freshness", {}),
+        "retry": safe.get("retry", {"attempt": 0, "max_attempts": 3, "next_attempt_at": None}),
+        "job_id": expected_job_id or (raw_job_id if isinstance(raw_job_id, str) else None),
+        "owner_pid": os.getpid(),
+        "heartbeat_at": finished_at,
+        "elapsed_seconds": safe.get("elapsed_seconds", 0.0),
+        "progress": safe.get("progress", {"completed": 0, "total": 0, "current": None}),
+    }
+    try:
+        _atomic_write_json(Path(path), payload)
+    except OSError:
+        # The child may have been stopped while its state directory is being
+        # torn down; never replace a terminal record with an unsafe traceback.
+        return
 
 
 def run_daily_update(
@@ -604,12 +675,17 @@ def run_daily_update(
     stop_event=None,
     clock=None,
     interruptible: bool = False,
+    process_holder=None,
+    job_id: str | None = None,
 ) -> int:
     """Run the daily script, retrying only explicitly transient freshness failures."""
 
     processes = subprocess if subprocess_module is None else subprocess_module
     process_env = dict(os.environ if environment is None else environment)
     process_env["QTRADE_DECK_DIR"] = str(base)
+    if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        job_id = uuid.uuid4().hex
+    process_env["QTRADE_UPDATE_JOB_ID"] = job_id
     if interruptible:
         process_env["QTRADE_UPDATE_OBSERVABLE"] = "1"
     root = config.PROJECT_ROOT if project_root is None else Path(project_root)
@@ -635,8 +711,18 @@ def run_daily_update(
                     processes=processes,
                     stop_event=stop_event,
                     log_file=log_file,
+                    process_holder=process_holder,
                 )
                 if interrupted:
+                    reason = "application_shutdown" if stop_event is not None and stop_event.is_set() else "process_timeout"
+                    _write_parent_terminal_status(
+                        status_path,
+                        target,
+                        state="aborted" if reason == "application_shutdown" else "failure",
+                        reason=reason,
+                        expected_job_id=job_id,
+                        now=now,
+                    )
                     return 1
             else:
                 result = processes.run(
@@ -648,15 +734,42 @@ def run_daily_update(
                 )
                 returncode = int(getattr(result, "returncode", 0))
         except Exception as error:  # noqa: BLE001 - scheduler records a failed day
-            print(f"[auto-update] daily_update_1830 启动失败：{error}", flush=True)
+            print(
+                f"[auto-update] daily_update_1830 启动失败：{type(error).__name__}",
+                flush=True,
+            )
+            _write_parent_terminal_status(
+                status_path,
+                target,
+                state="failure",
+                reason="update_failed",
+                expected_job_id=job_id,
+                now=now,
+            )
             return 1
         if returncode == 0:
             return 0
         if attempt >= attempts or not _status_has_transient_failure(status_path):
+            _write_parent_terminal_status(
+                status_path,
+                target,
+                state="failure",
+                reason="update_failed",
+                expected_job_id=job_id,
+                now=now,
+            )
             return returncode
         next_attempt = now() + datetime.timedelta(seconds=retry_delay_seconds)
         _record_retry(status_path, attempt, attempts, next_attempt)
         if stop_event is not None and stop_event.wait(retry_delay_seconds):
+            _write_parent_terminal_status(
+                status_path,
+                target,
+                state="aborted",
+                reason="application_shutdown",
+                expected_job_id=job_id,
+                now=now,
+            )
             return 1
         if stop_event is None:
             sleeper(retry_delay_seconds)
@@ -828,6 +941,115 @@ def _pid_is_alive(value: object) -> bool:
     return True
 
 
+def _read_lease_record(path: Path):
+    """Read a lease owner and identity without trusting the status JSON."""
+
+    descriptor = None
+    identity = None
+    try:
+        descriptor = os.open(str(path), os.O_RDONLY)
+        identity = os.fstat(descriptor)
+        content = os.read(descriptor, 128).decode("ascii", "strict")
+        match = re.fullmatch(r"pid=(\d+)\s*", content)
+        if match is None:
+            return None
+        owner_pid = int(match.group(1))
+        if owner_pid <= 0:
+            return None
+        current = os.fstat(descriptor)
+        if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
+            return None
+        return owner_pid, (identity.st_dev, identity.st_ino)
+    except (OSError, UnicodeError, ValueError):
+        return None
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _reclaim_dead_lease(path: Path) -> bool:
+    """Remove only a dead lease whose path still has the same inode."""
+
+    lease_path = Path(path)
+    record = _read_lease_record(lease_path)
+    if record is None:
+        return False
+    owner_pid, identity = record
+    if _pid_is_alive(owner_pid):
+        return False
+    # Re-read immediately before unlinking.  This prevents a controller from
+    # deleting a replacement lease (including one with a reused PID).
+    if _read_lease_record(lease_path) != record:
+        return False
+    try:
+        current = lease_path.stat()
+        if (current.st_dev, current.st_ino) != identity:
+            return False
+        lease_path.unlink()
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
+class _UpdateLease:
+    """Atomic process lease shared by automatic and manual update jobs."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self._fd = None
+        self._identity = None
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            descriptor = os.open(
+                str(self.path),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+        except FileExistsError:
+            return False
+        identity = os.fstat(descriptor)
+        try:
+            os.write(descriptor, f"pid={os.getpid()}\n".encode("ascii"))
+            os.fsync(descriptor)
+        except Exception:
+            try:
+                current = self.path.stat()
+                if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+                    self.path.unlink()
+            except (FileNotFoundError, OSError):
+                pass
+            os.close(descriptor)
+            raise
+        self._fd = descriptor
+        self._identity = (identity.st_dev, identity.st_ino)
+        return True
+
+    def release(self) -> None:
+        descriptor = self._fd
+        identity = self._identity
+        self._fd = None
+        self._identity = None
+        if descriptor is None:
+            return
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        try:
+            current = self.path.stat()
+            if identity is not None and (current.st_dev, current.st_ino) == identity:
+                self.path.unlink()
+        except (FileNotFoundError, OSError):
+            pass
+
+
 def _status_is_stale(payload: dict[str, object], now: datetime.datetime) -> bool:
     if payload.get("state") != "running":
         return False
@@ -915,6 +1137,7 @@ class ManualUpdateController:
         self._lease_fd = None
         self._lease_identity = None
         self._lease_generation = None
+        self._job_id = None
         self._snapshot = self._idle_snapshot()
 
     @staticmethod
@@ -973,11 +1196,24 @@ class ManualUpdateController:
         state="aborted",
         reason="application_shutdown",
         started_at=None,
+        job_id: str | None = None,
+        override_terminal: bool = False,
     ) -> dict[str, object]:
         """Publish a safe terminal record for a stopped owned job."""
 
         raw = _read_status_record(self.status_file) or {}
         safe = read_manual_update_status(self.status_file)
+        raw_job_id = raw.get("job_id")
+        owner_job_id = job_id or self._job_id
+        if (
+            owner_job_id is not None
+            and isinstance(raw_job_id, str)
+            and raw_job_id != owner_job_id
+        ):
+            # A newer generation has taken ownership of the status file.
+            return safe
+        if raw.get("state") in _MANUAL_UPDATE_TERMINAL_STATES and not override_terminal:
+            return safe
         current = self.clock().isoformat(timespec="seconds")
         target_text = _safe_date_text(target) or safe.get("trade_date")
         started_text = _safe_timestamp_text(started_at) or safe.get("started_at")
@@ -997,7 +1233,7 @@ class ManualUpdateController:
             "heartbeat_at": current,
             "elapsed_seconds": safe.get("elapsed_seconds", 0.0),
             "progress": safe.get("progress", {"completed": 0, "total": 0, "current": None}),
-            "job_id": raw.get("job_id") if isinstance(raw.get("job_id"), str) else None,
+            "job_id": owner_job_id or (raw_job_id if isinstance(raw_job_id, str) else None),
             "owner_pid": os.getpid(),
         }
         _atomic_write_json(self.status_file, payload)
@@ -1007,61 +1243,72 @@ class ManualUpdateController:
         result["finished_at"] = current
         return result
 
-    def _recover_stale_status_locked(self, now: datetime.datetime, target: datetime.date) -> dict[str, object]:
-        """Recover only an old status with no active QTrade lease."""
+    def _write_running_status_locked(
+        self,
+        *,
+        target: datetime.date,
+        state: str,
+        reason: str,
+        started_at: str | None,
+        progress: dict[str, object],
+    ) -> None:
+        """Publish this generation before it can spawn or report a child."""
 
-        raw = _read_status_record(self.status_file)
-        if (
-            raw is None
-            or not _status_is_stale(raw, now)
-            or self.pipeline_lock_path.exists()
-        ):
-            return read_manual_update_status(self.status_file)
-        if self.lock_path.exists() and not self._reclaim_stale_lease_locked(raw):
-            return read_manual_update_status(self.status_file)
-        return self._write_terminal_status_locked(
-            target=target,
-            state="aborted",
-            reason="stale_running",
-            started_at=raw.get("started_at"),
+        current = self.clock().isoformat(timespec="seconds")
+        _atomic_write_json(
+            self.status_file,
+            {
+                "schema_version": 1,
+                "accepted": state == "accepted",
+                "trade_date": target.isoformat(),
+                "state": state,
+                "reason": reason,
+                "started_at": started_at,
+                "finished_at": None,
+                "step": None,
+                "steps": [],
+                "outputs": self._outputs(),
+                "freshness": {},
+                "output_meta": {},
+                "retry": {"attempt": 0, "max_attempts": 3, "next_attempt_at": None},
+                "job_id": self._job_id,
+                "owner_pid": os.getpid(),
+                "heartbeat_at": current,
+                "elapsed_seconds": 0.0,
+                "progress": progress,
+            },
         )
 
-    def _reclaim_stale_lease_locked(self, payload: dict[str, object]) -> bool:
+    def _recover_stale_status_locked(self, now: datetime.datetime, target: datetime.date) -> dict[str, object]:
+        """Recover an old status only after checking the owned lease itself."""
+
+        raw = _read_status_record(self.status_file)
+        if self.pipeline_lock_path.exists():
+            return read_manual_update_status(self.status_file)
+
+        reclaimed = False
+        if self.lock_path.exists():
+            reclaimed = self._reclaim_stale_lease_locked(raw)
+            if not reclaimed:
+                return read_manual_update_status(self.status_file)
+
+        if raw is not None and raw.get("state") == "running":
+            if reclaimed or _status_is_stale(raw, now):
+                return self._write_terminal_status_locked(
+                    target=target,
+                    state="aborted",
+                    reason="stale_running",
+                    started_at=raw.get("started_at"),
+                )
+        return read_manual_update_status(self.status_file)
+
+    def _reclaim_stale_lease_locked(self, payload: dict[str, object] | None = None) -> bool:
         """Remove only a lease proven to belong to a dead stale owner."""
 
-        owner_pid = payload.get("owner_pid")
-        if not isinstance(owner_pid, int) or isinstance(owner_pid, bool) or owner_pid <= 0:
-            return False
-        if _pid_is_alive(owner_pid):
-            return False
-        descriptor = None
-        identity = None
-        try:
-            descriptor = os.open(str(self.lock_path), os.O_RDONLY)
-            identity = os.fstat(descriptor)
-            content = os.read(descriptor, 128).decode("ascii", "strict")
-            match = re.fullmatch(r"pid=(\d+)\s*", content)
-            if match is None or int(match.group(1)) != owner_pid:
-                return False
-            current = os.fstat(descriptor)
-            if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
-                return False
-        except (OSError, UnicodeError, ValueError):
-            return False
-        finally:
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
-        try:
-            current = self.lock_path.stat()
-            if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
-                return False
-            self.lock_path.unlink()
-            return True
-        except (FileNotFoundError, OSError):
-            return not self.lock_path.exists()
+        # ``payload`` is retained only for source compatibility.  The status
+        # owner_pid may be the daily child rather than this controller parent,
+        # so it is intentionally not consulted for lease ownership.
+        return _reclaim_dead_lease(self.lock_path)
 
     def _set_terminal_from_disk(self, returncode, target, started_at=None):
         disk = read_manual_update_status(self.status_file)
@@ -1143,6 +1390,19 @@ class ManualUpdateController:
                 progress={"completed": 0, "total": 10, "current": None},
             )
             self._snapshot = running
+            job_id = self._job_id
+            try:
+                self._write_running_status_locked(
+                    target=target,
+                    state="running",
+                    reason="running",
+                    started_at=started_at,
+                    progress=running["progress"],
+                )
+            except OSError:
+                # The child still owns the process lease, but status errors are
+                # converted to the same stable terminal state below.
+                pass
         try:
             run_kwargs = {
                 "environment": os.environ,
@@ -1151,6 +1411,7 @@ class ManualUpdateController:
                 "log_file": self.log_file,
                 "python_executable": sys.executable,
                 "stop_event": self._stop_event,
+                "job_id": job_id,
             }
             if self._uses_default_run_fn:
                 run_kwargs["interruptible"] = True
@@ -1164,12 +1425,17 @@ class ManualUpdateController:
             with self._lock:
                 stale_generation = generation != self._generation
             if stale_generation:
+                # ``stop`` owns the disk terminal record for an invalidated
+                # generation.  Reassert it only when the old job token still
+                # owns the file; a newer generation is never overwritten.
                 with self._lock:
                     terminal = self._write_terminal_status_locked(
                         target=target,
                         state="aborted",
                         reason="application_shutdown",
                         started_at=started_at,
+                        job_id=job_id,
+                        override_terminal=True,
                     )
             else:
                 with self._lock:
@@ -1177,13 +1443,31 @@ class ManualUpdateController:
                         int(returncode or 0), target, started_at=started_at
                     )
         except Exception:  # noqa: BLE001 - UI receives only a stable failure state
-            terminal = self._snapshot_for(
-                state="failure",
-                target=target,
-                reason="update_failed",
-                started_at=started_at,
-                finished_at=self.clock().isoformat(timespec="seconds"),
-            )
+            with self._lock:
+                if generation == self._generation:
+                    try:
+                        terminal = self._write_terminal_status_locked(
+                            target=target,
+                            state="failure",
+                            reason="update_failed",
+                            started_at=started_at,
+                        )
+                    except OSError:
+                        terminal = self._snapshot_for(
+                            state="failure",
+                            target=target,
+                            reason="update_failed",
+                            started_at=started_at,
+                            finished_at=self.clock().isoformat(timespec="seconds"),
+                        )
+                else:
+                    terminal = self._snapshot_for(
+                        state="aborted",
+                        target=target,
+                        reason="application_shutdown",
+                        started_at=started_at,
+                        finished_at=self.clock().isoformat(timespec="seconds"),
+                    )
         with self._lock:
             if generation == self._generation:
                 terminal["accepted"] = False
@@ -1273,6 +1557,7 @@ class ManualUpdateController:
             self._generation += 1
             generation = self._generation
             self._lease_generation = generation
+            self._job_id = uuid.uuid4().hex
             self._snapshot = self._snapshot_for(
                 state="accepted",
                 target=target,
@@ -1281,6 +1566,13 @@ class ManualUpdateController:
                 progress={"completed": 0, "total": 10, "current": None},
             )
             try:
+                self._write_running_status_locked(
+                    target=target,
+                    state="accepted",
+                    reason="accepted",
+                    started_at=current.isoformat(timespec="seconds"),
+                    progress=self._snapshot["progress"],
+                )
                 worker = self.thread_factory(
                     target=self._run,
                     args=(generation, base, target),
@@ -1293,6 +1585,15 @@ class ManualUpdateController:
                 self._worker = None
                 self._release_lease_locked()
                 self._lease_generation = None
+                try:
+                    self._write_terminal_status_locked(
+                        target=target,
+                        state="failure",
+                        reason="update_failed",
+                        started_at=current.isoformat(timespec="seconds"),
+                    )
+                except OSError:
+                    pass
                 self._snapshot = self._snapshot_for(
                     state="failure",
                     target=target,
@@ -1430,6 +1731,8 @@ def maybe_auto_update(
     python_executable: str | None = None,
     project_root: Path | None = None,
     status_file: Path | None = None,
+    log_file: Path | None = None,
+    clock=None,
 ):
     """Start one daemon scheduler for the application's lifetime."""
 
@@ -1453,6 +1756,21 @@ def maybe_auto_update(
 
     processes = subprocess if subprocess_module is None else subprocess_module
     root = config.PROJECT_ROOT if project_root is None else Path(project_root)
+    state_root_value = environment.get("QTRADE_UPDATE_STATE_DIR")
+    state_root = Path(state_root_value).expanduser() if state_root_value else None
+    effective_status = Path(status_file) if status_file is not None else None
+    if effective_status is None and state_root is not None:
+        effective_status = state_root / "daily_update_1830.status.json"
+    if effective_status is None:
+        effective_status = root / "logs" / "daily_update_1830.status.json"
+    effective_log = Path(log_file) if log_file is not None else effective_status.with_name("daily_update_1830.log")
+    shared_lock = effective_status.with_name("daily_update_1830.manual.lock")
+    active_process = {}
+
+    def stop_active_process() -> None:
+        process = active_process.get("process")
+        if process is not None:
+            _terminate_managed_process(process, processes)
 
     global _AUTO_UPDATE_SCHEDULER, _AUTO_UPDATE_THREAD
     with _AUTO_UPDATE_LOCK:
@@ -1462,17 +1780,34 @@ def maybe_auto_update(
         stop_event = threading.Event()
 
         def invoke(target: datetime.date) -> int:
-            return run_daily_update(
-                base,
-                target,
-                environment=environment,
-                subprocess_module=processes,
-                project_root=root,
-                status_file=status_file,
-                python_executable=python_executable,
-            )
+            _reclaim_dead_lease(shared_lock)
+            lease = _UpdateLease(shared_lock)
+            if not lease.acquire():
+                print("[auto-update] 手动或自动更新正在运行，跳过本次自动任务", flush=True)
+                return 1
+            try:
+                return run_daily_update(
+                    base,
+                    target,
+                    environment=environment,
+                    subprocess_module=processes,
+                    project_root=root,
+                    status_file=effective_status,
+                    log_file=effective_log,
+                    python_executable=python_executable,
+                    stop_event=stop_event,
+                    interruptible=True,
+                    process_holder=active_process,
+                )
+            finally:
+                lease.release()
 
-        scheduler = DailyUpdateScheduler(invoke, stop_event=stop_event)
+        scheduler = DailyUpdateScheduler(
+            invoke,
+            clock=clock,
+            stop_event=stop_event,
+            stop_hook=stop_active_process,
+        )
         thread = threading.Thread(
             target=scheduler.run_forever,
             name="qtrade-daily-update",

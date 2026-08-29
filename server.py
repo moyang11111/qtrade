@@ -2815,6 +2815,7 @@ _UPDATE_STATUS_REASONS = frozenset({
     "stale_running",
     "timeout",
     "process_timeout",
+    "freshness_capture_failed",
 })
 _UPDATE_STATUS_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _UPDATE_STATUS_TIMESTAMP = re.compile(
@@ -3038,6 +3039,7 @@ _MANUAL_UPDATE_REASONS = frozenset({
     "stale_running",
     "timeout",
     "process_timeout",
+    "freshness_capture_failed",
 })
 _MANUAL_UPDATE_OUTPUTS = ("portal", "factors", "decision", "sync")
 _MANUAL_UPDATE_STEPS = frozenset({
@@ -4141,7 +4143,17 @@ def _ensure_base_harness():
 
 def _maybe_auto_update():
     """Qtrade 启动时自动增量更新（一天最多一次；全量回填完成后才启用）。"""
-    qtrade_base_bridge.maybe_auto_update()
+    # Keep automatic lifecycle artifacts beside the server-owned userData
+    # state, rather than writing caches or logs into packaged resources.
+    environment = dict(os.environ)
+    environment["QTRADE_UPDATE_STATE_DIR"] = str(UPDATE_STATUS_PATH.parent)
+    return update_runtime.maybe_auto_update(
+        base_dir_fn=qtrade_base_bridge.base_dir,
+        env=environment,
+        project_root=Path(__file__).resolve().parent,
+        status_file=UPDATE_STATUS_PATH,
+        log_file=UPDATE_LOG_PATH,
+    )
 
 
 def main():
@@ -4267,6 +4279,7 @@ def main():
             DEEPSEEK_CHAT_SERVICE.close()
         if MANUAL_UPDATE_CONTROLLER is not None:
             MANUAL_UPDATE_CONTROLLER.stop()
+        update_runtime.stop_auto_update()
 
 
 if __name__ == "__main__":

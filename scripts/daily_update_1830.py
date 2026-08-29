@@ -49,8 +49,18 @@ STEP_TIMEOUT_SECONDS = 7200
 HEARTBEAT_INTERVAL_SECONDS = 5.0
 LOG_MAX_BYTES = 256 * 1024
 OBSERVABLE_ENV = "QTRADE_UPDATE_OBSERVABLE"
+JOB_ID_ENV = "QTRADE_UPDATE_JOB_ID"
 STALE_STATUS_SECONDS = 15 * 60
 PIPELINE_STEP_COUNT = 10
+
+
+def _job_id() -> str:
+    """Use only a short internal token to bind child status to its parent run."""
+
+    value = os.environ.get(JOB_ID_ENV, "")
+    if re.fullmatch(r"[0-9a-f]{32}", value):
+        return value
+    return uuid.uuid4().hex
 
 
 def _redact_log_text(value: object) -> str:
@@ -263,21 +273,91 @@ def _running_status_is_stale(payload: dict[str, object], *, now: datetime.dateti
     return not _pid_is_alive(owner_pid)
 
 
+def _read_lock_record(path: Path):
+    """Read a pipeline lock PID and identity without trusting status JSON."""
+
+    descriptor = None
+    identity = None
+    try:
+        descriptor = os.open(str(path), os.O_RDONLY)
+        identity = os.fstat(descriptor)
+        content = os.read(descriptor, 128).decode("ascii", "strict")
+        match = re.fullmatch(r"pid=(\d+)\s*", content)
+        if match is None:
+            return None
+        owner_pid = int(match.group(1))
+        if owner_pid <= 0:
+            return None
+        current = os.fstat(descriptor)
+        if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
+            return None
+        return owner_pid, (identity.st_dev, identity.st_ino)
+    except (OSError, UnicodeError, ValueError):
+        return None
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _state_lock_is_reclaimable(status_path: Path, lock_path: Path) -> bool:
+    """Never reclaim a lock located in the legacy source-tree logs directory."""
+
+    try:
+        legacy_logs = (ROOT / "logs").resolve()
+        return (
+            Path(status_path).resolve().parent != legacy_logs
+            and Path(lock_path).resolve().parent != legacy_logs
+        )
+    except OSError:
+        return False
+
+
+def _reclaim_dead_lock(path: Path) -> bool:
+    """Remove only a dead pipeline lock whose inode remains unchanged."""
+
+    lock_path = Path(path)
+    record = _read_lock_record(lock_path)
+    if record is None:
+        return False
+    owner_pid, identity = record
+    if _pid_is_alive(owner_pid):
+        return False
+    if _read_lock_record(lock_path) != record:
+        return False
+    try:
+        current = lock_path.stat()
+        if (current.st_dev, current.st_ino) != identity:
+            return False
+        lock_path.unlink()
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
 def recover_stale_status(
     status_path: Path,
     lock_path: Path,
     *,
     now: datetime.datetime | None = None,
 ) -> dict[str, object] | None:
-    """Mark only an old, ownerless QTrade status as aborted.
-
-    The lock is deliberately never removed here. A live or unknown lease is
-    left untouched and the normal atomic lock path remains authoritative.
-    """
+    """Recover a stale state without touching legacy source-tree locks."""
 
     payload = read_status(status_path)
     current = datetime.datetime.now() if now is None else now
-    if not payload or Path(lock_path).exists() or not _running_status_is_stale(payload, now=current):
+    lock = Path(lock_path)
+    reclaimed = False
+    if lock.exists() and _state_lock_is_reclaimable(Path(status_path), lock):
+        reclaimed = _reclaim_dead_lock(lock)
+    if lock.exists() or not payload:
+        return payload
+    if not _running_status_is_stale(payload, now=current) and not reclaimed:
+        return payload
+    if payload.get("state") != "running":
         return payload
     values = dict(payload)
     values.update({
@@ -356,9 +436,11 @@ def update_lock(path: Path):
     lock_path = Path(path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = None
+    identity = None
     acquired = False
     try:
         descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        identity = os.fstat(descriptor)
         acquired = True
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             descriptor = None
@@ -371,7 +453,12 @@ def update_lock(path: Path):
             os.close(descriptor)
         if acquired:
             try:
-                lock_path.unlink()
+                current = lock_path.stat()
+                if identity is not None and (current.st_dev, current.st_ino) == (
+                    identity.st_dev,
+                    identity.st_ino,
+                ):
+                    lock_path.unlink()
             except FileNotFoundError:
                 pass
 
@@ -760,9 +847,22 @@ def main(
         return 0
 
     deck = resolve_deck_dir(args.deck_dir)
+    if target.weekday() >= 5 and not args.force:
+        log(f"今天 {target} 是周末，跳过自动更新")
+        write_status(
+            status,
+            trade_date=target.isoformat(),
+            state="skip",
+            reason="weekend",
+            started_at=None,
+            finished_at=now_provider().isoformat(timespec="seconds"),
+            step=None,
+        )
+        return 0
+
     # A real run must fail early when the fixed pipeline entry points are not
-    # present.  Dry-run remains a planning aid and may list the intended
-    # commands for an otherwise incomplete fixture.
+    # present.  Keep this after the calendar gate so an incomplete explicit
+    # fixture on a weekend retains the historical safe skip semantics.
     if not args.dry and deck.exists() and (args.deck_dir or os.environ.get(DECK_ENV)):
         required_scripts = (
             "auto_update_daily.py",
@@ -781,19 +881,6 @@ def main(
                 step="resolve_deck",
             )
             return 1
-
-    if target.weekday() >= 5 and not args.force:
-        log(f"今天 {target} 是周末，跳过自动更新")
-        write_status(
-            status,
-            trade_date=target.isoformat(),
-            state="skip",
-            reason="weekend",
-            started_at=None,
-            finished_at=now_provider().isoformat(timespec="seconds"),
-            step=None,
-        )
-        return 0
 
     if not deck.exists():
         log(f"FAIL: 底座不存在 {deck}")
@@ -825,7 +912,7 @@ def main(
 
         started_at = now_provider().isoformat(timespec="seconds")
         started_monotonic = time.monotonic()
-        job_id = uuid.uuid4().hex
+        job_id = _job_id()
         steps: list[dict[str, object]] = []
         outputs = {"portal": False, "decision": False, "factors": False, "sync": False}
         freshness_state: dict[str, dict[str, object]] = {}
@@ -934,9 +1021,14 @@ def main(
                 elapsed_seconds=round(max(0.0, time.monotonic() - started_monotonic), 3),
                 progress={"completed": 0, "total": PIPELINE_STEP_COUNT, "current": "freshness"},
             )
-        before_artifacts = freshness.capture_artifacts(deck) if freshness is not None else None
-        portal_baseline = freshness.capture_portal_baseline(deck) if freshness is not None else None
+        before_artifacts = None
+        portal_baseline = None
+        capture_phase = True
+        failure_error = None
         try:
+            before_artifacts = freshness.capture_artifacts(deck) if freshness is not None else None
+            portal_baseline = freshness.capture_portal_baseline(deck) if freshness is not None else None
+            capture_phase = False
             completed = _pipeline(
                 deck=deck,
                 target=target,
@@ -955,19 +1047,27 @@ def main(
         except KeyboardInterrupt:
             log("FAIL: 更新流程被中断")
             completed = False
+            failure_error = "interrupted"
             if not steps or steps[-1].get("state") != "failure":
                 steps.append({"name": "pipeline", "state": "failure", "error": "interrupted"})
+        except (OSError, RuntimeError) as error:
+            failure_error = "freshness_capture_failed" if capture_phase else "process_error"
+            log(f"FAIL: {'新鲜度基线捕获' if capture_phase else '更新流程'}异常：{type(error).__name__}")
+            completed = False
+            if not steps or steps[-1].get("state") != "failure":
+                steps.append({"name": "freshness" if capture_phase else "pipeline", "state": "failure", "error": failure_error})
         except Exception as error:  # noqa: BLE001 - status must record unexpected failures
             log(f"FAIL: 更新流程异常：{type(error).__name__}")
             completed = False
+            failure_error = "process_error"
             if not steps or steps[-1].get("state") != "failure":
                 steps.append({"name": "pipeline", "state": "failure", "error": "process_error"})
 
         if not completed:
-            failure_reason = "step_failed"
-            if steps and steps[-1].get("error") == "timeout":
+            failure_reason = failure_error or "step_failed"
+            if failure_error is None and steps and steps[-1].get("error") == "timeout":
                 failure_reason = "timeout"
-            elif steps and steps[-1].get("error") == "interrupted":
+            elif failure_error is None and steps and steps[-1].get("error") == "interrupted":
                 failure_reason = "aborted"
             write_status(
                 status,
