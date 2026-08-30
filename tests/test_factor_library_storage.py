@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import socket
 import threading
+import time
 from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.request import Request, build_opener
@@ -197,7 +199,27 @@ def _api_request(opener, port: int, path: str, method: str = "GET", payload: dic
         with opener.open(request, timeout=3) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except HTTPError as error:
-        return error.code, json.loads(error.read().decode("utf-8"))
+        try:
+            return error.code, json.loads(error.read().decode("utf-8"))
+        finally:
+            error.close()
+
+
+def _factor_http_error(opener, port: int, path: str, method: str, body: bytes):
+    request = Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method=method,
+    )
+    with pytest.raises(HTTPError) as raised:
+        opener.open(request, timeout=3)
+    error = raised.value
+    try:
+        response_body = json.loads(error.read().decode("utf-8"))
+        return error.code, dict(error.headers), response_body
+    finally:
+        error.close()
 
 
 def test_http_api_crud_filters_server_owned_matches_and_safe_errors(tmp_path, monkeypatch):
@@ -264,10 +286,94 @@ def test_http_api_crud_filters_server_owned_matches_and_safe_errors(tmp_path, mo
         )
         with pytest.raises(HTTPError) as raised:
             opener.open(request, timeout=3)
-        assert raised.value.code == 413
+        error = raised.value
+        try:
+            assert error.code == 413
+            assert error.headers["Connection"].lower() == "close"
+            assert json.loads(error.read().decode("utf-8")) == {
+                "error": "request_too_large",
+                "message": "request body is too large",
+            }
+        finally:
+            error.close()
     finally:
         httpd.shutdown()
         thread.join(timeout=3)
+        assert not thread.is_alive()
+        httpd.server_close()
+
+
+def test_factor_rejection_paths_drain_body_and_keep_server_usable(tmp_path, monkeypatch):
+    data_dir = tmp_path / "deck"
+    _write_artifacts(data_dir)
+    library = FactorLibrary(tmp_path / "user-data" / "factor_library.json", data_dir)
+    monkeypatch.setattr(server, "FACTOR_LIBRARY", library)
+    monkeypatch.setattr(server, "STATIC_DIR", Path(__file__).resolve().parents[1] / "static")
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.APIHandler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    opener = build_opener()
+    port = httpd.server_address[1]
+    try:
+        rejection_cases = (
+            ("/api/factor-library/preview", "POST", b"x" * 70_000, 413, "request_too_large"),
+            ("/api/factor-library", "PATCH", b'{"ignored":1}', 405, "method_not_allowed"),
+            ("/api/factor-library/unknown", "POST", b'{"ignored":1}', 404, "not_found"),
+            ("/api/factor-library/capabilities/extra", "PUT", b'{"ignored":1}', 404, "not_found"),
+            ("/api/factor-library/capabilities/extra", "DELETE", b'{"ignored":1}', 404, "not_found"),
+        )
+        for path, method, body, expected_status, expected_error in rejection_cases:
+            status, headers, response_body = _factor_http_error(opener, port, path, method, body)
+            assert status == expected_status
+            assert headers["Connection"].lower() == "close"
+            assert response_body["error"] == expected_error
+            assert set(response_body) == {"error", "message"}
+
+        status, body = _api_request(opener, port, "/api/factor-library")
+        assert status == 200
+        assert body == {"schema_version": 1, "items": []}
+    finally:
+        httpd.shutdown()
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+        httpd.server_close()
+
+
+def test_factor_oversized_incomplete_body_has_bounded_teardown(tmp_path, monkeypatch):
+    data_dir = tmp_path / "deck"
+    _write_artifacts(data_dir)
+    library = FactorLibrary(tmp_path / "user-data" / "factor_library.json", data_dir)
+    monkeypatch.setattr(server, "FACTOR_LIBRARY", library)
+    monkeypatch.setattr(server, "STATIC_DIR", Path(__file__).resolve().parents[1] / "static")
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.APIHandler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    client = socket.create_connection(("127.0.0.1", httpd.server_address[1]), timeout=3)
+    client.settimeout(3)
+    try:
+        request = (
+            b"POST /api/factor-library/preview HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: 65537\r\n\r\n"
+            b"{"
+        )
+        started = time.monotonic()
+        client.sendall(request)
+        response = bytearray()
+        while True:
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            response.extend(chunk)
+        assert time.monotonic() - started < 3
+        assert b" 413 " in response
+        assert b'"error": "request_too_large"' in response
+    finally:
+        client.close()
+        httpd.shutdown()
+        thread.join(timeout=3)
+        assert not thread.is_alive()
         httpd.server_close()
 
 
