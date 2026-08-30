@@ -2826,6 +2826,7 @@ DEEPSEEK_CHAT_HISTORY_PATH = f"{DEEPSEEK_CHAT_PREFIX}/history"
 DEEPSEEK_CHAT_CANCEL_PATH = f"{DEEPSEEK_CHAT_PREFIX}/cancel"
 _DEEPSEEK_REJECTION_DRAIN_TIMEOUT_SECONDS = 1.0
 _DEEPSEEK_REJECTION_DRAIN_MAX_BYTES = deepseek_chat_config.MAX_REQUEST_BODY_BYTES * 4
+_FACTOR_REJECTION_DRAIN_MAX_BYTES = MAX_BODY_BYTES * 4
 
 UPDATE_STATUS_PATH = Path(__file__).resolve().parent / "logs" / "daily_update_1830.status.json"
 UPDATE_RUN_PATH = "/api/update/run"
@@ -3358,23 +3359,35 @@ class APIHandler(SimpleHTTPRequestHandler):
             "message": "factor library is temporarily unavailable",
         }, status=503)
 
+    def _factor_reject(self, status: int, error: str, message: str, *, body_length: int | None = None):
+        return self._reject_with_body_drain(
+            status,
+            error,
+            message,
+            body_length=body_length,
+            max_drain_bytes=_FACTOR_REJECTION_DRAIN_MAX_BYTES,
+            cors=True,
+            no_store=False,
+        )
+
     def _read_factor_body(self, *, optional: bool = False) -> dict | None:
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         length_text = self.headers.get("Content-Length", "0")
         try:
             length = int(length_text)
         except (TypeError, ValueError):
-            self._json({"error": "invalid_request", "message": "invalid request body"}, status=400)
-            return None
+            return self._factor_reject(400, "invalid_request", "invalid request body")
         if length < 0 or length > MAX_BODY_BYTES:
-            self.close_connection = True
-            self._json({"error": "request_too_large", "message": "request body is too large"}, status=413)
-            return None
+            return self._factor_reject(413, "request_too_large", "request body is too large", body_length=length)
         if length == 0 and optional:
             return {}
         if content_type != "application/json":
-            self._json({"error": "unsupported_media_type", "message": "application/json is required"}, status=415)
-            return None
+            return self._factor_reject(
+                415,
+                "unsupported_media_type",
+                "application/json is required",
+                body_length=length,
+            )
         try:
             raw = self.rfile.read(length)
             if len(raw) != length:
@@ -3470,7 +3483,7 @@ class APIHandler(SimpleHTTPRequestHandler):
 
             success_status = 200
         else:
-            return self._factor_path_error()
+            return self._factor_reject(404, "not_found", "factor library resource not found")
         try:
             result = operation()
         except FactorLibraryError as error:
@@ -3484,7 +3497,7 @@ class APIHandler(SimpleHTTPRequestHandler):
     def _factor_put(self, path: str):
         parts = self._factor_parts(path)
         if len(parts) != 1:
-            return self._factor_path_error()
+            return self._factor_reject(404, "not_found", "factor library resource not found")
         body = self._read_factor_body()
         if body is None:
             return
@@ -3510,7 +3523,7 @@ class APIHandler(SimpleHTTPRequestHandler):
     def _factor_delete(self, path: str):
         parts = self._factor_parts(path)
         if len(parts) != 1:
-            return self._factor_path_error()
+            return self._factor_reject(404, "not_found", "factor library resource not found")
         try:
             deleted = get_factor_library().delete(parts[0])
         except FactorLibraryError as error:
@@ -3650,18 +3663,18 @@ class APIHandler(SimpleHTTPRequestHandler):
             result[key] = value
         return result
 
-    def _declared_deepseek_body_length(self) -> int:
+    def _declared_request_body_length(self) -> int:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except (TypeError, ValueError):
             return 0
         return max(0, length)
 
-    def _discard_deepseek_body(self, declared_length: int) -> None:
+    def _discard_request_body(self, declared_length: int, *, max_bytes: int) -> None:
         """Boundedly consume an already-rejected request before closing it."""
         if declared_length <= 0:
             return
-        limit = min(declared_length, _DEEPSEEK_REJECTION_DRAIN_MAX_BYTES)
+        limit = min(declared_length, max_bytes)
         connection = getattr(self, "connection", None)
         set_timeout = getattr(connection, "settimeout", None)
         get_timeout = getattr(connection, "gettimeout", None)
@@ -3693,23 +3706,51 @@ class APIHandler(SimpleHTTPRequestHandler):
             except (OSError, ValueError):
                 pass
 
-    def _deepseek_reject(self, status: int, message: str, *, body_length: int | None = None):
-        """Send a safe terminal rejection, then discard bounded unread body bytes."""
+    def _reject_with_body_drain(
+        self,
+        status: int,
+        error: str,
+        message: str,
+        *,
+        body_length: int | None = None,
+        max_drain_bytes: int,
+        cors: bool,
+        no_store: bool,
+    ):
+        """Write a safe rejection before boundedly consuming unread request bytes."""
         self.close_connection = True
         if body_length is None:
-            body_length = self._declared_deepseek_body_length()
+            body_length = self._declared_request_body_length()
         try:
-            error = "request_too_large" if status == 413 else "method_not_allowed"
             self._json(
                 {"error": error, "message": message},
                 status=status,
-                cors=False,
-                no_store=True,
+                cors=cors,
+                no_store=no_store,
             )
             self.wfile.flush()
         finally:
-            self._discard_deepseek_body(body_length)
+            self._discard_request_body(body_length, max_bytes=max_drain_bytes)
         return None
+
+    def _declared_deepseek_body_length(self) -> int:
+        return self._declared_request_body_length()
+
+    def _discard_deepseek_body(self, declared_length: int) -> None:
+        self._discard_request_body(declared_length, max_bytes=_DEEPSEEK_REJECTION_DRAIN_MAX_BYTES)
+
+    def _deepseek_reject(self, status: int, message: str, *, body_length: int | None = None):
+        """Send a safe terminal rejection, then discard bounded unread body bytes."""
+        error = "request_too_large" if status == 413 else "method_not_allowed"
+        return self._reject_with_body_drain(
+            status,
+            error,
+            message,
+            body_length=body_length,
+            max_drain_bytes=_DEEPSEEK_REJECTION_DRAIN_MAX_BYTES,
+            cors=False,
+            no_store=True,
+        )
 
     def _read_deepseek_body(self) -> dict | None:
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
@@ -3909,8 +3950,7 @@ class APIHandler(SimpleHTTPRequestHandler):
         if path in {UPDATE_RUN_PATH, UPDATE_RUN_STATUS_PATH, UPDATE_RUN_STOP_PATH}:
             return self._manual_method_not_allowed()
         if self._is_factor_library_path(path):
-            self._json({"error": "method_not_allowed", "message": "PATCH is not supported"}, status=405)
-            return
+            return self._factor_reject(405, "method_not_allowed", "PATCH is not supported")
         if self._is_deepseek_chat_path(path):
             return self._deepseek_reject(405, "PATCH is not supported")
         self._json({"error": "unsupported method"}, status=405)
@@ -3966,6 +4006,8 @@ class APIHandler(SimpleHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         if path in {UPDATE_RUN_PATH, UPDATE_RUN_STATUS_PATH, UPDATE_RUN_STOP_PATH}:
             return self._manual_method_not_allowed()
+        if self._is_factor_library_path(path):
+            return self._factor_reject(405, "method_not_allowed", "OPTIONS is not supported")
         return self.send_error(501, "Unsupported method")
 
     def send_header(self, keyword, value):
