@@ -1,0 +1,356 @@
+name: electron-quality-gates
+
+on:
+  push:
+    paths:
+      - ".github/workflows/**"
+      - "electron/**"
+      - "server.py"
+      - "qtrade_adapters/**"
+      - "scripts/**"
+      - "static/**"
+      - "qtrade_base_bridge.py"
+      - "factors.py"
+      - "qtrade_factors/**"
+      - "paper_trading/**"
+      - "configs/**"
+      - "qtrade.ico"
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - "electron/**"
+      - "server.py"
+      - "qtrade_adapters/**"
+      - "scripts/**"
+      - "static/**"
+      - "qtrade_base_bridge.py"
+      - "factors.py"
+      - "qtrade_factors/**"
+      - "paper_trading/**"
+      - "configs/**"
+      - "qtrade.ico"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: electron-quality-gates-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  electron-quality:
+    name: Electron packaging / Windows
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      npm_config_cache: ${{ runner.temp }}/qtrade-electron-npm-cache
+      ELECTRON_CACHE: ${{ runner.temp }}/qtrade-electron-binary-cache
+      ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/qtrade-electron-builder-cache
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: electron
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.19.4"
+          registry-url: https://registry.npmjs.org/
+          cache: npm
+          cache-dependency-path: electron/package-lock.json
+
+      - name: Verify package download settings
+        run: |
+          $ErrorActionPreference = "Stop"
+          $forbidden = @(
+            "ELECTRON_MIRROR",
+            "ELECTRON_BUILDER_BINARIES_MIRROR",
+            "ELECTRON_CUSTOM_DIR",
+            "ELECTRON_CUSTOM_VERSION",
+            "ELECTRON_SKIP_BINARY_DOWNLOAD",
+            "npm_config_electron_mirror",
+            "npm_config_electron_builder_binaries_mirror",
+            "npm_config_electron_custom_dir",
+            "npm_config_electron_custom_version",
+            "npm_config_electron_skip_binary_download"
+          )
+          foreach ($name in $forbidden) {
+            if (Test-Path -LiteralPath "Env:$name") {
+              throw "Unsupported Electron download override is set: $name"
+            }
+          }
+
+          $npmrcPaths = @(
+            (Join-Path $env:GITHUB_WORKSPACE ".npmrc"),
+            (Join-Path $env:GITHUB_WORKSPACE "electron\.npmrc")
+          )
+          foreach ($npmrcPath in $npmrcPaths) {
+            if (Test-Path -LiteralPath $npmrcPath) {
+              $npmrcText = [System.IO.File]::ReadAllText($npmrcPath, [System.Text.Encoding]::UTF8)
+              if ($npmrcText -match "(?im)^\s*(?:[^:\s]+:)?registry\s*=\s*(?!https://registry\.npmjs\.org/?\s*$)\S+") {
+                throw "Project npmrc must use the official npm registry."
+              }
+              if ($npmrcText -match "(?i)mirror") {
+                throw "Project npmrc contains an unsupported mirror setting."
+              }
+            }
+          }
+          $registry = (& npm config get registry --silent).Trim()
+          if ($registry.TrimEnd('/') -ne "https://registry.npmjs.org") {
+            throw "npm registry is not the official registry."
+          }
+
+      - name: Install locked Electron dependencies
+        run: npm ci --registry=https://registry.npmjs.org/ --no-audit --no-fund
+
+      - name: Run Electron tests
+        run: npm test
+
+      - name: Run Electron lint
+        run: npm run lint
+
+      - name: Run production dependency audit
+        run: npm audit --registry=https://registry.npmjs.org/ --omit=dev --audit-level=high
+
+      - name: Build unpacked directory
+        run: npm run dist:dir -- --publish never
+
+      - name: Audit unpacked package and app.asar
+        working-directory: .
+        run: |
+          $ErrorActionPreference = "Stop"
+          $repoRoot = $env:GITHUB_WORKSPACE
+          $unpacked = Join-Path $repoRoot "electron\dist\win-unpacked"
+          $qtrade = Join-Path $unpacked "resources\qtrade"
+          $asar = Join-Path $unpacked "resources\app.asar"
+
+          $packageItems = @(Get-Item -LiteralPath $unpacked -ErrorAction Stop) +
+            @(Get-ChildItem -LiteralPath $unpacked -Recurse -Force -ErrorAction Stop)
+          $reparseItems = @($packageItems | Where-Object {
+            ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+          })
+          if ($reparseItems.Count -gt 0) {
+            throw "Reparse points are not allowed in the packaged directory."
+          }
+
+          foreach ($requiredPath in @(
+            (Join-Path $unpacked "QTrade.exe"),
+            $asar,
+            (Join-Path $qtrade "server.py"),
+            (Join-Path $qtrade "qtrade_base_bridge.py"),
+            (Join-Path $qtrade "factors.py"),
+            (Join-Path $qtrade "scripts\daily_update_1830.py"),
+            (Join-Path $qtrade "qtrade_adapters\deepseek_harness\market_data.py"),
+            (Join-Path $qtrade "qtrade_adapters\deepseek_harness\freshness.py"),
+            (Join-Path $qtrade "qtrade_adapters\deepseek_harness\factor_library.py"),
+            (Join-Path $qtrade "qtrade_adapters\deepseek_harness\portal_refresh.py"),
+            (Join-Path $qtrade "qtrade_factors"),
+            (Join-Path $qtrade "paper_trading"),
+            (Join-Path $qtrade "static\control.html"),
+            (Join-Path $qtrade "static\js\control.js"),
+            (Join-Path $qtrade "static\css\control-console.css")
+          )) {
+            if (-not (Test-Path -LiteralPath $requiredPath)) {
+              throw "Required packaged path is missing: $requiredPath"
+            }
+          }
+
+          function Get-ComparableSha256([string] $path) {
+            $textExtensions = @(".css", ".html", ".js", ".json", ".md", ".py", ".toml", ".txt", ".yaml", ".yml")
+            $extension = [System.IO.Path]::GetExtension($path).ToLowerInvariant()
+            if ($textExtensions -contains $extension) {
+              $text = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+              $normalized = ($text -replace "`r`n", "`n") -replace "`r", "`n"
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($normalized)
+            } else {
+              $bytes = [System.IO.File]::ReadAllBytes($path)
+            }
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            try {
+              return ([System.BitConverter]::ToString(
+                $sha.ComputeHash($bytes)
+              )).Replace("-", "").ToLowerInvariant()
+            } finally {
+              $sha.Dispose()
+            }
+          }
+
+          $resourcePairs = @(
+            @{ source = "server.py"; packed = "server.py" },
+            @{ source = "qtrade_base_bridge.py"; packed = "qtrade_base_bridge.py" },
+            @{ source = "factors.py"; packed = "factors.py" },
+            @{ source = "qtrade.ico"; packed = "qtrade.ico" }
+          )
+
+          function Get-RelativeFileMap([string] $root, [string] $filter = "*") {
+            if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+              throw "Resource directory is missing."
+            }
+            $files = @{}
+            foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File -Filter $filter)) {
+              $relative = $file.FullName.Substring($root.Length).TrimStart("\", "/").Replace("\", "/")
+              $files[$relative] = $file.FullName
+            }
+            return $files
+          }
+
+          function Compare-ResourceTree([string] $sourceRoot, [string] $packedRoot, [string] $filter = "*") {
+            $sourceFiles = Get-RelativeFileMap $sourceRoot $filter
+            $packedFiles = Get-RelativeFileMap $packedRoot $filter
+            $missing = @($sourceFiles.Keys | Where-Object { -not $packedFiles.ContainsKey($_) })
+            $extra = @($packedFiles.Keys | Where-Object { -not $sourceFiles.ContainsKey($_) })
+            if ($missing.Count -gt 0 -or $extra.Count -gt 0) {
+              throw "Packaged resource file set differs from source."
+            }
+            foreach ($relative in $sourceFiles.Keys) {
+              $sourceHash = Get-ComparableSha256 $sourceFiles[$relative]
+              $packedHash = Get-ComparableSha256 $packedFiles[$relative]
+              if ($sourceHash -ne $packedHash) {
+                throw "Packaged resource differs from source: $relative"
+              }
+            }
+          }
+
+          foreach ($pair in $resourcePairs) {
+            $sourcePath = Join-Path $repoRoot $pair.source
+            $packedPath = Join-Path $qtrade $pair.packed
+            if (-not (Test-Path -LiteralPath $sourcePath)) {
+              throw "Source path is missing: $($pair.source)"
+            }
+            if ((Get-ComparableSha256 $sourcePath) -ne (Get-ComparableSha256 $packedPath)) {
+              throw "Packaged resource differs from source: $($pair.source)"
+            }
+          }
+
+          Compare-ResourceTree (Join-Path $repoRoot "static") (Join-Path $qtrade "static")
+          Compare-ResourceTree (Join-Path $repoRoot "qtrade_factors") (Join-Path $qtrade "qtrade_factors")
+          Compare-ResourceTree (Join-Path $repoRoot "paper_trading") (Join-Path $qtrade "paper_trading") "*.py"
+          Compare-ResourceTree (Join-Path $repoRoot "configs") (Join-Path $qtrade "configs")
+
+          Compare-ResourceTree (Join-Path $repoRoot "qtrade_adapters") (Join-Path $qtrade "qtrade_adapters") "*.py"
+
+          $scriptSource = Get-RelativeFileMap (Join-Path $repoRoot "scripts") "daily_update_1830.py"
+          $scriptPacked = Get-RelativeFileMap (Join-Path $qtrade "scripts") "*"
+          if ($scriptPacked.Count -ne 1 -or -not $scriptPacked.ContainsKey("daily_update_1830.py")) {
+            throw "Packaged scripts must contain only daily_update_1830.py."
+          }
+          if (-not $scriptSource.ContainsKey("daily_update_1830.py")) {
+            throw "Source daily_update_1830.py is missing."
+          }
+          if ((Get-ComparableSha256 $scriptSource["daily_update_1830.py"]) -ne (Get-ComparableSha256 $scriptPacked["daily_update_1830.py"])) {
+            throw "Packaged resource differs from source: scripts/daily_update_1830.py"
+          }
+
+          $forbiddenSegment = "^(third_party|credentials?|keys?|cache|tests|tmp|__pycache__)$"
+          $badFiles = @(
+            Get-ChildItem -LiteralPath $unpacked -Recurse -Force | ForEach-Object {
+              $relative = $_.FullName.Substring($unpacked.Length).TrimStart("\", "/")
+              $segments = $relative -split "[\\/]"
+              $hasForbiddenSegment = $false
+              foreach ($segment in $segments) {
+                if ($segment -match $forbiddenSegment) {
+                  $hasForbiddenSegment = $true
+                  break
+                }
+              }
+              if (
+                $hasForbiddenSegment -or
+                $relative -match "(?i)\.(pyc|pyo|env|key|pem|p12|pfx|csv|db)$"
+              ) {
+                [pscustomobject]@{ Path = $relative }
+              }
+            }
+          )
+          if ($badFiles.Count -gt 0) {
+            $badFiles | Format-Table -AutoSize | Out-String | Write-Error
+            throw "Forbidden packaged files were found."
+          }
+
+          $secretPattern = '(?i)-----BEGIN [^-]*PRIVATE KEY-----|["'']?(?:api[_-]?key|secret|token|password|private[_-]?key)["'']?\s*[:=]\s*["''](?=[^"'']{8,})[^"'']+["'']'
+          $forbiddenName = "(?i)(credential|secret|token|password|private[-_ ]?key|api[-_ ]?key)"
+          $forbiddenExtension = "(?i)\.(env|key|pem|p12|pfx)$"
+          $textExtensions = @(".css", ".html", ".js", ".json", ".md", ".py", ".toml", ".txt", ".yaml", ".yml")
+          foreach ($file in @(Get-ChildItem -LiteralPath $qtrade -Recurse -File)) {
+            if ($file.Name -match $forbiddenName -or $file.Name -match $forbiddenExtension) {
+              throw "Credential-like file name was found in the package."
+            }
+            if ($textExtensions -contains $file.Extension.ToLowerInvariant()) {
+              $text = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
+              if ($text -match $secretPattern) {
+                throw "Credential-like content was found in packaged text."
+              }
+            }
+          }
+
+          $env:QTRADE_AUDIT_REPO_ROOT = $repoRoot
+          $env:QTRADE_AUDIT_ASAR = $asar
+          $asarAudit = @'
+          const fs = require("fs");
+          const path = require("path");
+          const crypto = require("crypto");
+
+          const root = process.env.QTRADE_AUDIT_REPO_ROOT;
+          const archive = process.env.QTRADE_AUDIT_ASAR;
+          const asar = require(path.join(root, "electron", "node_modules", "@electron", "asar"));
+          const pairs = [
+            ["electron/main.js", "main.js"],
+            ["electron/runtime.js", "runtime.js"],
+            ["electron/preload.js", "preload.js"],
+            ["electron/package.json", "package.json"],
+          ];
+          const normalize = (text) => text.replace(/\r\n?/g, "\n");
+          const digest = (text) => crypto
+            .createHash("sha256")
+            .update(Buffer.from(normalize(text), "utf8"))
+            .digest("hex");
+          const forbiddenSegment = /^(third_party|credentials?|keys?|cache|tests|tmp|__pycache__)$/i;
+          const forbiddenFile = /\.(pyc|pyo|env|key|pem|p12|pfx|csv|db)$/i;
+          const forbiddenName = /(credential|secret|token|password|private[-_ ]?key|api[-_ ]?key)/i;
+          const secretPattern = /-----BEGIN [^-]*PRIVATE KEY-----|["']?(?:api[_-]?key|secret|token|password|private[_-]?key)["']?\s*[:=]\s*["'](?=[^"']{8,})[^"']+["']/i;
+          const textMember = /\.(css|html|js|json|md|py|toml|txt|yaml|yml)$/i;
+
+          (async () => {
+            const members = await asar.listPackage(archive);
+            for (const required of ["main.js", "runtime.js", "preload.js", "package.json"]) {
+              if (!members.includes(required)) {
+                throw new Error("app.asar is missing " + required);
+              }
+            }
+            for (const [source, packed] of pairs) {
+              const sourceText = fs.readFileSync(path.join(root, source), "utf8");
+              const packedText = (await asar.extractFile(archive, packed)).toString("utf8");
+              if (digest(sourceText) !== digest(packedText)) {
+                throw new Error("app.asar entry differs from source: " + source);
+              }
+            }
+            for (const member of members) {
+              if (forbiddenFile.test(member) || forbiddenName.test(member) || member.split("/").some((part) => forbiddenSegment.test(part))) {
+                throw new Error("Forbidden app.asar member: " + member);
+              }
+              if (textMember.test(member)) {
+                const text = (await asar.extractFile(archive, member)).toString("utf8");
+                if (secretPattern.test(text)) {
+                  throw new Error("Credential-like app.asar content was found.");
+                }
+              }
+            }
+            console.log("app.asar audit passed (" + members.length + " members)");
+          })().catch((error) => {
+            console.error(error.message);
+            process.exitCode = 1;
+          });
+          '@
+          & node -e $asarAudit
+          if ($LASTEXITCODE -ne 0) {
+            throw "app.asar audit failed."
+          }
+
+          $resourceCount = (Get-ChildItem -LiteralPath $qtrade -Recurse -File).Count
+          Write-Host "Electron package audit passed: $resourceCount qtrade files; forbidden=0"
