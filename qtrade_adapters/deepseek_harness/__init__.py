@@ -30,6 +30,15 @@ from .factor_library import (
 )
 from .handler import QtradeDeckHandler, serve_base_file
 from .market_data import MainboardMarketDataAdapter, normalize_code
+from .portal_refresh import (
+    PortalRefreshError,
+    PortalRefreshPaths,
+    PortalSnapshot,
+    portal_refresh_paths,
+    publish_snapshot,
+    read_complete_manifest,
+    read_current_snapshot,
+)
 from .runtime import ensure_harness, maybe_auto_update
 
 __all__ = [
@@ -58,6 +67,13 @@ __all__ = [
     "load_factor_snapshot",
     "MainboardMarketDataAdapter",
     "normalize_code",
+    "PortalRefreshError",
+    "PortalRefreshPaths",
+    "PortalSnapshot",
+    "portal_refresh_paths",
+    "publish_snapshot",
+    "read_complete_manifest",
+    "read_current_snapshot",
     "prepare_sys_path",
     "resolve_base_dir",
     "resolve_harness_port",

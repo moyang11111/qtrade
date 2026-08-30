@@ -62,6 +62,10 @@ function requiredRuntimeResources(paths) {
     ['paper_trading/engine.py', path.join(paths.paperTradingDir, 'engine.py')],
     ['qtrade_base_bridge.py', paths.bridgeScript],
     ['factors.py', paths.factorsScript],
+    [
+      'qtrade_adapters/deepseek_harness/portal_refresh.py',
+      path.join(paths.root, 'qtrade_adapters', 'deepseek_harness', 'portal_refresh.py'),
+    ],
   ];
 }
 
@@ -524,6 +528,7 @@ function buildServerArguments({
   dataDir,
   factorLibraryFile,
   stateDir,
+  userDataDir,
   csvOnly = false,
 } = {}) {
   const args = [
@@ -544,6 +549,9 @@ function buildServerArguments({
   }
   if (stateDir) {
     args.push('--state-dir', stateDir);
+  }
+  if (userDataDir) {
+    args.push('--user-data-dir', userDataDir);
   }
   if (csvOnly) {
     args.push('--csv-only');
@@ -606,6 +614,7 @@ async function startBackend({
   dataDir,
   factorLibraryFile,
   stateDir,
+  userDataDir,
   csvOnly = false,
   preferredPort = 0,
   spawnImpl = spawn,
@@ -628,6 +637,7 @@ async function startBackend({
     dataDir,
     factorLibraryFile,
     stateDir,
+    userDataDir,
     csvOnly,
   });
   let child;

@@ -90,10 +90,18 @@ class MainboardMarketDataAdapter:
         base_dir: str | Path | None = None,
         csv_dir: str | Path | None = None,
         min_history: int = MIN_HISTORY_ROWS,
+        overlay_db: str | Path | None = None,
+        overlay_only: bool = False,
+        overlay_manifest: dict | None = None,
+        overlay_metadata: list[dict] | None = None,
     ) -> None:
         self.base_dir = Path(base_dir) if base_dir is not None else resolve_base_dir()
         self.csv_dir = Path(csv_dir) if csv_dir is not None else None
         self.min_history = int(min_history)
+        self.overlay_db = Path(overlay_db).expanduser() if overlay_db is not None else None
+        self.overlay_only = bool(overlay_only)
+        self.overlay_manifest = dict(overlay_manifest or {})
+        self.overlay_metadata = [dict(item) for item in (overlay_metadata or [])]
         self.last_error: str | None = None
         self._snapshot_key: str | None = None
         self._records: list[dict] = []
@@ -108,6 +116,14 @@ class MainboardMarketDataAdapter:
 
     def _db_path(self, filename: str) -> Path:
         return self.cache_dir / filename
+
+    def _bar_paths(self) -> list[Path]:
+        if self.overlay_only:
+            return [self.overlay_db] if self.overlay_db is not None else []
+        paths = [self._db_path(filename) for filename in _DATABASE_FILES]
+        if self.overlay_db is not None:
+            paths.append(self.overlay_db)
+        return paths
 
     @staticmethod
     def _connect(path: Path) -> sqlite3.Connection:
@@ -152,6 +168,35 @@ class MainboardMarketDataAdapter:
         return schema
 
     def _metadata_rows(self) -> list[dict] | None:
+        if self.overlay_only:
+            if self.overlay_db is None or not self.overlay_db.is_file():
+                self.last_error = "mirror_missing"
+                return None
+            if self.overlay_metadata:
+                return [
+                    {
+                        **dict(item),
+                        "out_date": "",
+                        "status": "1",
+                        "security_type": "stock",
+                    }
+                    for item in self.overlay_metadata
+                ]
+            symbols = self.overlay_manifest.get("symbols")
+            if not isinstance(symbols, list) or not symbols:
+                self.last_error = "mirror_metadata_missing"
+                return None
+            return [
+                {
+                    "code": str(code),
+                    "name": str(code),
+                    "out_date": "",
+                    "status": "1",
+                    "security_type": "stock",
+                    "exchange": "SH" if str(code).startswith(("6", "9")) else "SZ",
+                }
+                for code in symbols
+            ]
         path = self._db_path("stock_basic.db")
         if not path.exists():
             self.last_error = "metadata_missing"
@@ -238,8 +283,7 @@ class MainboardMarketDataAdapter:
     def _coverage_rows_all(self) -> dict[str, dict] | None:
         coverage: dict[str, dict] = {}
         readable_database = False
-        for filename in _DATABASE_FILES:
-            path = self._db_path(filename)
+        for path in self._bar_paths():
             rows = self._coverage_rows(path)
             if rows is None:
                 if path.exists():
@@ -268,14 +312,14 @@ class MainboardMarketDataAdapter:
     def snapshot_token(self) -> str:
         """Return a stable DB-version token used to avoid repeated full scans."""
 
-        parts = []
-        for filename in ("stock_basic.db",) + _DATABASE_FILES:
-            path = self._db_path(filename)
+        parts = [f"overlay={self.overlay_manifest.get('token', '')}"] if self.overlay_only else []
+        paths = list(self._bar_paths()) if self.overlay_only else [self._db_path("stock_basic.db"), *self._bar_paths()]
+        for path in paths:
             try:
                 stat = path.stat()
-                parts.append(f"{filename}:{stat.st_size}:{stat.st_mtime_ns}")
+                parts.append(f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}")
             except OSError:
-                parts.append(f"{filename}:missing")
+                parts.append(f"{path.name}:missing")
         latest = max(
             (
                 str(item["latest_trade_date"])
@@ -335,7 +379,7 @@ class MainboardMarketDataAdapter:
                 "history_rows": history_rows,
                 "computable": history_rows >= self.min_history,
                 "eligible_reason": reason,
-                "source": "external_sqlite",
+                "source": "qtrade_mirror" if self.overlay_only else "external_sqlite",
             }
             self._records.append(record)
             self._record_by_code[code] = record
@@ -427,7 +471,7 @@ class MainboardMarketDataAdapter:
             ),
             "excluded_by_reason": dict(sorted(excluded.items())),
             "as_of": as_of,
-            "source": "external_sqlite",
+            "source": "qtrade_mirror" if self.overlay_only else "external_sqlite",
         }
 
     def _database_code(self, symbol: str) -> str | None:
@@ -475,8 +519,8 @@ class MainboardMarketDataAdapter:
         if cache_key in self._history_cache:
             return self._history_cache[cache_key].copy()
         merged: dict[str, dict] = {}
-        for filename in ("bars.db", "bars_incr.db"):
-            rows = self._fetch_history_rows(self._db_path(filename), database_code)
+        for path in self._bar_paths():
+            rows = self._fetch_history_rows(path, database_code)
             if rows is None:
                 return None
             for row in rows:
