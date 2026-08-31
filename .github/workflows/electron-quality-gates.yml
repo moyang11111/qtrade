@@ -158,7 +158,6 @@ jobs:
             (Join-Path $qtrade "qtrade_adapters\deepseek_harness\market_data.py"),
             (Join-Path $qtrade "qtrade_adapters\deepseek_harness\freshness.py"),
             (Join-Path $qtrade "qtrade_adapters\deepseek_harness\factor_library.py"),
-            (Join-Path $qtrade "qtrade_adapters\deepseek_harness\portal_refresh.py"),
             (Join-Path $qtrade "qtrade_factors"),
             (Join-Path $qtrade "paper_trading"),
             (Join-Path $qtrade "static\control.html"),
