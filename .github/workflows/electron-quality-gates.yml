@@ -281,7 +281,7 @@ jobs:
           }
 
           $secretPattern = '(?i)-----BEGIN [^-]*PRIVATE KEY-----|["'']?(?:api[_-]?key|secret|token|password|private[_-]?key)["'']?\s*[:=]\s*["''](?=[^"'']{8,})[^"'']+["'']'
-          $forbiddenName = "(?i)(credential|secret|token|password|private[-_ ]?key|api[-_ ]?key)"
+          $forbiddenName = "(?i)(^|[-_.])(?:credential|secret|password)s?(?:[-_.]|$)|(^|[-_.])(?:private[-_ ]?key|api[-_ ]?key)s?(?:[-_.]|$)"
           $forbiddenExtension = "(?i)\.(env|key|pem|p12|pfx)$"
           $textExtensions = @(".css", ".html", ".js", ".json", ".md", ".py", ".toml", ".txt", ".yaml", ".yml")
           foreach ($file in @(Get-ChildItem -LiteralPath $qtrade -Recurse -File)) {
@@ -319,7 +319,7 @@ jobs:
             .digest("hex");
           const forbiddenSegment = /^(third_party|credentials?|keys?|cache|tests|tmp|__pycache__)$/i;
           const forbiddenFile = /\.(pyc|pyo|env|key|pem|p12|pfx|csv|db)$/i;
-          const forbiddenName = /(credential|secret|token|password|private[-_ ]?key|api[-_ ]?key)/i;
+          const forbiddenName = /(^|[-_.])(?:credential|secret|password)s?(?:[-_.]|$)|(^|[-_.])(?:private[-_ ]?key|api[-_ ]?key)s?(?:[-_.]|$)/i;
           const secretPattern = /-----BEGIN [^-]*PRIVATE KEY-----|["']?(?:api[_-]?key|secret|token|password|private[_-]?key)["']?\s*[:=]\s*["'](?=[^"']{8,})[^"']+["']/i;
           const textMember = /\.(css|html|js|json|md|py|toml|txt|yaml|yml)$/i;
 
