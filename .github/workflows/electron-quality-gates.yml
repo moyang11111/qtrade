@@ -255,7 +255,7 @@ jobs:
             throw "Packaged resource differs from source: scripts/daily_update_1830.py"
           }
 
-          $forbiddenSegment = "^(third_party|credentials?|keys?|cache|tests|tmp|__pycache__)$"
+          $forbiddenSegment = "^(third_party|credentials?|keys?|cache|tests|tmp|__pycache__|node_modules)$"
           $badFiles = @(
             Get-ChildItem -LiteralPath $unpacked -Recurse -Force | ForEach-Object {
               $relative = $_.FullName.Substring($unpacked.Length).TrimStart("\", "/")
@@ -310,21 +310,59 @@ jobs:
             ["electron/main.js", "main.js"],
             ["electron/runtime.js", "runtime.js"],
             ["electron/preload.js", "preload.js"],
-            ["electron/package.json", "package.json"],
           ];
           const normalize = (text) => text.replace(/\r\n?/g, "\n");
           const digest = (text) => crypto
             .createHash("sha256")
             .update(Buffer.from(normalize(text), "utf8"))
             .digest("hex");
-          const forbiddenSegment = /^(third_party|credentials?|keys?|cache|tests|tmp|__pycache__)$/i;
+          const runtimePackageKeys = ["description", "main", "name", "version"];
+          const sourcePackage = JSON.parse(fs.readFileSync(path.join(root, "electron/package.json"), "utf8"));
+          const packedPackage = JSON.parse((await asar.extractFile(archive, "package.json")).toString("utf8"));
+          const isPlainObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+          const isExactKeySet = (value, keys) => Object.keys(value).sort().join("\n") === keys.slice().sort().join("\n");
+          if (!isPlainObject(sourcePackage) || !isPlainObject(packedPackage) || !isExactKeySet(packedPackage, runtimePackageKeys)) {
+            throw new Error("app.asar package.json schema differs from the runtime contract.");
+          }
+          const sourceDependencies = sourcePackage.dependencies;
+          if (sourceDependencies !== undefined && (!isPlainObject(sourceDependencies) || Object.keys(sourceDependencies).length !== 0)) {
+            throw new Error("Source package.json has an unsupported production dependency set.");
+          }
+          for (const key of runtimePackageKeys) {
+            if (typeof sourcePackage[key] !== "string" || typeof packedPackage[key] !== "string" || sourcePackage[key] !== packedPackage[key]) {
+              throw new Error("app.asar package.json runtime field differs from source.");
+            }
+          }
+          if (packedPackage.main !== "main.js") {
+            throw new Error("app.asar package.json main entry is invalid.");
+          }
+          const forbiddenSegment = /^(third_party|credentials?|keys?|cache|tests|tmp|__pycache__|node_modules)$/i;
           const forbiddenFile = /\.(pyc|pyo|env|key|pem|p12|pfx|csv|db)$/i;
           const forbiddenName = /(^|[-_.])(?:credential|secret|password)s?(?:[-_.]|$)|(^|[-_.])(?:private[-_ ]?key|api[-_ ]?key)s?(?:[-_.]|$)/i;
           const secretPattern = /-----BEGIN [^-]*PRIVATE KEY-----|["']?(?:api[_-]?key|secret|token|password|private[_-]?key)["']?\s*[:=]\s*["'](?=[^"']{8,})[^"']+["']/i;
           const textMember = /\.(css|html|js|json|md|py|toml|txt|yaml|yml)$/i;
 
           (async () => {
-            const members = (await asar.listPackage(archive)).map((member) => member.replace(/^[/\\]+/, ""));
+            const canonicalizeMember = (member) => {
+              if (typeof member !== "string" || !/^[/\\]/.test(member)) {
+                throw new Error("app.asar contains a non-rooted member path.");
+              }
+              const normalized = member.replace(/\\/g, "/");
+              const relative = normalized.slice(1);
+              if (!relative || relative.startsWith("/") || /^[A-Za-z]:/.test(relative) || relative.includes(String.fromCharCode(0))) {
+                throw new Error("app.asar contains an unsafe member path.");
+              }
+              const parts = relative.split("/");
+              if (parts.some((part) => !part || part === "." || part === "..")) {
+                throw new Error("app.asar contains a traversal member path.");
+              }
+              return parts.join("/");
+            };
+            const rawMembers = await asar.listPackage(archive);
+            const members = rawMembers.map(canonicalizeMember);
+            if (new Set(members).size !== members.length) {
+              throw new Error("app.asar contains duplicate member paths.");
+            }
             for (const required of ["main.js", "runtime.js", "preload.js", "package.json"]) {
               if (!members.includes(required)) {
                 throw new Error("app.asar is missing " + required);
