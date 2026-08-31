@@ -324,7 +324,7 @@ jobs:
           const textMember = /\.(css|html|js|json|md|py|toml|txt|yaml|yml)$/i;
 
           (async () => {
-            const members = await asar.listPackage(archive);
+            const members = (await asar.listPackage(archive)).map((member) => member.replace(/^[/\\]+/, ""));
             for (const required of ["main.js", "runtime.js", "preload.js", "package.json"]) {
               if (!members.includes(required)) {
                 throw new Error("app.asar is missing " + required);
