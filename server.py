@@ -52,6 +52,9 @@ from qtrade_adapters.deepseek_harness.market_data import (
     MainboardMarketDataAdapter,
     normalize_code,
 )
+from qtrade_adapters.deepseek_harness.portal_refresh import (
+    read_current_snapshot,
+)
 from qtrade_adapters.deepseek_harness.factor_library import (
     FactorLibrary,
     FactorLibraryError,
@@ -258,16 +261,36 @@ def _ts(index, i) -> int:
 class DataService:
     """股票数据服务：实时（腾讯）优先，CSV 回退；全部仅内存缓存。"""
 
-    def __init__(self, data_dir: str, live: bool = True):
+    def __init__(
+        self,
+        data_dir: str,
+        live: bool = True,
+        portal_state_dir: str | Path | None = None,
+        portal_user_data_dir: str | Path | None = None,
+    ):
         self.data_dir = Path(data_dir)
-        self.live = live
-        self.live_src = TencentLiveSource() if live else None
         self._df_cache: dict[str, pd.DataFrame] = {}
         self._ind_cache: dict[str, dict] = {}
         self._csv_symbols: list[str] | None = None
+        self.portal_state_dir = Path(portal_state_dir).expanduser() if portal_state_dir is not None else None
+        self.portal_user_data_dir = (
+            Path(portal_user_data_dir).expanduser() if portal_user_data_dir is not None else None
+        )
+        portal_snapshot = (
+            read_current_snapshot(self.portal_state_dir, user_data_dir=self.portal_user_data_dir)
+            if self.portal_state_dir is not None and self.portal_user_data_dir is not None
+            else None
+        )
+        self.portal_mirror_active = portal_snapshot is not None
+        self.live = bool(live and not self.portal_mirror_active)
+        self.live_src = TencentLiveSource() if self.live else None
         self.mainboard_adapter = MainboardMarketDataAdapter(
             base_dir=qtrade_base_bridge.base_dir(),
             csv_dir=self.data_dir,
+            overlay_db=portal_snapshot.database if portal_snapshot is not None else None,
+            overlay_only=self.portal_mirror_active,
+            overlay_manifest=dict(portal_snapshot.manifest) if portal_snapshot is not None else None,
+            overlay_metadata=list(portal_snapshot.metadata) if portal_snapshot is not None else None,
         )
         self._candidate_symbols: set[str] = set()
 
@@ -278,7 +301,7 @@ class DataService:
 
         live_src 存在就尝试实时（即使启动时可用性探测失败，也能在运行中恢复实时）。
         """
-        if self.live_src:
+        if self.live_src and not self.portal_mirror_active:
             try:
                 df = self.live_src.fetch_kline(symbol, count)  # 内部 TTL 缓存
                 self._df_cache[symbol] = df
@@ -318,6 +341,8 @@ class DataService:
                     return frame
             except Exception:
                 pass
+        if self.portal_mirror_active:
+            return None
         return self._load_csv(symbol)
 
     # ---------- 股票列表 ----------
@@ -327,6 +352,8 @@ class DataService:
 
         if self.mainboard_adapter.available:
             return self.mainboard_adapter.scan()
+        if self.portal_mirror_active:
+            return []
         if self._csv_symbols is None:
             symbols = []
             if self.data_dir.exists():
@@ -348,6 +375,8 @@ class DataService:
 
         if self.mainboard_adapter.available:
             return self.mainboard_adapter.scan()
+        if self.portal_mirror_active:
+            return []
         seen: set[str] = set()
         symbols: list[str] = []
         for raw in self.scan():
@@ -364,6 +393,8 @@ class DataService:
 
         if self.mainboard_adapter.available:
             return self.mainboard_adapter.metadata(symbol)
+        if self.portal_mirror_active:
+            return None
         code = normalize_code(symbol)
         if code not in set(self.mainboard_symbols()):
             return None
@@ -400,6 +431,17 @@ class DataService:
 
         if self.mainboard_adapter.available:
             return self.mainboard_adapter.universe_summary(self._candidate_symbols)
+        if self.portal_mirror_active:
+            return {
+                "total": 0,
+                "computable": 0,
+                "tradable": 0,
+                "candidate": 0,
+                "excluded_by_reason": {},
+                "as_of": None,
+                "source": "unavailable",
+                "reason": self.mainboard_adapter.last_error or "mirror_unavailable",
+            }
         records = []
         as_of = None
         for code in self.mainboard_symbols():
@@ -4262,6 +4304,11 @@ def main():
         default=None,
         help="QTrade 更新状态与诊断日志目录（由桌面运行时固定传入）",
     )
+    parser.add_argument(
+        "--user-data-dir",
+        default=None,
+        help="QTrade 受信任的用户数据根目录（由桌面运行时固定传入）",
+    )
     parser.add_argument("--single-instance", action="store_true",
                         help="后台服务模式：端口被占用时直接退出（不换端口），防止重复进程")
     args = parser.parse_args()
@@ -4277,7 +4324,12 @@ def main():
         print(f"ℹ️  端口 {args.port} 已有 QTrade 服务在运行，本实例退出（--single-instance）")
         return
 
-    SERVICE = DataService(data_dir, live=live)
+    SERVICE = DataService(
+        data_dir,
+        live=live,
+        portal_state_dir=UPDATE_STATUS_PATH.parent,
+        portal_user_data_dir=args.user_data_dir,
+    )
     symbols = SERVICE.scan()
 
     # 自动带上底座 HARNESS(3081)

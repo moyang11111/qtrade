@@ -98,6 +98,7 @@ test('required packaged resources include the Python server and its local import
     'paper_trading/engine.py',
     'qtrade_base_bridge.py',
     'factors.py',
+    'qtrade_adapters/deepseek_harness/portal_refresh.py',
   ]);
   assert.doesNotThrow(() => runtime.assertRuntimeResources(paths));
 });
@@ -482,9 +483,11 @@ test('backend arguments pass the server-owned state directory explicitly', () =>
     serverScript: 'server.py',
     port: 43212,
     stateDir: 'C:\\Users\\Test\\AppData\\state',
+    userDataDir: 'C:\\Users\\Test\\AppData',
   });
-  assert.deepEqual(args.slice(-2), [
+  assert.deepEqual(args.slice(-4), [
     '--state-dir', 'C:\\Users\\Test\\AppData\\state',
+    '--user-data-dir', 'C:\\Users\\Test\\AppData',
   ]);
 });
 
@@ -565,6 +568,7 @@ test('backend stop performs the graceful handshake once and carries stateDir', a
     paths: runtime.resolveRuntimePaths({ rootOverride: PROJECT_ROOT }),
     python: { command: 'test-python', args: [] },
     stateDir: 'C:\\Users\\Test\\AppData\\state',
+    userDataDir: 'C:\\Users\\Test\\AppData',
     spawnImpl: (command, args) => {
       spawnArgs = { command, args };
       return child;
@@ -580,6 +584,8 @@ test('backend stop performs the graceful handshake once and carries stateDir', a
 
   assert.ok(spawnArgs.args.includes('--state-dir'));
   assert.equal(spawnArgs.args[spawnArgs.args.indexOf('--state-dir') + 1], 'C:\\Users\\Test\\AppData\\state');
+  assert.ok(spawnArgs.args.includes('--user-data-dir'));
+  assert.equal(spawnArgs.args[spawnArgs.args.indexOf('--user-data-dir') + 1], 'C:\\Users\\Test\\AppData');
   await Promise.all([running.stop(), running.stop()]);
   assert.equal(shutdowns.length, 1);
   assert.equal(shutdowns[0].port, running.port);
@@ -646,6 +652,7 @@ test('preload, package resources, and launcher are present and portable', () => 
     'qtrade_adapters/deepseek_harness/market_data.py',
     'qtrade_adapters/deepseek_harness/freshness.py',
     'qtrade_adapters/deepseek_harness/factor_library.py',
+    'qtrade_adapters/deepseek_harness/portal_refresh.py',
     'qtrade_adapters/deepseek_harness/runtime.py',
   ]) {
     assert.ok(fs.existsSync(path.join(PROJECT_ROOT, relativePath)), relativePath);
