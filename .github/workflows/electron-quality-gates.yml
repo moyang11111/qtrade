@@ -43,10 +43,6 @@ jobs:
     name: Electron packaging / Windows
     runs-on: windows-2022
     timeout-minutes: 30
-    env:
-      npm_config_cache: ${{ runner.temp }}/qtrade-electron-npm-cache
-      ELECTRON_CACHE: ${{ runner.temp }}/qtrade-electron-binary-cache
-      ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/qtrade-electron-builder-cache
     defaults:
       run:
         shell: pwsh
@@ -57,6 +53,18 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+
+      - name: Configure isolated build caches
+        run: |
+          $ErrorActionPreference = "Stop"
+          $npmCache = Join-Path $env:RUNNER_TEMP "qtrade-electron-npm-cache"
+          $electronCache = Join-Path $env:RUNNER_TEMP "qtrade-electron-binary-cache"
+          $builderCache = Join-Path $env:RUNNER_TEMP "qtrade-electron-builder-cache"
+          @(
+            "npm_config_cache=$npmCache",
+            "ELECTRON_CACHE=$electronCache",
+            "ELECTRON_BUILDER_CACHE=$builderCache"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
