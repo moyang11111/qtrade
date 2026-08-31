@@ -316,6 +316,13 @@ jobs:
             .createHash("sha256")
             .update(Buffer.from(normalize(text), "utf8"))
             .digest("hex");
+          const forbiddenSegment = /^(third_party|credentials?|keys?|cache|tests|tmp|__pycache__|node_modules)$/i;
+          const forbiddenFile = /\.(pyc|pyo|env|key|pem|p12|pfx|csv|db)$/i;
+          const forbiddenName = /(^|[-_.])(?:credential|secret|password)s?(?:[-_.]|$)|(^|[-_.])(?:private[-_ ]?key|api[-_ ]?key)s?(?:[-_.]|$)/i;
+          const secretPattern = /-----BEGIN [^-]*PRIVATE KEY-----|["']?(?:api[_-]?key|secret|token|password|private[_-]?key)["']?\s*[:=]\s*["'](?=[^"']{8,})[^"']+["']/i;
+          const textMember = /\.(css|html|js|json|md|py|toml|txt|yaml|yml)$/i;
+
+          (async () => {
           const runtimePackageKeys = ["description", "main", "name", "version"];
           const sourcePackage = JSON.parse(fs.readFileSync(path.join(root, "electron/package.json"), "utf8"));
           const packedPackage = JSON.parse((await asar.extractFile(archive, "package.json")).toString("utf8"));
@@ -336,13 +343,6 @@ jobs:
           if (packedPackage.main !== "main.js") {
             throw new Error("app.asar package.json main entry is invalid.");
           }
-          const forbiddenSegment = /^(third_party|credentials?|keys?|cache|tests|tmp|__pycache__|node_modules)$/i;
-          const forbiddenFile = /\.(pyc|pyo|env|key|pem|p12|pfx|csv|db)$/i;
-          const forbiddenName = /(^|[-_.])(?:credential|secret|password)s?(?:[-_.]|$)|(^|[-_.])(?:private[-_ ]?key|api[-_ ]?key)s?(?:[-_.]|$)/i;
-          const secretPattern = /-----BEGIN [^-]*PRIVATE KEY-----|["']?(?:api[_-]?key|secret|token|password|private[_-]?key)["']?\s*[:=]\s*["'](?=[^"']{8,})[^"']+["']/i;
-          const textMember = /\.(css|html|js|json|md|py|toml|txt|yaml|yml)$/i;
-
-          (async () => {
             const canonicalizeMember = (member) => {
               if (typeof member !== "string" || !/^[/\\]/.test(member)) {
                 throw new Error("app.asar contains a non-rooted member path.");
