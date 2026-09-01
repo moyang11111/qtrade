@@ -26,11 +26,12 @@ DAILY_UPDATE_TIME = datetime.time(18, 30)
 DAILY_UPDATE_TIMEOUT_SECONDS = 7200
 MANUAL_UPDATE_PROCESS_POLL_SECONDS = 0.1
 MANUAL_UPDATE_STOP_TIMEOUT_SECONDS = 2.0
+MANUAL_UPDATE_STARTUP_TIMEOUT_SECONDS = 3.0
 MANUAL_UPDATE_LOG_MAX_BYTES = 256 * 1024
 _AUTO_UPDATE_LOCK = threading.Lock()
 _AUTO_UPDATE_SCHEDULER = None
 _AUTO_UPDATE_THREAD = None
-_MANUAL_UPDATE_TERMINAL_STATES = frozenset({"success", "skip", "failure", "aborted", "timed_out"})
+_MANUAL_UPDATE_TERMINAL_STATES = frozenset({"success", "portal_success", "skip", "failure", "aborted", "timed_out"})
 _MANUAL_UPDATE_STEPS = frozenset({
     "calendar",
     "resolve_deck",
@@ -76,6 +77,23 @@ _MANUAL_UPDATE_REASONS = frozenset({
     "timeout",
     "process_timeout",
     "freshness_capture_failed",
+    "portal_completed",
+    "portal_refresh_failed",
+    "calendar_closed",
+    "universe_unavailable",
+    "provider_schema",
+    "provider_failed",
+    "provider_unreachable",
+    "checkpoint_corrupt",
+    "checkpoint_io",
+    "lease_busy",
+    "stale_running",
+    "item_timeout",
+    "batch_timeout",
+    "job_timeout",
+    "publish_timeout",
+    "publish_failed",
+    "reload_failed",
 })
 _MANUAL_UPDATE_FRESHNESS_GROUPS = ("portal", "factors", "decision", "sync")
 _MANUAL_UPDATE_FRESHNESS_SOURCES = frozenset({
@@ -83,6 +101,7 @@ _MANUAL_UPDATE_FRESHNESS_SOURCES = frozenset({
     "factor_artifacts",
     "decision_artifact",
     "sync_target",
+    "qtrade_mirror",
     "dry_run",
     "unavailable",
 })
@@ -866,6 +885,7 @@ def read_manual_update_status(path: Path) -> dict[str, object]:
     outputs = {"portal": False, "factors": False, "decision": False, "sync": False}
     fallback = {
         "schema_version": 1,
+        "mode": "full_pipeline",
         "state": "idle",
         "trade_date": None,
         "started_at": None,
@@ -890,6 +910,8 @@ def read_manual_update_status(path: Path) -> dict[str, object]:
     allowed_disk_states = _MANUAL_UPDATE_TERMINAL_STATES | {"running"}
     state = raw_state if isinstance(raw_state, str) and raw_state in allowed_disk_states else "idle"
     result = dict(fallback)
+    mode = payload.get("mode")
+    result["mode"] = mode if mode in {"full_pipeline", "portal_only"} else "full_pipeline"
     result["state"] = state
     result["trade_date"] = _safe_date_text(payload.get("trade_date"))
     result["started_at"] = _safe_timestamp_text(payload.get("started_at"))
@@ -1161,6 +1183,9 @@ class ManualUpdateController:
         run_fn=None,
         thread_factory=None,
         subprocess_module=None,
+        user_data_dir: Path | None = None,
+        mode: str = "full_pipeline",
+        on_success=None,
     ):
         self.base_dir_fn = base_dir_fn or config.resolve_base_dir
         self.project_root = config.PROJECT_ROOT if project_root is None else Path(project_root)
@@ -1176,6 +1201,9 @@ class ManualUpdateController:
         self.log_file = Path(
             log_file or self.status_file.with_name("daily_update_1830.log")
         )
+        self.user_data_dir = Path(user_data_dir) if user_data_dir is not None else None
+        self.mode = mode if mode in {"full_pipeline", "portal_only"} else "full_pipeline"
+        self.on_success = on_success
         self.clock = clock or datetime.datetime.now
         self._uses_default_run_fn = run_fn is None
         self.run_fn = run_fn or run_daily_update
@@ -1189,6 +1217,11 @@ class ManualUpdateController:
         self._lease_identity = None
         self._lease_generation = None
         self._job_id = None
+        self._startup_event = None
+        self._startup_result = None
+        self._startup_generation = None
+        self._terminal_event = None
+        self._terminal_generation = None
         self._snapshot = self._idle_snapshot()
 
     @staticmethod
@@ -1198,6 +1231,7 @@ class ManualUpdateController:
     def _idle_snapshot(self):
         return {
             "schema_version": 1,
+            "mode": self.mode,
             "accepted": False,
             "state": "idle",
             "trade_date": None,
@@ -1227,6 +1261,7 @@ class ManualUpdateController:
     ):
         snapshot = self._idle_snapshot()
         snapshot.update({
+            "mode": self.mode,
             "accepted": state == "accepted",
             "state": state,
             "trade_date": _safe_date_text(target),
@@ -1270,6 +1305,7 @@ class ManualUpdateController:
         started_text = _safe_timestamp_text(started_at) or safe.get("started_at")
         payload = {
             "schema_version": 1,
+            "mode": safe.get("mode", self.mode),
             "trade_date": target_text,
             "state": state,
             "reason": reason,
@@ -1310,6 +1346,7 @@ class ManualUpdateController:
             self.status_file,
             {
                 "schema_version": 1,
+                "mode": self.mode,
                 "accepted": state == "accepted",
                 "trade_date": target.isoformat(),
                 "state": state,
@@ -1468,6 +1505,11 @@ class ManualUpdateController:
                 run_kwargs["interruptible"] = True
                 if self.subprocess_module is not None:
                     run_kwargs["subprocess_module"] = self.subprocess_module
+            else:
+                run_kwargs["user_data_dir"] = self.user_data_dir
+                if self.mode == "portal_only":
+                    run_kwargs["startup_event"] = self._startup_event
+                    run_kwargs["startup_result"] = self._startup_result
             returncode = self.run_fn(
                 base,
                 target,
@@ -1488,6 +1530,25 @@ class ManualUpdateController:
                         job_id=job_id,
                         override_terminal=True,
                     )
+            elif returncode == 0 and self.on_success is not None:
+                try:
+                    reloaded = self.on_success(_read_status_record(self.status_file))
+                except Exception:  # noqa: BLE001 - keep the public result stable
+                    reloaded = False
+                with self._lock:
+                    if reloaded is False:
+                        terminal = self._write_terminal_status_locked(
+                            target=target,
+                            state="failure",
+                            reason="reload_failed",
+                            started_at=started_at,
+                            job_id=job_id,
+                            override_terminal=True,
+                        )
+                    else:
+                        terminal = self._set_terminal_from_disk(
+                            int(returncode or 0), target, started_at=started_at
+                        )
             else:
                 with self._lock:
                     terminal = self._set_terminal_from_disk(
@@ -1528,6 +1589,20 @@ class ManualUpdateController:
                     terminal["started_at"] = started_at
                 self._snapshot = terminal
                 self._worker = None
+            if (
+                self._startup_generation == generation
+                and self._startup_event is not None
+                and self._startup_result is not None
+            ):
+                self._startup_result.setdefault("ready", False)
+                self._startup_event.set()
+                self._startup_event = None
+                self._startup_result = None
+                self._startup_generation = None
+            if self._terminal_generation == generation and self._terminal_event is not None:
+                self._terminal_event.set()
+                self._terminal_event = None
+                self._terminal_generation = None
             if self._lease_generation == generation:
                 self._release_lease_locked()
                 self._lease_generation = None
@@ -1559,15 +1634,23 @@ class ManualUpdateController:
                 self._snapshot["accepted"] = False
                 self._snapshot["reason"] = "already_running"
                 return dict(self._snapshot)
+            previous_mode = previous.get("mode")
+            previous_success = (
+                previous.get("state") == "portal_success"
+                if self.mode == "portal_only"
+                else previous.get("state") == "success"
+            )
             if (
                 previous.get("trade_date") == target.isoformat()
-                and previous.get("state") == "success"
+                and previous_mode == self.mode
+                and previous_success
             ):
                 self._snapshot = previous
                 self._snapshot["reason"] = "already_success"
                 return dict(self._snapshot)
             if (
                 previous.get("trade_date") == target.isoformat()
+                and previous_mode == self.mode
                 and previous.get("reason") in _MANUAL_UPDATE_IDEMPOTENT_REASONS
                 and previous.get("state") in {"skip", "failure"}
             ):
@@ -1609,6 +1692,18 @@ class ManualUpdateController:
             generation = self._generation
             self._lease_generation = generation
             self._job_id = uuid.uuid4().hex
+            startup_event = None
+            startup_result = None
+            terminal_event = None
+            if self.mode == "portal_only" and not self._uses_default_run_fn:
+                startup_event = threading.Event()
+                startup_result = {}
+                terminal_event = threading.Event()
+                self._startup_event = startup_event
+                self._startup_result = startup_result
+                self._startup_generation = generation
+                self._terminal_event = terminal_event
+                self._terminal_generation = generation
             self._snapshot = self._snapshot_for(
                 state="accepted",
                 target=target,
@@ -1633,6 +1728,16 @@ class ManualUpdateController:
                 self._worker = worker
                 worker.start()
             except Exception:  # noqa: BLE001 - stable API failure, no raw error
+                if startup_event is not None:
+                    startup_result["ready"] = False
+                    startup_event.set()
+                    self._startup_event = None
+                    self._startup_result = None
+                    self._startup_generation = None
+                if terminal_event is not None:
+                    terminal_event.set()
+                    self._terminal_event = None
+                    self._terminal_generation = None
                 self._worker = None
                 self._release_lease_locked()
                 self._lease_generation = None
@@ -1651,7 +1756,18 @@ class ManualUpdateController:
                     reason="update_failed",
                     finished_at=current.isoformat(timespec="seconds"),
                 )
-            return dict(self._snapshot)
+            result = dict(self._snapshot)
+        if startup_event is not None:
+            if not startup_event.wait(timeout=MANUAL_UPDATE_STARTUP_TIMEOUT_SECONDS):
+                self.stop(timeout=MANUAL_UPDATE_STOP_TIMEOUT_SECONDS)
+                terminal_event.wait(timeout=MANUAL_UPDATE_STOP_TIMEOUT_SECONDS)
+                return self.status()
+            if startup_result.get("ready") is not True:
+                if not terminal_event.wait(timeout=MANUAL_UPDATE_STOP_TIMEOUT_SECONDS):
+                    self.stop(timeout=MANUAL_UPDATE_STOP_TIMEOUT_SECONDS)
+                    terminal_event.wait(timeout=MANUAL_UPDATE_STOP_TIMEOUT_SECONDS)
+                return self.status()
+        return result
 
     def status(self) -> dict[str, object]:
         with self._lock:
@@ -1714,6 +1830,10 @@ class ManualUpdateController:
                     reason="application_shutdown",
                     started_at=stopped_started_at,
                 )
+                if self._terminal_generation is not None and self._terminal_event is not None:
+                    self._terminal_event.set()
+                    self._terminal_event = None
+                    self._terminal_generation = None
         if worker is not None and worker is not threading.current_thread():
             worker.join(timeout=join_timeout)
         with self._lock:
@@ -1831,6 +1951,14 @@ def maybe_auto_update(
         stop_event = threading.Event()
 
         def invoke(target: datetime.date) -> int:
+            previous = read_manual_update_status(effective_status)
+            if (
+                previous.get("mode") == "portal_only"
+                and previous.get("state") == "portal_success"
+                and previous.get("trade_date") == target.isoformat()
+            ):
+                print("[auto-update] 当天门户已刷新，自动全量更新跳过", flush=True)
+                return 0
             _reclaim_dead_lease(shared_lock)
             lease = _UpdateLease(shared_lock)
             if not lease.acquire():

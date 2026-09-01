@@ -17,7 +17,7 @@
   // job is never shown as failed merely because the client deadline elapsed.
   const MANUAL_UPDATE_MAX_WAIT_MS = (3 * 5 * 7200 + 2 * 300 + 60) * 1000;
   const MANUAL_UPDATE_STATES = new Set([
-    'idle', 'accepted', 'running', 'success', 'skip', 'failure', 'aborted', 'timed_out',
+    'idle', 'accepted', 'running', 'success', 'portal_success', 'skip', 'failure', 'aborted', 'timed_out',
   ]);
   const MANUAL_UPDATE_REASONS = new Set([
     'accepted', 'running', 'before_cutoff', 'already_running', 'already_success',
@@ -25,7 +25,10 @@
     'calendar_api', 'calendar_api_closed', 'weekend', 'deck_missing', 'step_failed',
     'update_failed', 'status_unavailable', 'completed', 'aborted', 'application_shutdown',
     'manual_stop', 'stale_running', 'timeout', 'process_timeout',
-    'freshness_capture_failed',
+    'freshness_capture_failed', 'portal_completed', 'portal_refresh_failed', 'calendar_closed',
+    'universe_unavailable', 'provider_schema', 'provider_failed', 'provider_unreachable',
+    'checkpoint_corrupt', 'checkpoint_io', 'lease_busy', 'stale_running', 'item_timeout',
+    'batch_timeout', 'job_timeout', 'publish_timeout', 'publish_failed', 'reload_failed',
   ]);
   const MANUAL_UPDATE_ERROR_CODES = new Set([
     'before_cutoff', 'already_running', 'lock_busy', 'request_too_large',
@@ -36,7 +39,7 @@
   const NAVIGATION_PAGES = new Set([
     'market', 'portal', 'pitch', 'factorboard', 'factors', 'autopaper',
   ]);
-  const SAFE_STATES = new Set(['running', 'success', 'skip', 'failure', 'unknown']);
+  const SAFE_STATES = new Set(['running', 'success', 'portal_success', 'skip', 'failure', 'unknown']);
   const SAFE_HARNESS_STATES = new Set(['disabled', 'unreachable', 'service_reachable']);
   const SAFE_SOURCES = new Set([
     'external_sqlite', 'factor_artifacts', 'decision_artifact', 'sync_target', 'dry_run',
@@ -192,7 +195,7 @@
 
   function stateLabel(value) {
     return {
-      running: '更新中', success: '已成功', skip: '已跳过', failure: '失败', unknown: '未确认',
+      running: '更新中', success: '已成功', portal_success: '门户已刷新', skip: '已跳过', failure: '失败', unknown: '未确认',
     }[safeState(value)];
   }
 
@@ -205,7 +208,9 @@
   function reasonLabel(value) {
     return {
       completed: '流水线完成', dry_run: '演练状态', pipeline_running: '流水线运行中',
-      started: '已启动', calendar_unavailable: '交易日历不可确认', deck_missing: '底座不可用',
+      started: '已启动', calendar_unavailable: '交易日历不可确认', calendar_closed: '交易日历显示休市', deck_missing: '底座不可用',
+      portal_completed: '门户已刷新；因子、决策和同步将在后续阶段运行。',
+      portal_refresh_failed: '门户刷新失败，旧数据保持不变。',
       step_failed: '步骤失败', update_failed: '更新失败', status_unavailable: '状态文件不可用',
       aborted: '已中止', application_shutdown: '应用关闭，更新已中止',
       manual_stop: '已停止等待', stale_running: '发现过期任务，已安全中止',
@@ -232,6 +237,7 @@
       accepted: '已接收',
       running: '更新中',
       success: '已成功',
+      portal_success: '门户已刷新',
       skip: '已跳过',
       failure: '失败',
       aborted: '已中止',
@@ -241,8 +247,11 @@
 
   function manualReasonLabel(value) {
     return {
-      accepted: '已接收，正在准备完整流水线。',
-      running: '正在按门户、因子、决策、同步顺序运行。',
+      accepted: '已接收，正在准备门户刷新。',
+      running: '正在分批刷新门户数据。',
+      portal_completed: '门户数据已刷新；因子、决策和同步将在后续阶段运行。',
+      portal_refresh_failed: '门户刷新失败，旧数据保持不变。',
+      calendar_closed: '交易日历显示今日休市。',
       before_cutoff: '18:30 后可运行。',
       already_running: '已有更新正在运行，请稍候。',
       already_success: '当天已成功更新，无需重复运行。',
@@ -304,6 +313,7 @@
         && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(payload.finished_at)
         ? payload.finished_at.slice(0, 32) : null,
       reason: safeManualReason(payload.reason),
+      mode: payload.mode === 'portal_only' ? 'portal_only' : 'full_pipeline',
       outputs: Object.fromEntries(MANUAL_UPDATE_OUTPUTS.map((key) => [key, outputs[key] === true])),
       freshness: Object.fromEntries(['portal', 'factors', 'decision', 'sync'].flatMap((key) => {
         const item = asObject(freshness[key]);
@@ -840,7 +850,7 @@
     const active = stateValue === 'accepted' || stateValue === 'running';
     els.manualUpdate.disabled = active;
     els.manualUpdateStatus.textContent = `状态：${manualStateLabel(stateValue)} · 目标日期：${payload.trade_date || '未确认'} · ${manualReasonLabel(payload.reason)}`;
-    els.manualUpdateStatus.dataset.state = stateValue === 'success' ? 'good'
+    els.manualUpdateStatus.dataset.state = ['success', 'portal_success'].includes(stateValue) ? 'good'
       : ['failure', 'aborted', 'timed_out'].includes(stateValue) ? 'error' : '';
     if (els.manualUpdateProgress) {
       const progress = payload.progress || {};
@@ -856,7 +866,8 @@
       document.querySelectorAll('[data-update-output]').forEach((node) => {
         const key = node.dataset.updateOutput;
         const done = outputs[key] === true;
-        node.textContent = `${labels[key] || '结果'}：${done ? '已完成' : '未完成'}`;
+        const deferred = payload.mode === 'portal_only' && key !== 'portal';
+        node.textContent = `${labels[key] || '结果'}：${done ? '已完成' : deferred ? '待后续阶段' : '未完成'}`;
         node.dataset.state = done ? 'good' : stateValue === 'failure' ? 'error' : '';
       });
     }
@@ -936,7 +947,7 @@
     state.manual.requestController = new AbortController();
     els.manualUpdate.disabled = true;
     if (els.manualUpdateStatus) {
-      els.manualUpdateStatus.textContent = '正在提交完整更新…';
+      els.manualUpdateStatus.textContent = '正在提交门户刷新…';
       els.manualUpdateStatus.dataset.state = '';
     }
     try {
