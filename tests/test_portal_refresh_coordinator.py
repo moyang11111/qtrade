@@ -4,6 +4,7 @@ import datetime
 import json
 from pathlib import Path
 import subprocess
+import sys
 import threading
 
 from qtrade_adapters.deepseek_harness import portal_refresh_coordinator as coordinator
@@ -285,12 +286,19 @@ def test_manual_portal_startup_failure_returns_terminal_status(tmp_path):
 
 
 def test_owned_child_termination_is_bounded_and_only_uses_local_process(tmp_path):
+    popen_kwargs = {
+        "cwd": tmp_path,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "shell": False,
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
     process = subprocess.Popen(
         [coordinator.sys.executable, "-c", "import time; time.sleep(30)"],
-        cwd=tmp_path,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        shell=False,
+        **popen_kwargs,
     )
     try:
         coordinator._terminate_child(process)
