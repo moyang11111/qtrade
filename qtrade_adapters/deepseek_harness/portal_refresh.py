@@ -26,10 +26,13 @@ import uuid
 
 SCHEMA_VERSION = 1
 MIN_SYMBOLS = 5
-MAX_SYMBOLS = 100
+# The first snapshot layer was exercised with 5-100 symbol fixtures.  The
+# production mainboard is larger, so keep the fixture lower bound while
+# allowing a complete, bounded A-share universe snapshot.
+MAX_SYMBOLS = 5000
 MAX_ROWS_PER_SYMBOL = 512
-MAX_MANIFEST_BYTES = 512 * 1024
-MAX_METADATA_BYTES = 512 * 1024
+MAX_MANIFEST_BYTES = 8 * 1024 * 1024
+MAX_METADATA_BYTES = 8 * 1024 * 1024
 MAX_POINTER_BYTES = 16 * 1024
 DB_SCHEMA = "daily_bar.v1"
 METADATA_SCHEMA = "portal_metadata.v1"
