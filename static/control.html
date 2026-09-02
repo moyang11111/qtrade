@@ -79,15 +79,15 @@
         <div class="control-card-body" id="pipelineBody"></div>
         <div class="control-update-actions" aria-label="手动更新研究数据">
           <button class="control-button control-button-primary" id="manualUpdateButton" type="button" disabled
-                  aria-describedby="manualUpdateHint">立即更新门户、因子和决策</button>
-          <p class="control-update-hint" id="manualUpdateHint">仅更新研究数据，不会交易或执行系统命令；18:30 后可运行。</p>
+                  aria-describedby="manualUpdateHint">立即刷新门户数据</button>
+          <p class="control-update-hint" id="manualUpdateHint">仅刷新门户研究数据，不会交易或执行系统命令；因子、决策和同步将在后续阶段运行。</p>
           <p class="control-update-status" id="manualUpdateStatus" role="status" aria-live="polite">正在检查手动更新状态…</p>
           <p class="control-update-progress" id="manualUpdateProgress" role="status" aria-live="polite">进度：未确认</p>
           <div class="control-update-outputs" id="manualUpdateOutputs" aria-label="手动更新结果">
             <span data-update-output="portal">门户：未确认</span>
-            <span data-update-output="factors">因子：未确认</span>
-            <span data-update-output="decision">决策：未确认</span>
-            <span data-update-output="sync">同步：未确认</span>
+            <span data-update-output="factors">因子：待后续阶段</span>
+            <span data-update-output="decision">决策：待后续阶段</span>
+            <span data-update-output="sync">同步：待后续阶段</span>
           </div>
         </div>
       </article>

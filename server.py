@@ -28,6 +28,7 @@ import os
 import math
 import socket
 import argparse
+from functools import wraps
 import re
 import threading
 import urllib.request
@@ -54,6 +55,9 @@ from qtrade_adapters.deepseek_harness.market_data import (
 )
 from qtrade_adapters.deepseek_harness.portal_refresh import (
     read_current_snapshot,
+)
+from qtrade_adapters.deepseek_harness.portal_refresh_coordinator import (
+    run_portal_refresh,
 )
 from qtrade_adapters.deepseek_harness.factor_library import (
     FactorLibrary,
@@ -258,6 +262,16 @@ def _ts(index, i) -> int:
 # 数据服务
 # ============================================================================
 
+def _portal_read(method):
+    """Serialize reads with publication swaps while allowing nested calls."""
+
+    @wraps(method)
+    def locked(service, *args, **kwargs):
+        with service._portal_reload_lock:
+            return method(service, *args, **kwargs)
+
+    return locked
+
 class DataService:
     """股票数据服务：实时（腾讯）优先，CSV 回退；全部仅内存缓存。"""
 
@@ -292,10 +306,54 @@ class DataService:
             overlay_manifest=dict(portal_snapshot.manifest) if portal_snapshot is not None else None,
             overlay_metadata=list(portal_snapshot.metadata) if portal_snapshot is not None else None,
         )
+        self._portal_reload_lock = threading.RLock()
         self._candidate_symbols: set[str] = set()
+
+    def reload_portal_snapshot(self, expected: dict | None = None) -> bool:
+        """Atomically switch this service to a newly published portal mirror."""
+
+        if self.portal_state_dir is None or self.portal_user_data_dir is None:
+            return False
+        with self._portal_reload_lock:
+            try:
+                snapshot = read_current_snapshot(
+                    self.portal_state_dir,
+                    user_data_dir=self.portal_user_data_dir,
+                )
+                if snapshot is None:
+                    return False
+                expected_portal = expected.get("output_meta", {}).get("portal", {}) if isinstance(expected, dict) else {}
+                if not isinstance(expected_portal, dict):
+                    return False
+                for key in ("generation", "content_sha256", "universe_token", "target_date", "total"):
+                    if expected_portal.get(key) != snapshot.manifest.get(
+                        "generation" if key == "generation" else key
+                    ):
+                        return False
+                adapter = MainboardMarketDataAdapter(
+                    base_dir=qtrade_base_bridge.base_dir(),
+                    csv_dir=self.data_dir,
+                    overlay_db=snapshot.database,
+                    overlay_only=True,
+                    overlay_manifest=dict(snapshot.manifest),
+                    overlay_metadata=list(snapshot.metadata),
+                )
+                if not adapter.available:
+                    return False
+            except Exception:  # noqa: BLE001 - keep the public status stable
+                return False
+            self.mainboard_adapter = adapter
+            self.portal_mirror_active = True
+            self.live = False
+            self.live_src = None
+            self._df_cache.clear()
+            self._ind_cache.clear()
+            self._csv_symbols = None
+        return True
 
     # ---------- 数据源解析 ----------
 
+    @_portal_read
     def _resolve_df(self, symbol: str, count: int = 320) -> pd.DataFrame | None:
         """实时优先拉取，失败回退内存缓存/CSV；仅内存缓存，不落盘。
 
@@ -313,6 +371,7 @@ class DataService:
             return self._df_cache[symbol]
         return self.load_history(symbol)
 
+    @_portal_read
     def _load_csv(self, symbol: str) -> pd.DataFrame | None:
         # 命中内存缓存直接返回（主板全市场扫描每轮需要三千+只，避免重复磁盘IO）
         if symbol in self._df_cache:
@@ -328,6 +387,7 @@ class DataService:
         except Exception:
             return None
 
+    @_portal_read
     def load_history(self, symbol: str, count: int = 320) -> pd.DataFrame | None:
         """Load local qfq history through the read-only adapter, then CSV fallback."""
 
@@ -347,6 +407,7 @@ class DataService:
 
     # ---------- 股票列表 ----------
 
+    @_portal_read
     def scan(self) -> list[str]:
         """Return the read-only full mainboard list, or the legacy fallback pool."""
 
@@ -370,6 +431,7 @@ class DataService:
                 merged.append(s)
         return merged
 
+    @_portal_read
     def mainboard_symbols(self) -> list[str]:
         """Return listed Shanghai/Shenzhen mainboard symbols in stable order."""
 
@@ -388,6 +450,7 @@ class DataService:
                 symbols.append(code)
         return symbols
 
+    @_portal_read
     def symbol_metadata(self, symbol: str) -> dict | None:
         """Return safe metadata for a symbol without exposing database paths."""
 
@@ -416,16 +479,19 @@ class DataService:
             "source": "fallback",
         }
 
+    @_portal_read
     def is_tradable(self, symbol: str) -> bool:
         metadata = self.symbol_metadata(symbol)
         return bool(metadata and metadata.get("tradable") and metadata.get("listed"))
 
+    @_portal_read
     def set_candidate_symbols(self, symbols) -> None:
         self._candidate_symbols = {
             code for code in (normalize_code(symbol) for symbol in (symbols or [])) if code
         }
 
     @property
+    @_portal_read
     def universe_summary(self) -> dict:
         """Return total/computable/tradable/candidate counts for the current snapshot."""
 
@@ -465,8 +531,19 @@ class DataService:
             "reason": self.mainboard_adapter.last_error or "external_database_unavailable",
         }
 
+    @_portal_read
+    def health_snapshot(self) -> dict[str, object]:
+        """Return health fields from one coherent portal publication view."""
+
+        live = self.live and self.live_src is not None
+        return {
+            "mode": "live" if live else "csv",
+            "symbols": len(self.scan()),
+        }
+
     # ---------- 查询 ----------
 
+    @_portal_read
     def get_kline(self, symbol: str, limit: int = 300) -> list[dict]:
         df = self._resolve_df(symbol)
         if df is None:
@@ -485,6 +562,7 @@ class DataService:
             })
         return out
 
+    @_portal_read
     def get_info(self, symbol: str) -> dict:
         """行情概要：实时快照 + K线派生指标。"""
         quote = None
@@ -538,6 +616,7 @@ class DataService:
                 info["change_pct"] = round((latest / prev - 1) * 100, 2) if prev else 0.0
         return info
 
+    @_portal_read
     def get_indicators(self, symbol: str) -> dict:
         if symbol in self._ind_cache:
             return self._ind_cache[symbol]
@@ -595,6 +674,7 @@ class DataService:
         self._ind_cache[symbol] = result
         return result
 
+    @_portal_read
     def get_factors(self, symbol: str) -> dict:
         """返回最新 A 股量价因子（移植自 deepseek-harness-quant）。
 
@@ -2811,6 +2891,7 @@ class EngineAutoPaperTrader:
 
 SERVICE: DataService = None
 STATIC_DIR: Path = None
+USER_DATA_DIR: Path | None = None
 AI_PAPER: AiPaperTrader = None
 AUTO_PAPER: AutoPaperTrader = None
 FACTOR_LIBRARY: FactorLibrary | None = None
@@ -2836,7 +2917,7 @@ UPDATE_LOG_PATH = UPDATE_STATUS_PATH.with_name("daily_update_1830.log")
 UPDATE_LOCK_PATH = UPDATE_STATUS_PATH.with_name("daily_update_1830.lock")
 MANUAL_UPDATE_MAX_BODY_BYTES = 1024
 MANUAL_UPDATE_CONTROLLER = None
-_UPDATE_STATUS_STATES = frozenset({"running", "skip", "success", "failure", "aborted", "timed_out"})
+_UPDATE_STATUS_STATES = frozenset({"running", "skip", "success", "portal_success", "failure", "aborted", "timed_out"})
 _UPDATE_STATUS_REASONS = frozenset({
     "started",
     "pipeline_running",
@@ -2861,6 +2942,23 @@ _UPDATE_STATUS_REASONS = frozenset({
     "timeout",
     "process_timeout",
     "freshness_capture_failed",
+    "portal_completed",
+    "portal_refresh_failed",
+    "calendar_closed",
+    "universe_unavailable",
+    "provider_schema",
+    "provider_failed",
+    "provider_unreachable",
+    "checkpoint_corrupt",
+    "checkpoint_io",
+    "lease_busy",
+    "stale_running",
+    "item_timeout",
+    "batch_timeout",
+    "job_timeout",
+    "publish_timeout",
+    "publish_failed",
+    "reload_failed",
 })
 _UPDATE_STATUS_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _UPDATE_STATUS_TIMESTAMP = re.compile(
@@ -2873,6 +2971,7 @@ _UPDATE_STATUS_FRESHNESS_SOURCES = frozenset({
     "factor_artifacts",
     "decision_artifact",
     "sync_target",
+    "qtrade_mirror",
     "dry_run",
     "unavailable",
 })
@@ -2901,6 +3000,8 @@ _UPDATE_STATUS_FRESHNESS_REASONS = frozenset({
     "portal_date_missing",
     "portal_stale",
     "portal_coverage_insufficient",
+    "verified",
+    "unavailable",
 })
 _UPDATE_STATUS_FRESHNESS_COUNTS = (
     "total",
@@ -3049,12 +3150,27 @@ def get_manual_update_controller():
             lock_path=UPDATE_STATUS_PATH.with_name("daily_update_1830.manual.lock"),
             pipeline_lock_path=UPDATE_LOCK_PATH,
             log_file=UPDATE_LOG_PATH,
+            user_data_dir=USER_DATA_DIR,
+            mode="portal_only",
+            run_fn=run_portal_refresh,
+            on_success=_reload_portal_snapshot,
         )
     return MANUAL_UPDATE_CONTROLLER
 
 
+def _reload_portal_snapshot(status: dict | None = None) -> bool:
+    """Publish success only after the live service adopts the new mirror."""
+
+    if SERVICE is None:
+        return True
+    try:
+        return SERVICE.reload_portal_snapshot(status)
+    except Exception:  # noqa: BLE001 - never expose reload details to clients
+        return False
+
+
 _MANUAL_UPDATE_STATES = frozenset({
-    "idle", "accepted", "running", "success", "skip", "failure", "aborted", "timed_out",
+    "idle", "accepted", "running", "success", "portal_success", "skip", "failure", "aborted", "timed_out",
 })
 _MANUAL_UPDATE_REASONS = frozenset({
     "accepted",
@@ -3085,6 +3201,23 @@ _MANUAL_UPDATE_REASONS = frozenset({
     "timeout",
     "process_timeout",
     "freshness_capture_failed",
+    "portal_completed",
+    "portal_refresh_failed",
+    "calendar_closed",
+    "universe_unavailable",
+    "provider_schema",
+    "provider_failed",
+    "provider_unreachable",
+    "checkpoint_corrupt",
+    "checkpoint_io",
+    "lease_busy",
+    "stale_running",
+    "item_timeout",
+    "batch_timeout",
+    "job_timeout",
+    "publish_timeout",
+    "publish_failed",
+    "reload_failed",
 })
 _MANUAL_UPDATE_OUTPUTS = ("portal", "factors", "decision", "sync")
 _MANUAL_UPDATE_STEPS = frozenset({
@@ -3110,6 +3243,7 @@ def _safe_manual_update_payload(payload) -> dict:
 
     fallback = {
         "schema_version": 1,
+        "mode": "full_pipeline",
         "accepted": False,
         "state": "idle",
         "trade_date": None,
@@ -3128,6 +3262,8 @@ def _safe_manual_update_payload(payload) -> dict:
         return fallback
 
     result = dict(fallback)
+    mode = payload.get("mode")
+    result["mode"] = mode if mode in {"full_pipeline", "portal_only"} else "full_pipeline"
     state = payload.get("state")
     result["state"] = state if isinstance(state, str) and state in _MANUAL_UPDATE_STATES else "idle"
     result["accepted"] = result["state"] == "accepted"
@@ -4019,11 +4155,11 @@ class APIHandler(SimpleHTTPRequestHandler):
     # ---------- 各端点 ----------
 
     def _health(self, query):
-        live = SERVICE.live and SERVICE.live_src is not None
+        snapshot = SERVICE.health_snapshot()
         self._json({
             "status": "ok",
-            "symbols": len(SERVICE.scan()),
-            "mode": "live" if live else "csv",
+            "symbols": snapshot["symbols"],
+            "mode": snapshot["mode"],
         })
 
     def _update_status(self, query):
@@ -4278,7 +4414,7 @@ def _maybe_auto_update():
 
 
 def main():
-    global SERVICE, STATIC_DIR, FACTOR_LIBRARY, FACTOR_LIBRARY_FILE
+    global SERVICE, STATIC_DIR, FACTOR_LIBRARY, FACTOR_LIBRARY_FILE, USER_DATA_DIR
 
     # ---- 修复 Windows GBK 编码问题（保留 write_through 避免缓冲丢失输出） ----
     # pythonw.exe 下无控制台，sys.stdout 为 None，需判空。
@@ -4314,6 +4450,7 @@ def main():
     args = parser.parse_args()
 
     configure_update_state_dir(args.state_dir)
+    USER_DATA_DIR = Path(args.user_data_dir).expanduser().resolve() if args.user_data_dir else None
     data_dir = find_data_dir(args.data_dir)
     live = not args.csv_only
     FACTOR_LIBRARY_FILE = resolve_factor_library_path(args.factor_library_file)

@@ -1016,6 +1016,8 @@ class PortalRefreshWorker:
                 "heartbeat_at": None,
                 "finished_at": None,
                 "elapsed_seconds": 0.0,
+                "published_generation": None,
+                "published_content_sha256": None,
             }
         safe_reason = reason if reason in _REASONS else str(checkpoint.get("reason", "provider_failed"))
         if safe_reason not in _REASONS:
@@ -1049,6 +1051,10 @@ class PortalRefreshWorker:
             "heartbeat_at": checkpoint.get("heartbeat_at"),
             "finished_at": checkpoint.get("finished_at"),
             "elapsed_seconds": checkpoint.get("elapsed_seconds", 0.0),
+            # These are opaque content tokens used by the parent coordinator
+            # to prove that the service reloads this exact publication.
+            "published_generation": checkpoint.get("published_generation"),
+            "published_content_sha256": checkpoint.get("published_content_sha256"),
         }
 
     def _validate_checkpoint_artifacts(
