@@ -56,9 +56,7 @@ from qtrade_adapters.deepseek_harness.market_data import (
 from qtrade_adapters.deepseek_harness.portal_refresh import (
     read_current_snapshot,
 )
-from qtrade_adapters.deepseek_harness.portal_refresh_coordinator import (
-    run_portal_refresh,
-)
+from qtrade_adapters.deepseek_harness import snapshot_pipeline
 from qtrade_adapters.deepseek_harness.factor_library import (
     FactorLibrary,
     FactorLibraryError,
@@ -290,11 +288,21 @@ class DataService:
         self.portal_user_data_dir = (
             Path(portal_user_data_dir).expanduser() if portal_user_data_dir is not None else None
         )
-        portal_snapshot = (
-            read_current_snapshot(self.portal_state_dir, user_data_dir=self.portal_user_data_dir)
-            if self.portal_state_dir is not None and self.portal_user_data_dir is not None
-            else None
-        )
+        self.active_pipeline = None
+        self._snapshot_legacy_live_src = None
+        self._snapshot_legacy_live = bool(live)
+        portal_snapshot = None
+        if self.portal_state_dir is not None and self.portal_user_data_dir is not None:
+            self.active_pipeline = snapshot_pipeline.read_current_pipeline(
+                self.portal_state_dir,
+                user_data_dir=self.portal_user_data_dir,
+            )
+            portal_snapshot = self.active_pipeline.portal if self.active_pipeline is not None else None
+            if portal_snapshot is None:
+                portal_snapshot = read_current_snapshot(
+                    self.portal_state_dir,
+                    user_data_dir=self.portal_user_data_dir,
+                )
         self.portal_mirror_active = portal_snapshot is not None
         self.live = bool(live and not self.portal_mirror_active)
         self.live_src = TencentLiveSource() if self.live else None
@@ -350,6 +358,62 @@ class DataService:
             self._ind_cache.clear()
             self._csv_symbols = None
         return True
+
+    def reload_snapshot_pipeline(self, expected: dict | None = None) -> bool:
+        """Adopt one fully verified QTrade research generation atomically."""
+
+        if self.portal_state_dir is None or self.portal_user_data_dir is None:
+            return False
+        with self._portal_reload_lock:
+            pipeline = snapshot_pipeline.read_current_pipeline(
+                self.portal_state_dir,
+                user_data_dir=self.portal_user_data_dir,
+            )
+            if pipeline is None:
+                return False
+            expected_pipeline = expected.get("output_meta", {}).get("pipeline", {}) if isinstance(expected, dict) else {}
+            if expected_pipeline:
+                for key in ("generation", "portal_generation", "content_sha256", "universe_token", "target_date", "total"):
+                    source_key = "portal_content_sha256" if key == "content_sha256" else key
+                    if expected_pipeline.get(key) != pipeline.manifest.get(source_key):
+                        return False
+            adapter = MainboardMarketDataAdapter(
+                base_dir=qtrade_base_bridge.base_dir(),
+                csv_dir=self.data_dir,
+                overlay_db=pipeline.portal.database,
+                overlay_only=True,
+                overlay_manifest=dict(pipeline.portal.manifest),
+                overlay_metadata=list(pipeline.portal.metadata),
+            )
+            if not adapter.available:
+                return False
+            self.mainboard_adapter = adapter
+            self.active_pipeline = pipeline
+            self.portal_mirror_active = True
+            self.live = False
+            self.live_src = None
+            self._df_cache.clear()
+            self._ind_cache.clear()
+            self._csv_symbols = None
+        return True
+
+    def prepare_snapshot_pipeline(self, pipeline) -> bool:
+        """Validate the candidate view before its pointer can be committed."""
+
+        if pipeline is None or self.portal_user_data_dir is None:
+            return False
+        try:
+            adapter = MainboardMarketDataAdapter(
+                base_dir=qtrade_base_bridge.base_dir(),
+                csv_dir=self.data_dir,
+                overlay_db=pipeline.portal.database,
+                overlay_only=True,
+                overlay_manifest=dict(pipeline.portal.manifest),
+                overlay_metadata=list(pipeline.portal.metadata),
+            )
+            return bool(adapter.available)
+        except Exception:  # noqa: BLE001 - candidate must fail closed
+            return False
 
     # ---------- 数据源解析 ----------
 
@@ -2959,6 +3023,13 @@ _UPDATE_STATUS_REASONS = frozenset({
     "publish_timeout",
     "publish_failed",
     "reload_failed",
+    "factor_history_unavailable",
+    "pipeline_binding_invalid",
+    "pipeline_schema_invalid",
+    "pipeline_publish_failed",
+    "pipeline_executor_unavailable",
+    "pipeline_callback_failed",
+    "lease_path_invalid",
 })
 _UPDATE_STATUS_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _UPDATE_STATUS_TIMESTAMP = re.compile(
@@ -3015,6 +3086,30 @@ _UPDATE_STATUS_FRESHNESS_COUNTS = (
     "pool_count",
     "pitch_count",
 )
+_UPDATE_STATUS_TOKEN = re.compile(r"^[0-9a-f]{64}$")
+_UPDATE_STATUS_UNIVERSE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+
+
+def _safe_pipeline_meta(value: object) -> dict:
+    """Keep only opaque, non-path fields that bind one full pipeline generation."""
+
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for key in ("generation", "portal_generation", "content_sha256"):
+        token = value.get(key)
+        if isinstance(token, str) and _UPDATE_STATUS_TOKEN.fullmatch(token):
+            result[key] = token
+    universe = value.get("universe_token")
+    if isinstance(universe, str) and _UPDATE_STATUS_UNIVERSE.fullmatch(universe):
+        result["universe_token"] = universe
+    target = value.get("target_date")
+    if isinstance(target, str) and _UPDATE_STATUS_DATE.fullmatch(target):
+        result["target_date"] = target
+    total = value.get("total")
+    if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
+        result["total"] = total
+    return result
 
 
 def configure_update_state_dir(path: str | Path | None) -> Path:
@@ -3105,6 +3200,9 @@ def read_update_status(path: Path | None = None) -> dict:
                 if isinstance(item.get(key), bool):
                     clean[key] = item[key]
             safe[group] = clean
+        pipeline = _safe_pipeline_meta(value.get("pipeline"))
+        if pipeline:
+            safe["pipeline"] = pipeline
         return safe
 
     freshness = safe_freshness(payload.get("freshness"))
@@ -3151,9 +3249,14 @@ def get_manual_update_controller():
             pipeline_lock_path=UPDATE_LOCK_PATH,
             log_file=UPDATE_LOG_PATH,
             user_data_dir=USER_DATA_DIR,
-            mode="portal_only",
-            run_fn=run_portal_refresh,
-            on_success=_reload_portal_snapshot,
+            mode="full_pipeline",
+            run_fn=snapshot_pipeline.run_snapshot_pipeline,
+            on_success=None,
+            prepare_fn=snapshot_pipeline.prepare_snapshot_candidate,
+            activate_fn=snapshot_pipeline.prepare_snapshot_candidate,
+            commit_fn=_commit_snapshot_pipeline,
+            plan_inputs_builder=_build_qtrade_bound_plan_inputs,
+            calendar_loader=snapshot_pipeline.load_trade_calendar_dates,
         )
     return MANUAL_UPDATE_CONTROLLER
 
@@ -3167,6 +3270,79 @@ def _reload_portal_snapshot(status: dict | None = None) -> bool:
         return SERVICE.reload_portal_snapshot(status)
     except Exception:  # noqa: BLE001 - never expose reload details to clients
         return False
+
+
+def _build_qtrade_bound_plan_inputs(*, base_dir, target_date, calendar_dates, state_dir, user_data_dir):
+    """Read only the verified QTrade-owned current history overlay."""
+
+    del base_dir
+    return snapshot_pipeline.load_current_bound_plan_inputs(
+        state_dir=state_dir,
+        user_data_dir=user_data_dir,
+        target_date=target_date,
+        calendar_dates=calendar_dates,
+    )
+
+
+def _reload_snapshot_pipeline(status: dict | None = None) -> bool:
+    """Make a committed full generation visible to the in-memory service."""
+
+    if SERVICE is None:
+        return True
+    try:
+        return SERVICE.reload_snapshot_pipeline(status)
+    except Exception:  # noqa: BLE001 - never expose reload details to clients
+        return False
+
+
+def _commit_snapshot_pipeline(pipeline) -> bool:
+    """Atomically switch only in-memory service references after child checks."""
+
+    if SERVICE is None:
+        return True
+    try:
+        with SERVICE._portal_reload_lock:
+            if pipeline is None:
+                adapter = MainboardMarketDataAdapter(
+                    base_dir=SERVICE.mainboard_adapter.base_dir,
+                    csv_dir=SERVICE.data_dir,
+                )
+                SERVICE.mainboard_adapter = adapter
+                SERVICE.active_pipeline = None
+                SERVICE.portal_mirror_active = False
+                if SERVICE._snapshot_legacy_live_src is not None:
+                    SERVICE.live_src = SERVICE._snapshot_legacy_live_src
+                SERVICE.live = SERVICE._snapshot_legacy_live
+                SERVICE._snapshot_legacy_live_src = None
+            else:
+                if SERVICE.active_pipeline is None and SERVICE._snapshot_legacy_live_src is None:
+                    SERVICE._snapshot_legacy_live_src = SERVICE.live_src
+                    SERVICE._snapshot_legacy_live = SERVICE.live
+                adapter = MainboardMarketDataAdapter(
+                    base_dir=SERVICE.mainboard_adapter.base_dir,
+                    csv_dir=SERVICE.data_dir,
+                    overlay_db=pipeline.portal.database,
+                    overlay_only=True,
+                    overlay_manifest=dict(pipeline.portal.manifest),
+                    overlay_metadata=list(pipeline.portal.metadata),
+                )
+                SERVICE.mainboard_adapter = adapter
+                SERVICE.active_pipeline = pipeline
+                SERVICE.portal_mirror_active = True
+                SERVICE.live = False
+                SERVICE.live_src = None
+            SERVICE._df_cache.clear()
+            SERVICE._ind_cache.clear()
+            SERVICE._csv_symbols = None
+            return True
+    except Exception:  # noqa: BLE001 - parent switch is fail-closed
+        return False
+
+
+def _prepare_snapshot_pipeline(pipeline) -> bool:
+    """Preflight the candidate adapter before full-pointer activation."""
+
+    return snapshot_pipeline.prepare_snapshot_candidate(pipeline)
 
 
 _MANUAL_UPDATE_STATES = frozenset({
@@ -3218,6 +3394,13 @@ _MANUAL_UPDATE_REASONS = frozenset({
     "publish_timeout",
     "publish_failed",
     "reload_failed",
+    "factor_history_unavailable",
+    "pipeline_binding_invalid",
+    "pipeline_schema_invalid",
+    "pipeline_publish_failed",
+    "pipeline_executor_unavailable",
+    "pipeline_callback_failed",
+    "lease_path_invalid",
 })
 _MANUAL_UPDATE_OUTPUTS = ("portal", "factors", "decision", "sync")
 _MANUAL_UPDATE_STEPS = frozenset({
@@ -3333,6 +3516,11 @@ def _safe_manual_update_payload(payload) -> dict:
                     clean[key] = item[key]
             clean_freshness[group] = clean
         result["freshness"] = clean_freshness
+
+    pipeline_meta = _safe_pipeline_meta(payload.get("output_meta", {}).get("pipeline")) \
+        if isinstance(payload.get("output_meta"), dict) else {}
+    if pipeline_meta:
+        result["output_meta"] = {"pipeline": pipeline_meta}
 
     retry = payload.get("retry")
     if isinstance(retry, dict):
@@ -4410,6 +4598,12 @@ def _maybe_auto_update():
         project_root=Path(__file__).resolve().parent,
         status_file=UPDATE_STATUS_PATH,
         log_file=UPDATE_LOG_PATH,
+        user_data_dir=USER_DATA_DIR,
+        prepare_fn=snapshot_pipeline.prepare_snapshot_candidate,
+        activate_fn=snapshot_pipeline.prepare_snapshot_candidate,
+        commit_fn=_commit_snapshot_pipeline,
+        plan_inputs_builder=_build_qtrade_bound_plan_inputs,
+        calendar_loader=snapshot_pipeline.load_trade_calendar_dates,
     )
 
 

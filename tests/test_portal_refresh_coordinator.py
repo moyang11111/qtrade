@@ -470,10 +470,10 @@ def test_service_reads_and_snapshot_switch_are_serialized(tmp_path):
     assert first.manifest["generation"] != second.manifest["generation"]
 
 
-def test_portal_only_console_copy_is_honest_about_deferred_pipeline_steps():
+def test_console_copy_describes_the_full_research_pipeline():
     root = Path(__file__).resolve().parents[1]
     html = (root / "static" / "control.html").read_text(encoding="utf-8")
     script = (root / "static" / "js" / "control.js").read_text(encoding="utf-8")
-    assert "立即刷新门户数据" in html
-    assert "正在提交门户刷新…" in script
-    assert "门户数据已刷新；因子、决策和同步将在后续阶段运行。" in script
+    assert "立即更新门户、因子和决策" in html
+    assert "正在提交完整研究数据更新…" in script
+    assert "门户数据已刷新；完整流水线仍待确认。" in script

@@ -150,6 +150,46 @@ def test_akshare_provider_uses_fixed_qfq_daily_call(monkeypatch):
     }]
 
 
+def test_akshare_provider_history_is_target_anchored_and_bounded(monkeypatch):
+    calls = []
+
+    class Frame:
+        empty = False
+
+        def to_dict(self, orient):
+            assert orient == "records"
+            target = datetime.date.fromisoformat(TARGET)
+            return [{
+                "date": target - datetime.timedelta(days=319 - offset),
+                "open": 10 + offset,
+                "high": 11 + offset,
+                "low": 9 + offset,
+                "close": 10.5 + offset,
+                "volume": 1000 + offset,
+            } for offset in range(320)]
+
+    def fixed_daily(**kwargs):
+        calls.append(kwargs)
+        return Frame()
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "akshare",
+        SimpleNamespace(stock_zh_a_daily=fixed_daily),
+    )
+    _, provider = _plan()
+    result = provider.fetch_history("600001", TARGET)
+
+    assert len(result["rows"]) == 320
+    assert result["rows"][-1]["date"] == TARGET
+    assert calls == [{
+        "symbol": "sh600001",
+        "start_date": "20250105",
+        "end_date": "20260828",
+        "adjust": "qfq",
+    }]
+
+
 def test_akshare_transport_forces_no_proxy_redirect_and_bounded_body(monkeypatch):
     import requests
 

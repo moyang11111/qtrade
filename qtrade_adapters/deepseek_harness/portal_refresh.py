@@ -25,6 +25,7 @@ import uuid
 
 
 SCHEMA_VERSION = 1
+HISTORY_SCHEMA_VERSION = 2
 MIN_SYMBOLS = 5
 # The first snapshot layer was exercised with 5-100 symbol fixtures.  The
 # production mainboard is larger, so keep the fixture lower bound while
@@ -36,6 +37,10 @@ MAX_METADATA_BYTES = 8 * 1024 * 1024
 MAX_POINTER_BYTES = 16 * 1024
 DB_SCHEMA = "daily_bar.v1"
 METADATA_SCHEMA = "portal_metadata.v1"
+HISTORY_DB_SCHEMA = "daily_bar.v2"
+HISTORY_METADATA_SCHEMA = "portal_metadata.v2"
+HISTORY_WINDOW = 320
+MIN_HISTORY_ROWS = 280
 _TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
 _NONCE_RE = re.compile(r"^[0-9a-f]{32}$")
 _POINTER_TEMP_RE = re.compile(r"^\.current\.json\.[0-9a-f]{32}\.tmp$")
@@ -72,6 +77,8 @@ _POINTER_KEYS = frozenset({
     "generation_nonce", "content_sha256", "db_path", "db_size", "db_sha256", "manifest_sha256",
     "metadata_path", "metadata_size", "metadata_sha256",
 })
+_HISTORY_MANIFEST_KEYS = _MANIFEST_KEYS | frozenset({"history_window", "history_rows", "history_schema"})
+_HISTORY_POINTER_KEYS = _POINTER_KEYS | frozenset({"history_window", "history_rows", "history_schema"})
 
 
 class PortalRefreshError(RuntimeError):
@@ -397,6 +404,58 @@ def _rows_by_symbol(rows: Mapping[object, object], symbols: Sequence[str], targe
     return normalized
 
 
+def _rows_by_symbol_history(
+    rows: Mapping[object, object],
+    symbols: Sequence[str],
+    target_date: str,
+    *,
+    history_window: int = HISTORY_WINDOW,
+) -> dict[str, list[dict[str, Any]]]:
+    """Normalize one complete, target-anchored qfq history per symbol."""
+
+    if not isinstance(history_window, int) or isinstance(history_window, bool):
+        raise PortalRefreshError("invalid_history_window")
+    if not MIN_HISTORY_ROWS <= history_window <= HISTORY_WINDOW:
+        raise PortalRefreshError("invalid_history_window")
+    if set(_normalize_code(key) for key in rows) != set(symbols):
+        raise PortalRefreshError("symbol_set_mismatch")
+    normalized: dict[str, list[dict[str, Any]]] = {}
+    for raw_symbol, raw_rows in rows.items():
+        symbol = _normalize_code(raw_symbol)
+        if symbol is None or symbol not in symbols or not isinstance(raw_rows, Sequence) or isinstance(raw_rows, (str, bytes)):
+            raise PortalRefreshError("invalid_bars")
+        if len(raw_rows) != history_window:
+            raise PortalRefreshError("history_window_mismatch")
+        seen: set[tuple[str, str]] = set()
+        entries: list[dict[str, Any]] = []
+        for raw in raw_rows:
+            if not isinstance(raw, Mapping) or set(raw) != _ROW_KEYS:
+                raise PortalRefreshError("invalid_bar_schema")
+            date = _date_text(raw.get("date"))
+            if date is None or date > target_date or raw.get("adjust") != "qfq":
+                raise PortalRefreshError("invalid_bar_value")
+            code = _normalize_code(raw.get("code"))
+            if code != symbol:
+                raise PortalRefreshError("symbol_set_mismatch")
+            key = (date, "qfq")
+            if key in seen:
+                raise PortalRefreshError("duplicate_bar")
+            seen.add(key)
+            values = {name: _safe_number(raw.get(name)) for name in ("open", "high", "low", "close", "volume")}
+            if values["high"] < max(values["open"], values["close"]) or values["low"] > min(values["open"], values["close"]):
+                raise PortalRefreshError("invalid_bar_value")
+            entries.append({"code": _market_code(symbol), "date": date, **values, "adjust": "qfq"})
+        entries.sort(key=lambda item: item["date"])
+        if len(entries) != history_window or entries[-1]["date"] != target_date:
+            raise PortalRefreshError("target_date_incomplete")
+        if [item["date"] for item in entries] != sorted({item["date"] for item in entries}):
+            raise PortalRefreshError("duplicate_bar")
+        normalized[symbol] = entries
+    if set(normalized) != set(symbols):
+        raise PortalRefreshError("symbol_set_mismatch")
+    return normalized
+
+
 def _metadata_by_symbol(metadata: Mapping[object, object] | Sequence[object], symbols: Sequence[str], target_date: str) -> list[dict[str, Any]]:
     values: list[object]
     if isinstance(metadata, Mapping):
@@ -459,6 +518,38 @@ def _metadata_payload(generation: str, target_date: str, items: Sequence[Mapping
     return {
         "schema_version": SCHEMA_VERSION,
         "schema": METADATA_SCHEMA,
+        "generation": generation,
+        "target_date": target_date,
+        "items": [dict(item) for item in items],
+    }
+
+
+def _metadata_by_symbol_history(
+    metadata: Mapping[object, object] | Sequence[object],
+    symbols: Sequence[str],
+    target_date: str,
+    rows: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+    base = _metadata_by_symbol(metadata, symbols, target_date)
+    result: list[dict[str, Any]] = []
+    for item in base:
+        symbol = str(item["code"])
+        row_count = len(rows.get(symbol, ()))
+        if row_count != HISTORY_WINDOW:
+            raise PortalRefreshError("history_window_mismatch")
+        normalized = dict(item)
+        normalized["history_rows"] = row_count
+        if normalized["eligible_reason"] == "history_insufficient":
+            normalized["eligible_reason"] = None
+        normalized["computable"] = bool(normalized["computable"])
+        result.append(normalized)
+    return result
+
+
+def _metadata_payload_history(generation: str, target_date: str, items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    return {
+        "schema_version": HISTORY_SCHEMA_VERSION,
+        "schema": HISTORY_METADATA_SCHEMA,
         "generation": generation,
         "target_date": target_date,
         "items": [dict(item) for item in items],
@@ -567,6 +658,83 @@ def _validate_database(path: Path, target_date: str, symbols: Sequence[str]) -> 
     return _read_database_rows(path, target_date, symbols) is not None
 
 
+def _read_database_rows_history(
+    path: Path,
+    target_date: str,
+    symbols: Sequence[str],
+    *,
+    history_window: int = HISTORY_WINDOW,
+) -> dict[str, list[dict[str, Any]]] | None:
+    """Read only the exact v2 daily-bar table and its target-anchored history."""
+
+    if not isinstance(history_window, int) or isinstance(history_window, bool) or not MIN_HISTORY_ROWS <= history_window <= HISTORY_WINDOW:
+        return None
+    connection: sqlite3.Connection | None = None
+    try:
+        _canonical(path)
+        if not path.is_file() or path.is_symlink():
+            return None
+        connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=0.5)
+        connection.execute("PRAGMA query_only=ON")
+        objects = connection.execute(
+            "SELECT type,name FROM sqlite_master WHERE type IN ('table','view','trigger') ORDER BY type,name"
+        ).fetchall()
+        if objects != [("table", "daily_bar")]:
+            return None
+        explicit_indexes = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%'"
+        ).fetchall()
+        if explicit_indexes:
+            return None
+        table_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", ("daily_bar",)
+        ).fetchone()
+        if table_sql is None or _normalize_sql(table_sql[0]) != _normalize_sql(_DB_CREATE_SQL):
+            return None
+        columns = tuple(
+            (str(row[1]).lower(), str(row[2]).upper(), int(row[3]), int(row[5]))
+            for row in connection.execute("PRAGMA table_info(daily_bar)")
+        )
+        if columns != _DB_COLUMNS:
+            return None
+        expected = {_market_code(symbol) for symbol in symbols}
+        result = connection.execute(
+            "SELECT code,date,open,high,low,close,volume,adjust "
+            "FROM daily_bar ORDER BY code,date,adjust"
+        ).fetchall()
+        rows: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in symbols}
+        for code, date, opn, high, low, close, volume, adjust in result:
+            if code not in expected or adjust != "qfq":
+                return None
+            symbol = _normalize_code(code)
+            if symbol is None or symbol not in rows:
+                return None
+            date_text = _date_text(date)
+            if date_text is None or date_text > target_date:
+                return None
+            values = (opn, high, low, close, volume)
+            if any(not math.isfinite(float(value)) or float(value) <= 0 for value in values):
+                return None
+            if float(high) < max(float(opn), float(close)) or float(low) > min(float(opn), float(close)):
+                return None
+            rows[symbol].append({
+                "code": str(code), "date": date_text, "open": float(opn), "high": float(high),
+                "low": float(low), "close": float(close), "volume": float(volume), "adjust": "qfq",
+            })
+        for symbol, entries in rows.items():
+            if len(entries) != history_window or entries[-1]["date"] != target_date:
+                return None
+            dates = [entry["date"] for entry in entries]
+            if dates != sorted(set(dates)):
+                return None
+        return rows
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return None
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def _valid_metadata_payload(payload: object, generation: str, target_date: str, symbols: Sequence[str]) -> list[dict[str, Any]] | None:
     if not isinstance(payload, Mapping) or set(payload) != {"schema_version", "schema", "generation", "target_date", "items"}:
         return None
@@ -580,6 +748,30 @@ def _valid_metadata_payload(payload: object, generation: str, target_date: str, 
     try:
         normalized = _metadata_by_symbol(items, symbols, target_date)
     except PortalRefreshError:
+        return None
+    return normalized
+
+
+def _valid_metadata_payload_history(
+    payload: object,
+    generation: str,
+    target_date: str,
+    symbols: Sequence[str],
+) -> list[dict[str, Any]] | None:
+    if not isinstance(payload, Mapping) or set(payload) != {"schema_version", "schema", "generation", "target_date", "items"}:
+        return None
+    if payload.get("schema_version") != HISTORY_SCHEMA_VERSION or payload.get("schema") != HISTORY_METADATA_SCHEMA:
+        return None
+    if payload.get("generation") != generation or payload.get("target_date") != target_date:
+        return None
+    items = payload.get("items")
+    if not isinstance(items, list) or len(items) != len(symbols):
+        return None
+    try:
+        normalized = _metadata_by_symbol(items, symbols, target_date)
+    except PortalRefreshError:
+        return None
+    if any(item.get("history_rows") != HISTORY_WINDOW for item in normalized):
         return None
     return normalized
 
@@ -630,8 +822,89 @@ def _valid_manifest(payload: object, generation: str | None = None) -> bool:
     return all(isinstance(payload.get(name), int) and payload[name] > 0 for name in ("db_size", "metadata_size"))
 
 
+def _valid_manifest_history(payload: object, generation: str | None = None) -> bool:
+    if not isinstance(payload, Mapping) or set(payload) != _HISTORY_MANIFEST_KEYS:
+        return False
+    token = payload.get("token")
+    symbols = payload.get("symbols")
+    target = payload.get("target_date")
+    if payload.get("schema_version") != HISTORY_SCHEMA_VERSION or payload.get("state") != "complete":
+        return False
+    if generation is not None and payload.get("generation") != generation:
+        return False
+    if payload.get("generation") != token or _TOKEN_RE.fullmatch(str(token)) is None:
+        return False
+    if _date_text(target) is None or payload.get("as_of") != target:
+        return False
+    if not isinstance(payload.get("universe_token"), str):
+        return False
+    try:
+        if _normalize_universe_token(payload["universe_token"]) != payload["universe_token"]:
+            return False
+    except PortalRefreshError:
+        return False
+    nonce = payload.get("generation_nonce")
+    content_sha256 = payload.get("content_sha256")
+    if _NONCE_RE.fullmatch(str(nonce)) is None or _TOKEN_RE.fullmatch(str(content_sha256)) is None:
+        return False
+    if not isinstance(symbols, list) or not MIN_SYMBOLS <= len(symbols) <= MAX_SYMBOLS:
+        return False
+    if any(_normalize_code(symbol) != symbol for symbol in symbols) or len(set(symbols)) != len(symbols):
+        return False
+    if _manifest_token(target, symbols, payload["universe_token"], content_sha256, nonce) != token:
+        return False
+    total = payload.get("total")
+    if total != len(symbols) or payload.get("completed") != total:
+        return False
+    if payload.get("history_window") != HISTORY_WINDOW or payload.get("history_schema") != HISTORY_DB_SCHEMA:
+        return False
+    history_rows = payload.get("history_rows")
+    if not isinstance(history_rows, list) or history_rows != [HISTORY_WINDOW] * total:
+        return False
+    expected_db_path = f"generations/{token}/bars_incr.db"
+    expected_metadata_path = f"generations/{token}/metadata.json"
+    if payload.get("db_path") != expected_db_path or payload.get("metadata_path") != expected_metadata_path:
+        return False
+    if payload.get("db_schema") != HISTORY_DB_SCHEMA or payload.get("metadata_schema") != HISTORY_METADATA_SCHEMA:
+        return False
+    for name in ("db_sha256", "metadata_sha256"):
+        if not isinstance(payload.get(name), str) or re.fullmatch(r"[0-9a-f]{64}", payload[name]) is None:
+            return False
+    return all(isinstance(payload.get(name), int) and payload[name] > 0 for name in ("db_size", "metadata_size"))
+
+
 def _safe_relative(path_value: object, expected: str) -> bool:
     return isinstance(path_value, str) and path_value == expected and not Path(path_value).is_absolute() and ".." not in Path(path_value).parts
+
+
+def _read_current_history(paths: PortalRefreshPaths, pointer: Mapping[str, object]) -> PortalSnapshot | None:
+    if not _valid_pointer_history(pointer):
+        return None
+    generation = _validate_token(pointer["generation"])
+    generation_dir = paths.generation_dir(generation)
+    _canonical(generation_dir)
+    if not generation_dir.is_dir() or generation_dir.is_symlink():
+        return None
+    entries = list(generation_dir.iterdir())
+    if {entry.name for entry in entries} != {"bars_incr.db", "metadata.json", "manifest.json"}:
+        return None
+    if any(entry.is_symlink() or _contained(generation_dir, entry) != entry for entry in entries):
+        return None
+    snapshot = read_generation_snapshot(paths.state, user_data_dir=paths.user_data, generation=generation)
+    if snapshot is None:
+        return None
+    manifest = snapshot.manifest
+    manifest_path = _contained(generation_dir, paths.generation_manifest(generation))
+    if _hash_file(manifest_path) != pointer["manifest_sha256"]:
+        return None
+    fields = (
+        "generation", "target_date", "token", "total", "universe_token", "generation_nonce",
+        "content_sha256", "db_path", "db_size", "db_sha256", "metadata_path", "metadata_size",
+        "metadata_sha256", "history_window", "history_rows", "history_schema",
+    )
+    if any(manifest.get(field) != pointer.get(field) for field in fields):
+        return None
+    return snapshot
 
 
 def _valid_pointer(payload: object) -> bool:
@@ -657,6 +930,44 @@ def _valid_pointer(payload: object) -> bool:
         return False
     total = payload.get("total")
     if not isinstance(total, int) or not MIN_SYMBOLS <= total <= MAX_SYMBOLS:
+        return False
+    for name in ("db_sha256", "manifest_sha256", "metadata_sha256"):
+        if not isinstance(payload.get(name), str) or re.fullmatch(r"[0-9a-f]{64}", payload[name]) is None:
+            return False
+    expected_db_path = f"generations/{token}/bars_incr.db"
+    expected_metadata_path = f"generations/{token}/metadata.json"
+    if payload.get("db_path") != expected_db_path or payload.get("metadata_path") != expected_metadata_path:
+        return False
+    return all(isinstance(payload.get(name), int) and payload[name] > 0 for name in ("db_size", "metadata_size"))
+
+
+def _valid_pointer_history(payload: object) -> bool:
+    if not isinstance(payload, Mapping) or set(payload) != _HISTORY_POINTER_KEYS:
+        return False
+    if payload.get("schema_version") != HISTORY_SCHEMA_VERSION:
+        return False
+    token = payload.get("token")
+    if payload.get("generation") != token or _TOKEN_RE.fullmatch(str(token)) is None:
+        return False
+    if _date_text(payload.get("target_date")) is None:
+        return False
+    universe = payload.get("universe_token")
+    if not isinstance(universe, str):
+        return False
+    try:
+        if _normalize_universe_token(universe) != universe:
+            return False
+    except PortalRefreshError:
+        return False
+    if _NONCE_RE.fullmatch(str(payload.get("generation_nonce"))) is None or _TOKEN_RE.fullmatch(str(payload.get("content_sha256"))) is None:
+        return False
+    total = payload.get("total")
+    history_rows = payload.get("history_rows")
+    if not isinstance(total, int) or not MIN_SYMBOLS <= total <= MAX_SYMBOLS:
+        return False
+    if payload.get("history_window") != HISTORY_WINDOW or payload.get("history_schema") != HISTORY_DB_SCHEMA:
+        return False
+    if not isinstance(history_rows, list) or history_rows != [HISTORY_WINDOW] * total:
         return False
     for name in ("db_sha256", "manifest_sha256", "metadata_sha256"):
         if not isinstance(payload.get(name), str) or re.fullmatch(r"[0-9a-f]{64}", payload[name]) is None:
@@ -709,6 +1020,8 @@ def read_current_snapshot(
                 continue
             return None
         pointer = _read_json(paths.current, MAX_POINTER_BYTES)
+        if isinstance(pointer, Mapping) and pointer.get("schema_version") == HISTORY_SCHEMA_VERSION:
+            return _read_current_history(paths, pointer)
         if not _valid_pointer(pointer):
             return None
         generation = _validate_token(pointer["generation"])
@@ -725,9 +1038,16 @@ def read_current_snapshot(
             return None
         if any(entry.is_symlink() for entry in entries):
             return None
+        snapshot = read_generation_snapshot(
+            state_dir,
+            user_data_dir=user_data_dir,
+            generation=generation,
+        )
+        if snapshot is None:
+            return None
+        manifest = snapshot.manifest
         manifest_path = _contained(generation_dir, paths.generation_manifest(generation))
-        manifest = _read_json(manifest_path, MAX_MANIFEST_BYTES)
-        if not _valid_manifest(manifest, generation) or _hash_file(manifest_path) != pointer["manifest_sha256"]:
+        if _hash_file(manifest_path) != pointer["manifest_sha256"]:
             return None
         pointer_fields = (
             "generation", "target_date", "token", "total", "universe_token", "generation_nonce",
@@ -736,24 +1056,80 @@ def read_current_snapshot(
         )
         if any(manifest.get(field) != pointer.get(field) for field in pointer_fields):
             return None
-        database = _contained(generation_dir, paths.generation_db(generation))
-        metadata_path = _contained(generation_dir, paths.generation_metadata(generation))
-        if not database.is_file() or not metadata_path.is_file() or database.is_symlink() or metadata_path.is_symlink():
+        if pointer["db_size"] != manifest["db_size"] or pointer["db_sha256"] != manifest["db_sha256"]:
+            return None
+        if pointer["metadata_size"] != manifest["metadata_size"] or pointer["metadata_sha256"] != manifest["metadata_sha256"]:
+            return None
+        return snapshot
+    except (OSError, PortalRefreshError, ValueError, sqlite3.Error):
+        return None
+
+
+def read_generation_snapshot(
+    state_dir: str | Path | None = None,
+    *,
+    user_data_dir: str | Path | None = None,
+    generation: str,
+) -> PortalSnapshot | None:
+    """Read one immutable generation without consulting ``current.json``.
+
+    Downstream pipeline stages use this for a candidate portal generation.  A
+    generation is still fully verified before it is exposed, and no pointer
+    is changed by this reader.
+    """
+
+    try:
+        paths = portal_refresh_paths(state_dir, user_data_dir=user_data_dir)
+        _validate_layout(paths)
+        token = _validate_token(generation)
+        generation_dir = paths.generation_dir(token)
+        _canonical(generation_dir)
+        if not generation_dir.is_dir() or generation_dir.is_symlink():
+            return None
+        entries = list(generation_dir.iterdir())
+        if {entry.name for entry in entries} != {"bars_incr.db", "metadata.json", "manifest.json"}:
+            return None
+        if any(entry.is_symlink() or _contained(generation_dir, entry) != entry for entry in entries):
+            return None
+        manifest_path = _contained(generation_dir, paths.generation_manifest(token))
+        manifest = _read_json(manifest_path, MAX_MANIFEST_BYTES)
+        if isinstance(manifest, Mapping) and manifest.get("schema_version") == HISTORY_SCHEMA_VERSION:
+            if not _valid_manifest_history(manifest, token):
+                return None
+            database = _contained(generation_dir, paths.generation_db(token))
+            metadata_path = _contained(generation_dir, paths.generation_metadata(token))
+            if not database.is_file() or not metadata_path.is_file():
+                return None
+            if database.stat().st_size != manifest["db_size"] or _hash_file(database) != manifest["db_sha256"]:
+                return None
+            if metadata_path.stat().st_size != manifest["metadata_size"] or _hash_file(metadata_path) != manifest["metadata_sha256"]:
+                return None
+            metadata_payload = _read_json(metadata_path, MAX_METADATA_BYTES)
+            metadata = _valid_metadata_payload_history(metadata_payload, token, manifest["target_date"], manifest["symbols"])
+            database_rows = _read_database_rows_history(database, manifest["target_date"], manifest["symbols"])
+            if metadata is None or database_rows is None:
+                return None
+            if [item.get("history_rows") for item in metadata] != manifest["history_rows"]:
+                return None
+            if _snapshot_content_hash(database_rows, metadata) != manifest["content_sha256"]:
+                return None
+            return PortalSnapshot(dict(manifest), database, tuple(dict(item) for item in metadata))
+        if not _valid_manifest(manifest, token):
+            return None
+        database = _contained(generation_dir, paths.generation_db(token))
+        metadata_path = _contained(generation_dir, paths.generation_metadata(token))
+        if not database.is_file() or not metadata_path.is_file():
             return None
         if database.stat().st_size != manifest["db_size"] or _hash_file(database) != manifest["db_sha256"]:
             return None
         if metadata_path.stat().st_size != manifest["metadata_size"] or _hash_file(metadata_path) != manifest["metadata_sha256"]:
             return None
         metadata_payload = _read_json(metadata_path, MAX_METADATA_BYTES)
-        metadata = _valid_metadata_payload(metadata_payload, generation, manifest["target_date"], manifest["symbols"])
+        metadata = _valid_metadata_payload(metadata_payload, token, manifest["target_date"], manifest["symbols"])
         database_rows = _read_database_rows(database, manifest["target_date"], manifest["symbols"])
         if metadata is None or database_rows is None:
             return None
         if _snapshot_content_hash(database_rows, metadata) != manifest["content_sha256"]:
-            return None
-        if pointer["db_size"] != manifest["db_size"] or pointer["db_sha256"] != manifest["db_sha256"]:
-            return None
-        if pointer["metadata_size"] != manifest["metadata_size"] or pointer["metadata_sha256"] != manifest["metadata_sha256"]:
             return None
         return PortalSnapshot(dict(manifest), database, tuple(dict(item) for item in metadata))
     except (OSError, PortalRefreshError, ValueError, sqlite3.Error):
@@ -769,6 +1145,125 @@ def read_complete_manifest(
     return dict(snapshot.manifest) if snapshot is not None else None
 
 
+def publish_snapshot_v2(
+    symbols: Iterable[object],
+    target_date: str,
+    rows: Mapping[object, object],
+    metadata: Mapping[object, object] | Sequence[object],
+    *,
+    state_dir: str | Path | None = None,
+    user_data_dir: str | Path | None = None,
+    universe_token: str | None = None,
+    publish_current: bool = True,
+) -> PortalSnapshot:
+    """Publish a complete target-anchored 320-row history generation."""
+
+    target = _date_text(target_date)
+    if target is None:
+        raise PortalRefreshError("invalid_target_date")
+    normalized_symbols = _normalize_symbols(symbols)
+    if not MIN_SYMBOLS <= len(normalized_symbols) <= MAX_SYMBOLS:
+        raise PortalRefreshError("invalid_symbol_count")
+    trusted_token = _normalize_universe_token(universe_token)
+    normalized_rows = _rows_by_symbol_history(rows, normalized_symbols, target)
+    normalized_metadata = _metadata_by_symbol_history(metadata, normalized_symbols, target, normalized_rows)
+    content_sha256 = _snapshot_content_hash(normalized_rows, normalized_metadata)
+    paths = portal_refresh_paths(state_dir, user_data_dir=user_data_dir)
+    _validate_layout(paths)
+    paths.root.mkdir(parents=True, exist_ok=True)
+    paths.generations.mkdir(parents=True, exist_ok=True)
+    _validate_layout(paths)
+    generation_nonce = uuid.uuid4().hex
+    generation = _manifest_token(target, normalized_symbols, trusted_token, content_sha256, generation_nonce)
+    final_dir = paths.generation_dir(generation)
+    if final_dir.exists():
+        raise PortalRefreshError("generation_conflict")
+    staging = _contained(paths.generations, paths.generations / f".staging-{uuid.uuid4().hex}")
+    staging.mkdir()
+    try:
+        database = _contained(staging, staging / "bars_incr.db")
+        metadata_path = _contained(staging, staging / "metadata.json")
+        manifest_path = _contained(staging, staging / "manifest.json")
+        _write_database(database, normalized_rows)
+        metadata_payload = _metadata_payload_history(generation, target, normalized_metadata)
+        _atomic_json(metadata_path, metadata_payload)
+        manifest = {
+            "schema_version": HISTORY_SCHEMA_VERSION,
+            "state": "complete",
+            "generation": generation,
+            "target_date": target,
+            "token": generation,
+            "universe_token": trusted_token,
+            "generation_nonce": generation_nonce,
+            "content_sha256": content_sha256,
+            "symbols": normalized_symbols,
+            "total": len(normalized_symbols),
+            "completed": len(normalized_symbols),
+            "as_of": target,
+            "history_window": HISTORY_WINDOW,
+            "history_rows": [HISTORY_WINDOW] * len(normalized_symbols),
+            "history_schema": HISTORY_DB_SCHEMA,
+            "db_path": f"generations/{generation}/bars_incr.db",
+            "db_schema": HISTORY_DB_SCHEMA,
+            "db_size": database.stat().st_size,
+            "db_sha256": _hash_file(database),
+            "metadata_path": f"generations/{generation}/metadata.json",
+            "metadata_schema": HISTORY_METADATA_SCHEMA,
+            "metadata_size": metadata_path.stat().st_size,
+            "metadata_sha256": _hash_file(metadata_path),
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        _atomic_json(manifest_path, manifest)
+        if not _valid_manifest_history(manifest, generation) or _read_database_rows_history(database, target, normalized_symbols) is None:
+            raise PortalRefreshError("manifest_validation_failed")
+        os.replace(staging, final_dir)
+        _fsync_directory(paths.generations)
+        pointer = {
+            "schema_version": HISTORY_SCHEMA_VERSION,
+            "generation": generation,
+            "target_date": target,
+            "token": generation,
+            "total": len(normalized_symbols),
+            "universe_token": trusted_token,
+            "generation_nonce": generation_nonce,
+            "content_sha256": content_sha256,
+            "history_window": HISTORY_WINDOW,
+            "history_rows": [HISTORY_WINDOW] * len(normalized_symbols),
+            "history_schema": HISTORY_DB_SCHEMA,
+            "db_path": manifest["db_path"],
+            "db_size": manifest["db_size"],
+            "db_sha256": manifest["db_sha256"],
+            "manifest_sha256": _hash_file(final_dir / "manifest.json"),
+            "metadata_path": manifest["metadata_path"],
+            "metadata_size": manifest["metadata_size"],
+            "metadata_sha256": manifest["metadata_sha256"],
+        }
+        if publish_current:
+            _atomic_json(_contained(paths.root, paths.current), pointer, ignore_post_fsync_error=True)
+    except PortalRefreshError:
+        raise
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        raise PortalRefreshError("mirror_publish_failed") from exc
+    finally:
+        try:
+            safe_staging = _contained(paths.generations, staging)
+            if safe_staging.is_dir() and not safe_staging.is_symlink():
+                for child in safe_staging.iterdir():
+                    if child.is_file() or child.is_symlink():
+                        child.unlink(missing_ok=True)
+                safe_staging.rmdir()
+        except (OSError, ValueError):
+            pass
+    snapshot = (
+        read_current_snapshot(state_dir, user_data_dir=user_data_dir)
+        if publish_current
+        else read_generation_snapshot(state_dir, user_data_dir=user_data_dir, generation=generation)
+    )
+    if snapshot is None or snapshot.manifest.get("token") != generation:
+        raise PortalRefreshError("mirror_publish_failed")
+    return snapshot
+
+
 def publish_snapshot(
     symbols: Iterable[object],
     target_date: str,
@@ -778,8 +1273,9 @@ def publish_snapshot(
     state_dir: str | Path | None = None,
     user_data_dir: str | Path | None = None,
     universe_token: str | None = None,
+    publish_current: bool = True,
 ) -> PortalSnapshot:
-    """Publish a complete typed snapshot and atomically advance ``current``."""
+    """Publish a complete typed snapshot, optionally advancing ``current``."""
 
     target = _date_text(target_date)
     if target is None:
@@ -796,7 +1292,7 @@ def publish_snapshot(
     paths.root.mkdir(parents=True, exist_ok=True)
     paths.generations.mkdir(parents=True, exist_ok=True)
     _validate_layout(paths)
-    current = read_current_snapshot(state_dir, user_data_dir=user_data_dir)
+    current = read_current_snapshot(state_dir, user_data_dir=user_data_dir) if publish_current else None
     if (
         current is not None
         and current.manifest.get("target_date") == target
@@ -870,7 +1366,8 @@ def publish_snapshot(
             "metadata_size": manifest["metadata_size"],
             "metadata_sha256": manifest["metadata_sha256"],
         }
-        _atomic_json(_contained(paths.root, paths.current), pointer, ignore_post_fsync_error=True)
+        if publish_current:
+            _atomic_json(_contained(paths.root, paths.current), pointer, ignore_post_fsync_error=True)
     except PortalRefreshError:
         raise
     except (OSError, sqlite3.Error, ValueError) as exc:
@@ -885,7 +1382,11 @@ def publish_snapshot(
                 safe_staging.rmdir()
         except (OSError, ValueError):
             pass
-    snapshot = read_current_snapshot(state_dir, user_data_dir=user_data_dir)
+    snapshot = (
+        read_current_snapshot(state_dir, user_data_dir=user_data_dir)
+        if publish_current
+        else read_generation_snapshot(state_dir, user_data_dir=user_data_dir, generation=generation)
+    )
     if snapshot is None or snapshot.manifest.get("token") != generation:
         raise PortalRefreshError("mirror_publish_failed")
     return snapshot
@@ -893,6 +1394,10 @@ def publish_snapshot(
 
 __all__ = [
     "DB_SCHEMA",
+    "HISTORY_DB_SCHEMA",
+    "HISTORY_METADATA_SCHEMA",
+    "HISTORY_SCHEMA_VERSION",
+    "HISTORY_WINDOW",
     "MAX_SYMBOLS",
     "METADATA_SCHEMA",
     "MIN_SYMBOLS",
@@ -901,6 +1406,8 @@ __all__ = [
     "PortalSnapshot",
     "portal_refresh_paths",
     "publish_snapshot",
+    "publish_snapshot_v2",
+    "read_generation_snapshot",
     "read_complete_manifest",
     "read_current_snapshot",
 ]

@@ -29,6 +29,9 @@
     'universe_unavailable', 'provider_schema', 'provider_failed', 'provider_unreachable',
     'checkpoint_corrupt', 'checkpoint_io', 'lease_busy', 'stale_running', 'item_timeout',
     'batch_timeout', 'job_timeout', 'publish_timeout', 'publish_failed', 'reload_failed',
+    'factor_history_unavailable', 'pipeline_binding_invalid', 'pipeline_schema_invalid',
+    'pipeline_publish_failed', 'pipeline_executor_unavailable', 'pipeline_callback_failed',
+    'lease_path_invalid',
   ]);
   const MANUAL_UPDATE_ERROR_CODES = new Set([
     'before_cutoff', 'already_running', 'lock_busy', 'request_too_large',
@@ -209,7 +212,14 @@
     return {
       completed: '流水线完成', dry_run: '演练状态', pipeline_running: '流水线运行中',
       started: '已启动', calendar_unavailable: '交易日历不可确认', calendar_closed: '交易日历显示休市', deck_missing: '底座不可用',
-      portal_completed: '门户已刷新；因子、决策和同步将在后续阶段运行。',
+      portal_completed: '门户已刷新；完整流水线仍待确认。',
+      factor_history_unavailable: '历史数据不足，未继续后续步骤。',
+      pipeline_binding_invalid: '研究数据绑定校验失败，旧数据保持不变。',
+      pipeline_schema_invalid: '研究数据格式校验失败，旧数据保持不变。',
+      pipeline_publish_failed: '研究数据发布失败，旧数据保持不变。',
+      pipeline_executor_unavailable: '研究计算边界不可用，旧数据保持不变。',
+      pipeline_callback_failed: '研究发布回调失败，旧数据保持不变。',
+      lease_path_invalid: '更新租约无效，旧数据保持不变。',
       portal_refresh_failed: '门户刷新失败，旧数据保持不变。',
       step_failed: '步骤失败', update_failed: '更新失败', status_unavailable: '状态文件不可用',
       aborted: '已中止', application_shutdown: '应用关闭，更新已中止',
@@ -247,9 +257,13 @@
 
   function manualReasonLabel(value) {
     return {
-      accepted: '已接收，正在准备门户刷新。',
-      running: '正在分批刷新门户数据。',
-      portal_completed: '门户数据已刷新；因子、决策和同步将在后续阶段运行。',
+      accepted: '已接收，正在准备完整研究数据更新。',
+      running: '正在运行门户、因子和决策流水线。',
+      portal_completed: '门户数据已刷新；完整流水线仍待确认。',
+      factor_history_unavailable: '历史数据不足，未继续后续步骤。',
+      pipeline_binding_invalid: '研究数据绑定校验失败，旧数据保持不变。',
+      pipeline_schema_invalid: '研究数据格式校验失败，旧数据保持不变。',
+      pipeline_publish_failed: '研究数据发布失败，旧数据保持不变。',
       portal_refresh_failed: '门户刷新失败，旧数据保持不变。',
       calendar_closed: '交易日历显示今日休市。',
       before_cutoff: '18:30 后可运行。',
@@ -273,6 +287,9 @@
       stale_running: '发现过期任务，已安全中止，可重新检查。',
       timeout: '步骤超过时限，后续步骤已停止。',
       process_timeout: '任务超过时限，后续步骤已停止。',
+      pipeline_executor_unavailable: '研究计算边界不可用，后续步骤已停止。',
+      pipeline_callback_failed: '研究发布回调失败，旧数据保持不变。',
+      lease_path_invalid: '更新租约无效，旧数据保持不变。',
     }[value] || '状态需核对。';
   }
 
@@ -947,7 +964,7 @@
     state.manual.requestController = new AbortController();
     els.manualUpdate.disabled = true;
     if (els.manualUpdateStatus) {
-      els.manualUpdateStatus.textContent = '正在提交门户刷新…';
+      els.manualUpdateStatus.textContent = '正在提交完整研究数据更新…';
       els.manualUpdateStatus.dataset.state = '';
     }
     try {

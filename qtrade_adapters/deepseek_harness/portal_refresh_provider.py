@@ -11,16 +11,18 @@ import datetime as _datetime
 from contextlib import contextmanager
 import hashlib
 import json
+import math
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 import time
 from urllib.parse import urlsplit
 
 from .market_data import MainboardMarketDataAdapter, normalize_code
+from .portal_refresh import HISTORY_WINDOW
 from .portal_refresh_worker import PortalRefreshPlan, _plan_universe_token
 
 
-PROVIDER_VERSION = "akshare-sina-daily-qfq-v1"
+PROVIDER_VERSION = "akshare-sina-daily-qfq-v2"
 _DATE_FORMAT = "%Y-%m-%d"
 _MAX_CALENDAR_DATES = 8_000
 _NETWORK_CONNECT_TIMEOUT = 10.0
@@ -261,6 +263,72 @@ class AksharePortalProvider:
             raise RuntimeError("provider schema invalid") from exc
         return {"rows": [values], "metadata": dict(self.metadata[code])}
 
+    def fetch_history(
+        self,
+        symbol: str,
+        target_date: str,
+        history_window: int = HISTORY_WINDOW,
+    ) -> dict[str, object]:
+        """Fetch the fixed target-anchored history required by the full pipeline."""
+
+        if history_window != HISTORY_WINDOW:
+            raise RuntimeError("provider history window rejected")
+        code = normalize_code(symbol)
+        if code is None or code not in self.metadata:
+            raise RuntimeError("provider symbol unavailable")
+        try:
+            target = _datetime.date.fromisoformat(target_date)
+            import akshare as ak
+
+            # The range is server-owned and intentionally wider than the
+            # returned window so the final 320 trading rows are available.
+            start = target - _datetime.timedelta(days=600)
+            with _akshare_network_guard():
+                frame = ak.stock_zh_a_daily(
+                    symbol=self._ak_symbol(code),
+                    start_date=start.strftime("%Y%m%d"),
+                    end_date=target.strftime("%Y%m%d"),
+                    adjust="qfq",
+                )
+        except Exception as exc:
+            raise RuntimeError("provider request failed") from exc
+        if frame is None or frame.empty:
+            raise RuntimeError("provider returned insufficient history")
+        by_date: dict[str, dict[str, object]] = {}
+        try:
+            candidates = frame.to_dict(orient="records")
+        except Exception as exc:
+            raise RuntimeError("provider schema invalid") from exc
+        for candidate in candidates:
+            try:
+                date = _date_text(candidate.get("date"))
+                if date > target_date:
+                    continue
+                values = {
+                    "code": code,
+                    "date": date,
+                    "open": float(candidate["open"]),
+                    "high": float(candidate["high"]),
+                    "low": float(candidate["low"]),
+                    "close": float(candidate["close"]),
+                    "volume": float(candidate["volume"]),
+                    "adjust": "qfq",
+                }
+                if any(value <= 0 or not math.isfinite(value) for value in (values["open"], values["high"], values["low"], values["close"], values["volume"])):
+                    raise ValueError("non-positive history")
+                if values["high"] < max(values["open"], values["close"]) or values["low"] > min(values["open"], values["close"]):
+                    raise ValueError("invalid history bar")
+            except (KeyError, TypeError, ValueError, AttributeError, PortalPlanError) as exc:
+                raise RuntimeError("provider schema invalid") from exc
+            by_date[date] = values
+        rows = [by_date[key] for key in sorted(by_date)]
+        if len(rows) < HISTORY_WINDOW or not rows or rows[-1]["date"] != target_date:
+            raise RuntimeError("provider returned insufficient history")
+        rows = rows[-HISTORY_WINDOW:]
+        if len(rows) != HISTORY_WINDOW or rows[-1]["date"] != target_date:
+            raise RuntimeError("provider returned stale history")
+        return {"rows": rows, "metadata": dict(self.metadata[code])}
+
 
 def build_trusted_plan(
     *,
@@ -283,7 +351,7 @@ def build_trusted_plan(
     dates = list(calendar_dates) if calendar_dates is not None else (
         list(calendar_loader()) if calendar_loader is not None else _load_trade_dates()
     )
-    calendar_token = _calendar_token(target, dates)
+    _calendar_token(target, dates)
     if target not in {_date_text(value) for value in dates}:
         raise PortalPlanError("calendar_closed")
     factory = adapter_factory or MainboardMarketDataAdapter
@@ -305,19 +373,58 @@ def build_trusted_plan(
         raise
     except Exception as exc:
         raise PortalPlanError("universe_unavailable") from exc
-    if tuple(metadata) != tuple(symbols):
+    return build_bound_plan(
+        symbols=symbols,
+        metadata=metadata,
+        target_date=target,
+        calendar_dates=dates,
+    )
+
+
+def build_bound_plan(
+    *,
+    symbols: Iterable[str],
+    metadata: Mapping[str, Mapping[str, object]],
+    target_date: str | _datetime.date,
+    calendar_dates: Iterable[str] | None = None,
+    calendar_loader: Callable[[], Iterable[str]] | None = None,
+) -> tuple[PortalRefreshPlan, AksharePortalProvider]:
+    """Build a plan from a server-bound universe, without reading a base dir."""
+
+    target = _date_text(target_date)
+    parsed = _datetime.date.fromisoformat(target)
+    if parsed.weekday() >= 5:
+        raise PortalPlanError("weekend")
+    dates = list(calendar_dates) if calendar_dates is not None else (
+        list(calendar_loader()) if calendar_loader is not None else _load_trade_dates()
+    )
+    calendar_token = _calendar_token(target, dates)
+    if target not in {_date_text(value) for value in dates}:
+        raise PortalPlanError("calendar_closed")
+    ordered = tuple(normalize_code(symbol) for symbol in symbols)
+    if (
+        not 5 <= len(ordered) <= 5000
+        or any(code is None for code in ordered)
+        or len(set(ordered)) != len(ordered)
+    ):
         raise PortalPlanError("universe_schema")
-    token = _plan_universe_token(symbols, target, calendar_token, PROVIDER_VERSION)
+    safe_metadata: dict[str, dict[str, object]] = {}
+    for code in ordered:
+        record = metadata.get(code) if isinstance(metadata, Mapping) else None
+        if not isinstance(record, Mapping):
+            raise PortalPlanError("universe_unavailable")
+        safe_metadata[code] = _safe_metadata(record, target)
+    token = _plan_universe_token(ordered, target, calendar_token, PROVIDER_VERSION)
     return (
         PortalRefreshPlan(
-            symbols=symbols,
+            symbols=ordered,
             target_date=target,
             universe_token=token,
             calendar_verified=True,
             calendar_token=calendar_token,
             provider_version=PROVIDER_VERSION,
         ),
-        AksharePortalProvider(metadata),
+        AksharePortalProvider(safe_metadata),
     )
 
 
@@ -325,5 +432,6 @@ __all__ = [
     "AksharePortalProvider",
     "PortalPlanError",
     "PROVIDER_VERSION",
+    "build_bound_plan",
     "build_trusted_plan",
 ]

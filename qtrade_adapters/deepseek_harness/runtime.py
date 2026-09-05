@@ -94,6 +94,13 @@ _MANUAL_UPDATE_REASONS = frozenset({
     "publish_timeout",
     "publish_failed",
     "reload_failed",
+    "factor_history_unavailable",
+    "pipeline_binding_invalid",
+    "pipeline_schema_invalid",
+    "pipeline_publish_failed",
+    "pipeline_executor_unavailable",
+    "pipeline_callback_failed",
+    "lease_path_invalid",
 })
 _MANUAL_UPDATE_FRESHNESS_GROUPS = ("portal", "factors", "decision", "sync")
 _MANUAL_UPDATE_FRESHNESS_SOURCES = frozenset({
@@ -1077,6 +1084,11 @@ class _UpdateLease:
         self._fd = None
         self._identity = None
 
+    def token(self):
+        if self._identity is None:
+            return None
+        return (os.getpid(), self._identity[0], self._identity[1])
+
     def acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -1186,6 +1198,12 @@ class ManualUpdateController:
         user_data_dir: Path | None = None,
         mode: str = "full_pipeline",
         on_success=None,
+        prepare_fn=None,
+        activate_fn=None,
+        plan_builder=None,
+        plan_inputs_builder=None,
+        calendar_loader=None,
+        commit_fn=None,
     ):
         self.base_dir_fn = base_dir_fn or config.resolve_base_dir
         self.project_root = config.PROJECT_ROOT if project_root is None else Path(project_root)
@@ -1204,6 +1222,12 @@ class ManualUpdateController:
         self.user_data_dir = Path(user_data_dir) if user_data_dir is not None else None
         self.mode = mode if mode in {"full_pipeline", "portal_only"} else "full_pipeline"
         self.on_success = on_success
+        self.prepare_fn = prepare_fn
+        self.activate_fn = activate_fn
+        self.plan_builder = plan_builder
+        self.plan_inputs_builder = plan_inputs_builder
+        self.calendar_loader = calendar_loader
+        self.commit_fn = commit_fn
         self.clock = clock or datetime.datetime.now
         self._uses_default_run_fn = run_fn is None
         self.run_fn = run_fn or run_daily_update
@@ -1215,6 +1239,7 @@ class ManualUpdateController:
         self._stop_event = threading.Event()
         self._lease_fd = None
         self._lease_identity = None
+        self._lease_token = None
         self._lease_generation = None
         self._job_id = None
         self._startup_event = None
@@ -1440,6 +1465,7 @@ class ManualUpdateController:
             raise
         self._lease_fd = descriptor
         self._lease_identity = (identity.st_dev, identity.st_ino)
+        self._lease_token = (os.getpid(), identity.st_dev, identity.st_ino)
         return True
 
     def _release_lease_locked(self) -> None:
@@ -1447,6 +1473,7 @@ class ManualUpdateController:
         identity = self._lease_identity
         self._lease_fd = None
         self._lease_identity = None
+        self._lease_token = None
         if descriptor is None:
             return
         try:
@@ -1507,9 +1534,23 @@ class ManualUpdateController:
                     run_kwargs["subprocess_module"] = self.subprocess_module
             else:
                 run_kwargs["user_data_dir"] = self.user_data_dir
+                if self.prepare_fn is not None:
+                    run_kwargs["prepare_fn"] = self.prepare_fn
+                if self.activate_fn is not None:
+                    run_kwargs["activate_fn"] = self.activate_fn
+                if self.commit_fn is not None:
+                    run_kwargs["commit_fn"] = self.commit_fn
+                run_kwargs["lease_path"] = self.lock_path
+                run_kwargs["lease_token"] = self._lease_token
                 if self.mode == "portal_only":
                     run_kwargs["startup_event"] = self._startup_event
                     run_kwargs["startup_result"] = self._startup_result
+                if self.plan_builder is not None:
+                    run_kwargs["plan_builder"] = self.plan_builder
+                if self.plan_inputs_builder is not None:
+                    run_kwargs["plan_inputs_builder"] = self.plan_inputs_builder
+                if self.calendar_loader is not None:
+                    run_kwargs["calendar_loader"] = self.calendar_loader
             returncode = self.run_fn(
                 base,
                 target,
@@ -1904,6 +1945,13 @@ def maybe_auto_update(
     status_file: Path | None = None,
     log_file: Path | None = None,
     clock=None,
+    user_data_dir: Path | None = None,
+    prepare_fn=None,
+    activate_fn=None,
+    plan_builder=None,
+    plan_inputs_builder=None,
+    calendar_loader=None,
+    commit_fn=None,
 ):
     """Start one daemon scheduler for the application's lifetime."""
 
@@ -1965,6 +2013,30 @@ def maybe_auto_update(
                 print("[auto-update] 手动或自动更新正在运行，跳过本次自动任务", flush=True)
                 return 1
             try:
+                if user_data_dir is not None:
+                    from .snapshot_pipeline import run_snapshot_pipeline
+
+                    return run_snapshot_pipeline(
+                        base,
+                        target,
+                        user_data_dir=user_data_dir,
+                        state_dir=effective_status.parent,
+                        status_file=effective_status,
+                        log_file=effective_log,
+                        environment=environment,
+                        project_root=root,
+                        python_executable=python_executable,
+                        stop_event=stop_event,
+                        job_id=uuid.uuid4().hex,
+                        prepare_fn=prepare_fn,
+                        activate_fn=activate_fn,
+                        commit_fn=commit_fn,
+                        plan_builder=plan_builder,
+                        plan_inputs_builder=plan_inputs_builder,
+                        calendar_loader=calendar_loader,
+                        lease_path=shared_lock,
+                        lease_token=lease.token(),
+                    )
                 return run_daily_update(
                     base,
                     target,
