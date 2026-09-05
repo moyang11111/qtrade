@@ -81,6 +81,30 @@ class FakeProvider:
         return _item(symbol)
 
 
+class FakeHistoryProvider(FakeProvider):
+    PROVIDER_VERSION = "fixture-v2"
+
+    def fetch_history(self, symbol: str, target_date: str, history_window: int) -> dict:
+        target = dt.date.fromisoformat(target_date)
+        rows = []
+        for offset in range(history_window):
+            value = float(offset + 10)
+            rows.append({
+                "code": symbol,
+                "date": (target - dt.timedelta(days=history_window - 1 - offset)).isoformat(),
+                "open": value,
+                "high": value + 1,
+                "low": value - 1,
+                "close": value + 0.5,
+                "volume": 1000 + offset,
+                "adjust": "qfq",
+            })
+        item = _item(symbol)
+        item["rows"] = rows
+        item["metadata"]["history_rows"] = history_window
+        return item
+
+
 class BadPublishProvider(FakeProvider):
     def fetch(self, symbol: str, target_date: str) -> dict:
         item = _item(symbol)
@@ -145,6 +169,38 @@ def test_worker_publishes_complete_generation_and_safe_progress(tmp_path: Path) 
     assert snapshot.manifest["total"] == len(SYMBOLS)
     assert snapshot.manifest["target_date"] == TARGET
     assert worker.status()["state"] == "success"
+
+
+def test_history_worker_publishes_v2_target_anchored_snapshot(tmp_path: Path) -> None:
+    provider = FakeHistoryProvider()
+    worker = _worker(
+        tmp_path,
+        provider=provider,
+        history_window=portal_refresh.HISTORY_WINDOW,
+        item_timeout_seconds=10,
+        batch_timeout_seconds=30,
+        job_timeout_seconds=90,
+    )
+
+    result = worker.run(_plan(provider))
+
+    assert result["state"] == "success"
+    snapshot = read_current_snapshot(
+        tmp_path / "user-data" / "state",
+        user_data_dir=tmp_path / "user-data",
+    )
+    assert snapshot is not None
+    assert snapshot.manifest["schema_version"] == portal_refresh.HISTORY_SCHEMA_VERSION
+    assert snapshot.manifest["history_window"] == portal_refresh.HISTORY_WINDOW
+    assert snapshot.manifest["history_rows"] == [portal_refresh.HISTORY_WINDOW] * len(SYMBOLS)
+    checkpoint = json.loads(worker._paths().checkpoint.read_text(encoding="utf-8"))
+    assert checkpoint["history_window"] == portal_refresh.HISTORY_WINDOW
+    assert checkpoint["history_schema"] == portal_refresh.HISTORY_DB_SCHEMA
+    rows = portal_refresh._read_database_rows_history(
+        snapshot.database, TARGET, list(SYMBOLS),
+    )
+    assert rows is not None
+    assert all(len(value) == portal_refresh.HISTORY_WINDOW for value in rows.values())
 
 
 def test_maximum_universe_and_manifest_bounds_are_deterministic(tmp_path: Path) -> None:

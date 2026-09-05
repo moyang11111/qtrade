@@ -59,6 +59,7 @@ MAX_PUBLISH_PAYLOAD_BYTES = 32 * 1024 * 1024
 MAX_STAGED_BYTES = 128 * 1024 * 1024
 MAX_CHILD_MESSAGE_BYTES = 2 * 1024
 MAX_ITEM_BYTES = 1536
+MAX_HISTORY_ITEM_BYTES = 64 * 1024
 MAX_ITEM_STRING_CHARS = 128
 MAX_JSON_DEPTH = 8
 MAX_JSON_CONTAINER_ITEMS = 64
@@ -99,7 +100,7 @@ _REASONS = frozenset({
 
 _CHECKPOINT_KEYS = frozenset({
     "schema_version", "job_id", "target_date", "universe_token", "calendar_token", "symbols", "total",
-    "provider_version", "batch_size", "batches", "completed", "failed", "retry", "current_batch", "as_of",
+    "provider_version", "history_window", "history_schema", "batch_size", "batches", "completed", "failed", "retry", "current_batch", "as_of",
     "state", "reason", "started_at", "heartbeat_at", "finished_at", "elapsed_seconds",
     "staged_bytes", "published_generation", "published_content_sha256",
 })
@@ -120,7 +121,7 @@ class PortalWorkerError(RuntimeError):
         super().__init__(self.reason)
 
 
-def _normalise_json(value: object, *, depth: int = 0) -> object:
+def _normalise_json(value: object, *, depth: int = 0, max_container_items: int = MAX_JSON_CONTAINER_ITEMS) -> object:
     """Convert only bounded JSON primitives; never accept arbitrary objects."""
 
     if depth > MAX_JSON_DEPTH:
@@ -136,23 +137,28 @@ def _normalise_json(value: object, *, depth: int = 0) -> object:
             raise PortalWorkerError("provider_schema")
         return value
     if isinstance(value, Mapping):
-        if len(value) > MAX_JSON_CONTAINER_ITEMS:
+        if len(value) > max_container_items:
             raise PortalWorkerError("provider_schema")
         normalized: dict[str, object] = {}
         for key, item in value.items():
             if not isinstance(key, str) or len(key) > MAX_ITEM_STRING_CHARS:
                 raise PortalWorkerError("provider_schema")
-            normalized[key] = _normalise_json(item, depth=depth + 1)
+            normalized[key] = _normalise_json(item, depth=depth + 1, max_container_items=max_container_items)
         return normalized
     if isinstance(value, (list, tuple)):
-        if len(value) > MAX_JSON_CONTAINER_ITEMS:
+        if len(value) > max_container_items:
             raise PortalWorkerError("provider_schema")
-        return [_normalise_json(item, depth=depth + 1) for item in value]
+        return [_normalise_json(item, depth=depth + 1, max_container_items=max_container_items) for item in value]
     raise PortalWorkerError("provider_schema")
 
 
-def _json_bytes(value: object, *, maximum: int) -> tuple[object, bytes]:
-    normalized = _normalise_json(value)
+def _json_bytes(
+    value: object,
+    *,
+    maximum: int,
+    max_container_items: int = MAX_JSON_CONTAINER_ITEMS,
+) -> tuple[object, bytes]:
+    normalized = _normalise_json(value, max_container_items=max_container_items)
     try:
         encoded = json.dumps(
             normalized,
@@ -168,12 +174,23 @@ def _json_bytes(value: object, *, maximum: int) -> tuple[object, bytes]:
     return normalized, encoded
 
 
-def _send_json(connection, payload: object, *, maximum: int = MAX_CHILD_MESSAGE_BYTES) -> None:
-    _, encoded = _json_bytes(payload, maximum=maximum)
+def _send_json(
+    connection,
+    payload: object,
+    *,
+    maximum: int = MAX_CHILD_MESSAGE_BYTES,
+    max_container_items: int = MAX_JSON_CONTAINER_ITEMS,
+) -> None:
+    _, encoded = _json_bytes(payload, maximum=maximum, max_container_items=max_container_items)
     connection.send_bytes(encoded)
 
 
-def _recv_json(connection, *, maximum: int = MAX_CHILD_MESSAGE_BYTES) -> object:
+def _recv_json(
+    connection,
+    *,
+    maximum: int = MAX_CHILD_MESSAGE_BYTES,
+    max_container_items: int = MAX_JSON_CONTAINER_ITEMS,
+) -> object:
     try:
         encoded = connection.recv_bytes(maxlength=maximum)
     except (EOFError, OSError, ValueError, TypeError, BufferTooShort):
@@ -184,7 +201,7 @@ def _recv_json(connection, *, maximum: int = MAX_CHILD_MESSAGE_BYTES) -> object:
         value = json.loads(encoded.decode("utf-8"))
     except (UnicodeError, ValueError, TypeError) as exc:
         raise PortalWorkerError("provider_failed") from exc
-    normalized, _ = _json_bytes(value, maximum=maximum)
+    normalized, _ = _json_bytes(value, maximum=maximum, max_container_items=max_container_items)
     return normalized
 
 
@@ -484,6 +501,36 @@ def _safe_item(symbol: str, value: object) -> dict[str, object]:
     return item
 
 
+def _safe_history_item(
+    symbol: str,
+    target: str,
+    value: object,
+    history_window: int,
+) -> dict[str, object]:
+    if not isinstance(value, Mapping) or set(value) != {"rows", "metadata"}:
+        raise PortalWorkerError("provider_schema")
+    metadata = value.get("metadata")
+    if not isinstance(metadata, Mapping):
+        raise PortalWorkerError("provider_schema")
+    if set(metadata) - portal_refresh._METADATA_KEYS:
+        raise PortalWorkerError("provider_schema")
+    try:
+        rows = portal_refresh._rows_by_symbol_history(
+            {symbol: value.get("rows")}, (symbol,), target, history_window=history_window,
+        )[symbol]
+        metadata = portal_refresh._metadata_by_symbol([metadata], (symbol,), target)[0]
+    except portal_refresh.PortalRefreshError as exc:
+        raise PortalWorkerError("provider_schema") from exc
+    item, _ = _json_bytes(
+        {"symbol": symbol, "rows": rows, "metadata": metadata},
+        maximum=MAX_HISTORY_ITEM_BYTES,
+        max_container_items=history_window + 8,
+    )
+    if not isinstance(item, dict):
+        raise PortalWorkerError("provider_schema")
+    return item
+
+
 def _safe_batch_payload(
     payload: object,
     *,
@@ -494,6 +541,7 @@ def _safe_batch_payload(
     provider_version: str,
     index: int,
     symbols: Sequence[str],
+    history_window: int = 0,
 ) -> dict[str, object]:
     if not isinstance(payload, dict) or set(payload) != _BATCH_KEYS:
         raise PortalWorkerError("checkpoint_corrupt")
@@ -524,9 +572,10 @@ def _safe_batch_payload(
         if symbol is None or symbol not in symbols or symbol in by_symbol:
             raise PortalWorkerError("checkpoint_corrupt")
         try:
-            normalized_item = _safe_item(
-                symbol,
-                {"rows": raw.get("rows"), "metadata": raw.get("metadata")},
+            normalized_item = (
+                _safe_history_item(symbol, target, {"rows": raw.get("rows"), "metadata": raw.get("metadata")}, history_window)
+                if history_window
+                else _safe_item(symbol, {"rows": raw.get("rows"), "metadata": raw.get("metadata")})
             )
         except PortalWorkerError:
             raise PortalWorkerError("checkpoint_corrupt") from None
@@ -561,6 +610,8 @@ def _validate_checkpoint(payload: object) -> dict[str, object]:
     token = payload.get("universe_token")
     calendar_token = payload.get("calendar_token")
     provider_version = payload.get("provider_version")
+    history_window = payload.get("history_window")
+    history_schema = payload.get("history_schema")
     if not isinstance(job_id, str) or _JOB_ID_RE.fullmatch(job_id) is None:
         raise PortalWorkerError("checkpoint_corrupt")
     if (
@@ -571,6 +622,12 @@ def _validate_checkpoint(payload: object) -> dict[str, object]:
         or _TOKEN_RE.fullmatch(calendar_token) is None
         or not isinstance(provider_version, str)
         or _PROVIDER_VERSION_RE.fullmatch(provider_version) is None
+        or history_window not in (0, portal_refresh.HISTORY_WINDOW)
+        or history_schema != (
+            portal_refresh.HISTORY_DB_SCHEMA
+            if history_window == portal_refresh.HISTORY_WINDOW
+            else "legacy.v1"
+        )
     ):
         raise PortalWorkerError("checkpoint_corrupt")
     symbols = payload.get("symbols")
@@ -781,17 +838,30 @@ class _Lease:
             pass
 
 
-def _child_fetch(provider, symbol: str, target: str, connection) -> None:
+def _child_fetch(provider, symbol: str, target: str, connection, history_window: int = 0) -> None:
     try:
-        result = provider.fetch(symbol, target)
-        item = _safe_item(symbol, result)
+        result = (
+            provider.fetch_history(symbol, target, history_window)
+            if history_window
+            else provider.fetch(symbol, target)
+        )
+        item = (
+            _safe_history_item(symbol, target, result, history_window)
+            if history_window
+            else _safe_item(symbol, result)
+        )
         payload = {"ok": True, "item": item}
     except PortalWorkerError as error:
         payload = {"ok": False, "reason": error.reason, "transient": error.transient}
     except Exception:
         payload = {"ok": False, "reason": "provider_failed", "transient": False}
     try:
-        _send_json(connection, payload)
+        _send_json(
+            connection,
+            payload,
+            maximum=MAX_HISTORY_ITEM_BYTES if history_window else MAX_CHILD_MESSAGE_BYTES,
+            max_container_items=history_window + 8 if history_window else MAX_JSON_CONTAINER_ITEMS,
+        )
     except (BrokenPipeError, EOFError, OSError):
         pass
     finally:
@@ -801,9 +871,9 @@ def _child_fetch(provider, symbol: str, target: str, connection) -> None:
             pass
 
 
-def _default_process_factory(provider, symbol: str, target: str, connection):
+def _default_process_factory(provider, symbol: str, target: str, connection, history_window: int = 0):
     context = multiprocessing.get_context("spawn")
-    return context.Process(target=_child_fetch, args=(provider, symbol, target, connection), daemon=False)
+    return context.Process(target=_child_fetch, args=(provider, symbol, target, connection, history_window), daemon=False)
 
 
 def _child_publish(
@@ -815,16 +885,20 @@ def _child_publish(
     user_data_dir: str,
     universe_token: str,
     connection,
+    publish_current: bool = True,
+    history_window: int = 0,
 ) -> None:
     try:
-        snapshot = publish_snapshot(
-            symbols,
-            target,
-            rows,
-            metadata,
-            state_dir=state_dir,
-            user_data_dir=user_data_dir,
-            universe_token=universe_token,
+        snapshot = (
+            portal_refresh.publish_snapshot_v2(
+                symbols, target, rows, metadata, state_dir=state_dir, user_data_dir=user_data_dir,
+                universe_token=universe_token, publish_current=publish_current,
+            )
+            if history_window
+            else publish_snapshot(
+                symbols, target, rows, metadata, state_dir=state_dir, user_data_dir=user_data_dir,
+                universe_token=universe_token, publish_current=publish_current,
+            )
         )
         payload = {
             "ok": True,
@@ -855,11 +929,33 @@ def _default_publish_process_factory(
     user_data_dir: str,
     universe_token: str,
     connection,
+    history_window: int = 0,
 ):
     context = multiprocessing.get_context("spawn")
     return context.Process(
         target=_child_publish,
-        args=(symbols, target, rows, metadata, state_dir, user_data_dir, universe_token, connection),
+        args=(symbols, target, rows, metadata, state_dir, user_data_dir, universe_token, connection, True, history_window),
+        daemon=False,
+    )
+
+
+def _staged_publish_process_factory(
+    symbols: Sequence[str],
+    target: str,
+    rows: Mapping[str, object],
+    metadata: Sequence[Mapping[str, object]],
+    state_dir: str,
+    user_data_dir: str,
+    universe_token: str,
+    connection,
+    history_window: int = 0,
+):
+    """Build a child that verifies a candidate without advancing portal current."""
+
+    context = multiprocessing.get_context("spawn")
+    return context.Process(
+        target=_child_publish,
+        args=(symbols, target, rows, metadata, state_dir, user_data_dir, universe_token, connection, False, history_window),
         daemon=False,
     )
 
@@ -908,6 +1004,7 @@ def _new_checkpoint(
     now: str,
     *,
     state: str = "accepted",
+    history_window: int = 0,
 ) -> dict[str, object]:
     return {
         "schema_version": WORKER_SCHEMA_VERSION,
@@ -918,6 +1015,8 @@ def _new_checkpoint(
         "symbols": list(plan.symbols),
         "total": len(plan.symbols),
         "provider_version": plan.provider_version,
+        "history_window": portal_refresh.HISTORY_WINDOW if history_window else 0,
+        "history_schema": portal_refresh.HISTORY_DB_SCHEMA if history_window else "legacy.v1",
         "batch_size": batch_size,
         "batches": [],
         "completed": 0,
@@ -961,6 +1060,9 @@ class PortalRefreshWorker:
         clock=None,
         wall_clock=None,
         sleeper=None,
+        publish_current: bool = True,
+        staged_publish_process_factory=None,
+        history_window: int = 0,
     ):
         if not MIN_BATCH_SIZE <= int(batch_size) <= MAX_BATCH_SIZE:
             raise ValueError("invalid batch size")
@@ -972,6 +1074,8 @@ class PortalRefreshWorker:
             raise ValueError("invalid job timeout")
         if not 1 <= int(max_attempts) <= 3:
             raise ValueError("invalid attempt count")
+        if history_window not in (0, portal_refresh.HISTORY_WINDOW):
+            raise ValueError("invalid history window")
         self.user_data_dir = Path(user_data_dir)
         self.state_dir = Path(state_dir) if state_dir is not None else self.user_data_dir / "state"
         self.provider = provider
@@ -981,8 +1085,14 @@ class PortalRefreshWorker:
         self.job_timeout = float(job_timeout_seconds)
         self.max_attempts = int(max_attempts)
         self.retry_delay = float(retry_delay_seconds)
+        self.history_window = int(history_window)
         self.process_factory = process_factory or _default_process_factory
-        self.publish_process_factory = publish_process_factory or _default_publish_process_factory
+        self.publish_current = bool(publish_current)
+        self.publish_process_factory = publish_process_factory or (
+            _default_publish_process_factory
+            if self.publish_current
+            else (staged_publish_process_factory or _staged_publish_process_factory)
+        )
         self.clock = clock or time.monotonic
         self.wall_clock = wall_clock or _datetime.datetime.now
         self.sleeper = sleeper or time.sleep
@@ -1016,6 +1126,8 @@ class PortalRefreshWorker:
                 "heartbeat_at": None,
                 "finished_at": None,
                 "elapsed_seconds": 0.0,
+                "history_window": 0,
+                "history_schema": "legacy.v1",
                 "published_generation": None,
                 "published_content_sha256": None,
             }
@@ -1051,6 +1163,8 @@ class PortalRefreshWorker:
             "heartbeat_at": checkpoint.get("heartbeat_at"),
             "finished_at": checkpoint.get("finished_at"),
             "elapsed_seconds": checkpoint.get("elapsed_seconds", 0.0),
+            "history_window": checkpoint.get("history_window", 0),
+            "history_schema": checkpoint.get("history_schema", "legacy.v1"),
             # These are opaque content tokens used by the parent coordinator
             # to prove that the service reloads this exact publication.
             "published_generation": checkpoint.get("published_generation"),
@@ -1146,7 +1260,17 @@ class PortalRefreshWorker:
         checkpoint: dict[str, object],
     ) -> dict[str, object]:
         def current_matches() -> bool:
-            current = read_current_snapshot(self.state_dir, user_data_dir=self.user_data_dir)
+            if self.publish_current:
+                current = read_current_snapshot(self.state_dir, user_data_dir=self.user_data_dir)
+            else:
+                generation = checkpoint.get("published_generation")
+                if not isinstance(generation, str):
+                    return False
+                current = portal_refresh.read_generation_snapshot(
+                    self.state_dir,
+                    user_data_dir=self.user_data_dir,
+                    generation=generation,
+                )
             if current is None:
                 return False
             return (
@@ -1207,8 +1331,8 @@ class PortalRefreshWorker:
         with self._lock:
             return dict(self._memory_status)
 
-    def run(self, plan: PortalRefreshPlan, *, provider=None) -> dict[str, object]:
-        self._stop_event = threading.Event()
+    def run(self, plan: PortalRefreshPlan, *, provider=None, stop_event=None) -> dict[str, object]:
+        self._stop_event = stop_event if stop_event is not None else threading.Event()
         chosen = provider or self.provider
         if chosen is None:
             return self._set_memory(None, state="failure", reason="universe_unavailable")
@@ -1245,9 +1369,17 @@ class PortalRefreshWorker:
         parent, child = context.Pipe(False)
         process = None
         try:
-            process = self.publish_process_factory(
-                list(symbols), target, dict(rows), list(metadata),
-                os.fspath(self.state_dir), os.fspath(self.user_data_dir), universe_token, child,
+            process = (
+                self.publish_process_factory(
+                    list(symbols), target, dict(rows), list(metadata),
+                    os.fspath(self.state_dir), os.fspath(self.user_data_dir), universe_token, child,
+                    self.history_window,
+                )
+                if self.history_window
+                else self.publish_process_factory(
+                    list(symbols), target, dict(rows), list(metadata),
+                    os.fspath(self.state_dir), os.fspath(self.user_data_dir), universe_token, child,
+                )
             )
             process.start()
             child.close()
@@ -1319,7 +1451,11 @@ class PortalRefreshWorker:
         parent, child = context.Pipe(False)
         process = None
         try:
-            process = self.process_factory(provider, symbol, target, child)
+            process = (
+                self.process_factory(provider, symbol, target, child, self.history_window)
+                if self.history_window
+                else self.process_factory(provider, symbol, target, child)
+            )
             process.start()
             child.close()
             with self._lock:
@@ -1331,9 +1467,25 @@ class PortalRefreshWorker:
                     _terminate_owned_process(process)
                     return _ItemResult(False, reason="aborted")
                 remaining = max(0.01, end - self.clock())
+                # A history item can be tens of KiB.  On Windows the child
+                # may remain alive while its bounded frame is waiting for the
+                # parent to drain the pipe, so consume a complete frame as
+                # soon as the connection signals data instead of waiting for
+                # process exit first.
+                if parent.poll(0):
+                    message = _recv_json(
+                        parent,
+                        maximum=MAX_HISTORY_ITEM_BYTES if self.history_window else MAX_CHILD_MESSAGE_BYTES,
+                        max_container_items=self.history_window + 8 if self.history_window else MAX_JSON_CONTAINER_ITEMS,
+                    )
+                    break
                 if not process.is_alive():
                     if parent.poll(0):
-                        message = _recv_json(parent)
+                        message = _recv_json(
+                            parent,
+                            maximum=MAX_HISTORY_ITEM_BYTES if self.history_window else MAX_CHILD_MESSAGE_BYTES,
+                            max_container_items=self.history_window + 8 if self.history_window else MAX_JSON_CONTAINER_ITEMS,
+                        )
                     break
                 parent.poll(min(0.1, remaining))
             if message is None:
@@ -1408,6 +1560,7 @@ class PortalRefreshWorker:
             provider_version=str(checkpoint["provider_version"]),
             index=index,
             symbols=symbols,
+            history_window=self.history_window,
         )
         encoded_size = len(json.dumps(
             payload,
@@ -1453,6 +1606,7 @@ class PortalRefreshWorker:
             provider_version=str(checkpoint["provider_version"]),
             index=int(record["index"]),
             symbols=batch_symbols,
+            history_window=self.history_window,
         )
 
     def _run_batch(self, paths: PortalWorkerPaths, checkpoint: dict[str, object], index: int, batch_symbols: Sequence[str], started: float, lease: _Lease) -> tuple[str, dict[str, object] | None]:
@@ -1590,7 +1744,15 @@ class PortalRefreshWorker:
                         paths, checkpoint, state="failure", reason="checkpoint_incompatible",
                     )
                 if checkpoint["state"] == "success":
-                    current = read_current_snapshot(self.state_dir, user_data_dir=self.user_data_dir)
+                    current = (
+                        read_current_snapshot(self.state_dir, user_data_dir=self.user_data_dir)
+                        if self.publish_current
+                        else portal_refresh.read_generation_snapshot(
+                            self.state_dir,
+                            user_data_dir=self.user_data_dir,
+                            generation=checkpoint.get("published_generation"),
+                        )
+                    )
                     if (
                         current is not None
                         and current.manifest.get("target_date") == plan.target_date
@@ -1605,6 +1767,7 @@ class PortalRefreshWorker:
                 checkpoint = _new_checkpoint(
                     job_id, plan, self.batch_size,
                     self.wall_clock().isoformat(timespec="seconds"),
+                    history_window=self.history_window,
                 )
                 self._write_checkpoint(paths, checkpoint)
             checkpoint["state"] = "running"
