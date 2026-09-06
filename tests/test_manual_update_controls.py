@@ -139,6 +139,65 @@ def test_manual_controller_enforces_cutoff_calendar_result_and_idempotency(tmp_p
     assert calls == [target]
 
 
+@pytest.mark.parametrize(
+    ("now", "expected_reason"),
+    [
+        (dt.datetime(2026, 9, 6, 9, 0), "weekend"),
+        (dt.datetime(2026, 9, 6, 18, 31), "weekend"),
+        (dt.datetime(2026, 9, 4, 18, 29), "before_cutoff"),
+    ],
+)
+def test_manual_controller_rejects_weekend_before_cutoff_without_touching_pipeline(
+    tmp_path, now, expected_reason
+):
+    calls = []
+
+    def must_not_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("manual pipeline must not start")
+
+    def must_not_resolve_base():
+        raise AssertionError("manual weekend/cutoff gate must not resolve the base")
+
+    controller, _, lock = _controller(tmp_path, must_not_run, now)
+    controller.base_dir_fn = must_not_resolve_base
+
+    result = controller.start()
+
+    assert result["state"] == "skip"
+    assert result["reason"] == expected_reason
+    assert result["trade_date"] == now.date().isoformat()
+    assert calls == []
+    assert controller._worker is None
+    assert not lock.exists()
+
+
+def test_manual_controller_runs_at_exact_weekday_cutoff(tmp_path):
+    target = dt.date(2026, 9, 4)
+    calls = []
+
+    def fake_run(base, run_date, **kwargs):
+        calls.append((base, run_date))
+        _write_status(kwargs["status_file"], run_date, "success")
+        return 0
+
+    controller, _, lock = _controller(
+        tmp_path,
+        fake_run,
+        dt.datetime(2026, 9, 4, 18, 30),
+    )
+
+    accepted = controller.start()
+    worker = controller._worker
+    assert accepted["state"] == "accepted"
+    assert worker is not None
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert calls == [(tmp_path / "deck", target)]
+    assert controller.status()["state"] == "success"
+    assert not lock.exists()
+
+
 def test_manual_controller_single_flight_and_safe_failure(tmp_path):
     target_time = dt.datetime(2026, 8, 28, 18, 31)
     started = threading.Event()

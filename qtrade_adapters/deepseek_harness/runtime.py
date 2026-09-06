@@ -1661,6 +1661,14 @@ class ManualUpdateController:
                 result["accepted"] = False
                 result["reason"] = "already_running"
                 return result
+            if current.weekday() >= 5:
+                self._snapshot = self._snapshot_for(
+                    state="skip",
+                    target=target,
+                    reason="weekend",
+                    finished_at=current.isoformat(timespec="seconds"),
+                )
+                return dict(self._snapshot)
             if current < cutoff:
                 self._snapshot = self._snapshot_for(
                     state="skip",
