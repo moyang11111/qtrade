@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from qtrade_adapters.deepseek_harness.portal_refresh_provider import (
+    PortalHistoryError,
     PortalPlanError,
     _akshare_network_guard,
     build_trusted_plan,
@@ -188,6 +189,41 @@ def test_akshare_provider_history_is_target_anchored_and_bounded(monkeypatch):
         "end_date": "20260828",
         "adjust": "qfq",
     }]
+
+
+@pytest.mark.parametrize(
+    ("rows", "suspended", "reason"),
+    [
+        ([], False, "insufficient_history"),
+        ([TARGET], False, "insufficient_history"),
+        (["2026-08-27"] * 320, False, "target_date_missing"),
+        ([], True, "suspended"),
+    ],
+)
+def test_history_validation_exposes_only_stable_quality_classification(monkeypatch, rows, suspended, reason):
+    class Frame:
+        empty = not rows
+
+        def to_dict(self, orient):
+            assert orient == "records"
+            return [{
+                "date": value,
+                "open": 10,
+                "high": 11,
+                "low": 9,
+                "close": 10.5,
+                "volume": 1000,
+            } for value in rows]
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "akshare",
+        SimpleNamespace(stock_zh_a_daily=lambda **_: Frame()),
+    )
+    _, provider = _plan()
+    provider.metadata["600001"]["suspended"] = suspended
+    with pytest.raises(PortalHistoryError, match=reason):
+        provider.fetch_history("600001", TARGET)
 
 
 def test_akshare_transport_forces_no_proxy_redirect_and_bounded_body(monkeypatch):

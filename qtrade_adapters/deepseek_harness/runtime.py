@@ -18,11 +18,13 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from . import config
 
 
 DAILY_UPDATE_TIME = datetime.time(18, 30)
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 DAILY_UPDATE_TIMEOUT_SECONDS = 7200
 MANUAL_UPDATE_PROCESS_POLL_SECONDS = 0.1
 MANUAL_UPDATE_STOP_TIMEOUT_SECONDS = 2.0
@@ -83,6 +85,9 @@ _MANUAL_UPDATE_REASONS = frozenset({
     "universe_unavailable",
     "provider_schema",
     "provider_failed",
+    "insufficient_history",
+    "target_date_missing",
+    "suspended",
     "provider_unreachable",
     "checkpoint_corrupt",
     "checkpoint_io",
@@ -883,7 +888,55 @@ def _safe_manual_progress(value):
     current = value.get("current")
     if not isinstance(current, str) or current not in _MANUAL_UPDATE_STEPS:
         current = None
-    return {"completed": min(completed, 100), "total": min(total, 100), "current": current}
+    return {"completed": completed, "total": total, "current": current}
+
+
+def _safe_stock_progress(value):
+    result = {"completed": 0, "total": 0, "failed": 0, "pending": 0}
+    if not isinstance(value, dict):
+        return result
+    for key in result:
+        count = value.get(key)
+        if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+            result[key] = count
+    return result
+
+
+def _safe_data_quality(value):
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for key in ("history_sufficient", "insufficient_history", "suspended", "fetch_failed", "unknown"):
+        count = value.get(key)
+        result[key] = count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else None
+    return result
+
+
+def resolve_latest_completed_trade_date(now, calendar_dates):
+    """Resolve a frozen target from a covered exchange calendar."""
+
+    if not isinstance(now, datetime.datetime):
+        raise ValueError("calendar_unavailable")
+    local = now.replace(tzinfo=SHANGHAI_TZ) if now.tzinfo is None else now.astimezone(SHANGHAI_TZ)
+    try:
+        normalized = sorted({
+            value.date() if isinstance(value, datetime.datetime)
+            else value if isinstance(value, datetime.date)
+            else datetime.date.fromisoformat(value[:10]) if isinstance(value, str)
+            else (_ for _ in ()).throw(ValueError())
+            for value in calendar_dates
+        })
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("calendar_unavailable") from exc
+    if not normalized or len(normalized) > 8000 or normalized[-1] < local.date():
+        raise ValueError("calendar_unavailable")
+    boundary = local.date()
+    if local.time().replace(tzinfo=None) < DAILY_UPDATE_TIME:
+        boundary -= datetime.timedelta(days=1)
+    candidates = [value for value in normalized if value <= boundary]
+    if not candidates:
+        raise ValueError("calendar_unavailable")
+    return candidates[-1]
 
 
 def read_manual_update_status(path: Path) -> dict[str, object]:
@@ -905,6 +958,11 @@ def read_manual_update_status(path: Path) -> dict[str, object]:
         "heartbeat_at": None,
         "elapsed_seconds": 0.0,
         "progress": {"completed": 0, "total": 0, "current": None},
+        "pipeline_progress": {"completed": 0, "total": 4, "current": None},
+        "stock_progress": {"completed": 0, "total": 0, "failed": 0, "pending": 0},
+        "data_quality": {},
+        "current_complete_date": None,
+        "current_portal_date": None,
     }
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -930,6 +988,13 @@ def read_manual_update_status(path: Path) -> dict[str, object]:
     if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool) and math.isfinite(elapsed) and elapsed >= 0:
         result["elapsed_seconds"] = min(float(elapsed), 86_400.0)
     result["progress"] = _safe_manual_progress(payload.get("progress"))
+    result["pipeline_progress"] = _safe_manual_progress(payload.get("pipeline_progress", payload.get("progress")))
+    result["stock_progress"] = _safe_stock_progress(payload.get("stock_progress"))
+    result["data_quality"] = _safe_data_quality(payload.get("data_quality"))
+    result["current_complete_date"] = _safe_date_text(payload.get("current_complete_date"))
+    result["current_portal_date"] = _safe_date_text(payload.get("current_portal_date"))
+    if result["state"] == "success" and result["current_complete_date"] is None:
+        result["current_complete_date"] = result["trade_date"]
     result["reason"] = _safe_manual_reason(payload.get("reason"), state)
     raw_outputs = payload.get("outputs")
     if isinstance(raw_outputs, dict):
@@ -1270,6 +1335,11 @@ class ManualUpdateController:
             "heartbeat_at": None,
             "elapsed_seconds": 0.0,
             "progress": {"completed": 0, "total": 0, "current": None},
+            "pipeline_progress": {"completed": 0, "total": 4, "current": None},
+            "stock_progress": {"completed": 0, "total": 0, "failed": 0, "pending": 0},
+            "data_quality": {},
+            "current_complete_date": None,
+            "current_portal_date": None,
         }
 
     def _snapshot_for(
@@ -1345,6 +1415,11 @@ class ManualUpdateController:
             "heartbeat_at": current,
             "elapsed_seconds": safe.get("elapsed_seconds", 0.0),
             "progress": safe.get("progress", {"completed": 0, "total": 0, "current": None}),
+            "pipeline_progress": safe.get("pipeline_progress", {"completed": 0, "total": 4, "current": None}),
+            "stock_progress": safe.get("stock_progress", {"completed": 0, "total": 0, "failed": 0, "pending": 0}),
+            "data_quality": safe.get("data_quality", {}),
+            "current_complete_date": safe.get("current_complete_date"),
+            "current_portal_date": safe.get("current_portal_date"),
             "job_id": owner_job_id or (raw_job_id if isinstance(raw_job_id, str) else None),
             "owner_pid": os.getpid(),
         }
@@ -1489,9 +1564,48 @@ class ManualUpdateController:
         except OSError:
             pass
 
-    def _run(self, generation, base, target):
+    def _run(self, generation, base, requested_at):
         started_at = self.clock().isoformat(timespec="seconds")
+        try:
+            if self.calendar_loader is None:
+                target = requested_at.date()
+                calendar_dates = (target,)
+            else:
+                calendar_dates = self.calendar_loader()
+                target = resolve_latest_completed_trade_date(requested_at, calendar_dates)
+        except Exception:  # noqa: BLE001 - never expose calendar/provider details
+            with self._lock:
+                terminal = self._snapshot_for(
+                    state="failure",
+                    reason="calendar_unavailable",
+                    started_at=started_at,
+                    finished_at=self.clock().isoformat(timespec="seconds"),
+                )
+                if generation == self._generation:
+                    self._snapshot = terminal
+                    self._worker = None
+                if self._lease_generation == generation:
+                    self._release_lease_locked()
+                    self._lease_generation = None
+            return
         with self._lock:
+            previous = read_manual_update_status(self.status_file)
+            expected_success = "portal_success" if self.mode == "portal_only" else "success"
+            if (
+                previous.get("trade_date") == target.isoformat()
+                and previous.get("mode") == self.mode
+                and previous.get("state") == expected_success
+            ):
+                terminal = dict(previous)
+                terminal["reason"] = "already_success"
+                terminal["accepted"] = False
+                if generation == self._generation:
+                    self._snapshot = terminal
+                    self._worker = None
+                if self._lease_generation == generation:
+                    self._release_lease_locked()
+                    self._lease_generation = None
+                return
             if generation != self._generation:
                 if self._lease_generation == generation:
                     self._release_lease_locked()
@@ -1549,8 +1663,7 @@ class ManualUpdateController:
                     run_kwargs["plan_builder"] = self.plan_builder
                 if self.plan_inputs_builder is not None:
                     run_kwargs["plan_inputs_builder"] = self.plan_inputs_builder
-                if self.calendar_loader is not None:
-                    run_kwargs["calendar_loader"] = self.calendar_loader
+                run_kwargs["calendar_dates"] = tuple(calendar_dates)
             returncode = self.run_fn(
                 base,
                 target,
@@ -1652,8 +1765,6 @@ class ManualUpdateController:
         """Accept one full pipeline run, or return a safe stable outcome."""
 
         current = now or self.clock()
-        target = current.date()
-        cutoff = datetime.datetime.combine(target, DAILY_UPDATE_TIME)
         with self._lock:
             worker = self._worker
             if worker is not None and worker.is_alive():
@@ -1661,57 +1772,49 @@ class ManualUpdateController:
                 result["accepted"] = False
                 result["reason"] = "already_running"
                 return result
-            if current.weekday() >= 5:
-                self._snapshot = self._snapshot_for(
-                    state="skip",
-                    target=target,
-                    reason="weekend",
-                    finished_at=current.isoformat(timespec="seconds"),
-                )
-                return dict(self._snapshot)
-            if current < cutoff:
-                self._snapshot = self._snapshot_for(
-                    state="skip",
-                    target=target,
-                    reason="before_cutoff",
-                    finished_at=current.isoformat(timespec="seconds"),
-                )
-                return dict(self._snapshot)
-            previous = self._recover_stale_status_locked(current, target)
+            if self.calendar_loader is None:
+                target = current.date()
+                cutoff = datetime.datetime.combine(target, DAILY_UPDATE_TIME)
+                if current.weekday() >= 5:
+                    self._snapshot = self._snapshot_for(
+                        state="skip", target=target, reason="weekend",
+                        finished_at=current.isoformat(timespec="seconds"),
+                    )
+                    return dict(self._snapshot)
+                if current < cutoff:
+                    self._snapshot = self._snapshot_for(
+                        state="skip", target=target, reason="before_cutoff",
+                        finished_at=current.isoformat(timespec="seconds"),
+                    )
+                    return dict(self._snapshot)
+            previous = self._recover_stale_status_locked(current, current.date())
             if previous.get("state") == "running":
                 self._snapshot = dict(previous)
                 self._snapshot["accepted"] = False
                 self._snapshot["reason"] = "already_running"
                 return dict(self._snapshot)
-            previous_mode = previous.get("mode")
-            previous_success = (
-                previous.get("state") == "portal_success"
-                if self.mode == "portal_only"
-                else previous.get("state") == "success"
-            )
-            if (
-                previous.get("trade_date") == target.isoformat()
-                and previous_mode == self.mode
-                and previous_success
-            ):
-                self._snapshot = previous
-                self._snapshot["reason"] = "already_success"
-                return dict(self._snapshot)
-            if (
-                previous.get("trade_date") == target.isoformat()
-                and previous_mode == self.mode
-                and previous.get("reason") in _MANUAL_UPDATE_IDEMPOTENT_REASONS
-                and previous.get("state") in {"skip", "failure"}
-            ):
-                self._snapshot = previous
-                return dict(self._snapshot)
-
+            if self.calendar_loader is None:
+                previous_success = (
+                    previous.get("state") == ("portal_success" if self.mode == "portal_only" else "success")
+                )
+                if previous.get("trade_date") == target.isoformat() and previous.get("mode") == self.mode and previous_success:
+                    self._snapshot = dict(previous)
+                    self._snapshot["reason"] = "already_success"
+                    return dict(self._snapshot)
+                if (
+                    previous.get("trade_date") == target.isoformat()
+                    and previous.get("mode") == self.mode
+                    and previous.get("reason") in _MANUAL_UPDATE_IDEMPOTENT_REASONS
+                    and previous.get("state") in {"skip", "failure"}
+                ):
+                    self._snapshot = dict(previous)
+                    return dict(self._snapshot)
             try:
                 base = Path(self.base_dir_fn())
             except Exception:  # noqa: BLE001 - never expose resolver details to the UI
                 self._snapshot = self._snapshot_for(
                     state="failure",
-                    target=target,
+                    target=None,
                     reason="update_failed",
                     finished_at=current.isoformat(timespec="seconds"),
                 )
@@ -1722,7 +1825,7 @@ class ManualUpdateController:
             except OSError:  # noqa: BLE001 - no raw filesystem details leave the API
                 self._snapshot = self._snapshot_for(
                     state="failure",
-                    target=target,
+                    target=None,
                     reason="update_failed",
                     finished_at=current.isoformat(timespec="seconds"),
                 )
@@ -1730,7 +1833,7 @@ class ManualUpdateController:
             if not acquired:
                 self._snapshot = self._snapshot_for(
                     state="skip",
-                    target=target,
+                    target=None,
                     reason="lock_busy",
                     finished_at=current.isoformat(timespec="seconds"),
                 )
@@ -1755,22 +1858,15 @@ class ManualUpdateController:
                 self._terminal_generation = generation
             self._snapshot = self._snapshot_for(
                 state="accepted",
-                target=target,
+                target=target if self.calendar_loader is None else None,
                 reason="accepted",
                 started_at=current.isoformat(timespec="seconds"),
                 progress={"completed": 0, "total": 10, "current": None},
             )
             try:
-                self._write_running_status_locked(
-                    target=target,
-                    state="accepted",
-                    reason="accepted",
-                    started_at=current.isoformat(timespec="seconds"),
-                    progress=self._snapshot["progress"],
-                )
                 worker = self.thread_factory(
                     target=self._run,
-                    args=(generation, base, target),
+                    args=(generation, base, current),
                     name="qtrade-manual-update",
                     daemon=True,
                 )
@@ -1792,7 +1888,7 @@ class ManualUpdateController:
                 self._lease_generation = None
                 try:
                     self._write_terminal_status_locked(
-                        target=target,
+                        target=None,
                         state="failure",
                         reason="update_failed",
                         started_at=current.isoformat(timespec="seconds"),
@@ -1801,7 +1897,7 @@ class ManualUpdateController:
                     pass
                 self._snapshot = self._snapshot_for(
                     state="failure",
-                    target=target,
+                    target=None,
                     reason="update_failed",
                     finished_at=current.isoformat(timespec="seconds"),
                 )
@@ -1834,6 +1930,11 @@ class ManualUpdateController:
                             "heartbeat_at",
                             "elapsed_seconds",
                             "progress",
+                            "pipeline_progress",
+                            "stock_progress",
+                            "data_quality",
+                            "current_complete_date",
+                            "current_portal_date",
                         ):
                             snapshot[key] = disk[key]
             elif snapshot.get("state") == "idle":

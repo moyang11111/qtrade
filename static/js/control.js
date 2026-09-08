@@ -26,6 +26,7 @@
     'update_failed', 'status_unavailable', 'completed', 'aborted', 'application_shutdown',
     'manual_stop', 'stale_running', 'timeout', 'process_timeout',
     'freshness_capture_failed', 'portal_completed', 'portal_refresh_failed', 'calendar_closed',
+    'insufficient_history', 'target_date_missing', 'suspended',
     'universe_unavailable', 'provider_schema', 'provider_failed', 'provider_unreachable',
     'checkpoint_corrupt', 'checkpoint_io', 'lease_busy', 'stale_running', 'item_timeout',
     'batch_timeout', 'job_timeout', 'publish_timeout', 'publish_failed', 'reload_failed',
@@ -84,6 +85,7 @@
     manualUpdateHint: document.getElementById('manualUpdateHint'),
     manualUpdateStatus: document.getElementById('manualUpdateStatus'),
     manualUpdateProgress: document.getElementById('manualUpdateProgress'),
+    manualUpdateQuality: document.getElementById('manualUpdateQuality'),
     manualUpdateOutputs: document.getElementById('manualUpdateOutputs'),
     system: document.getElementById('systemBody'),
     pipeline: document.getElementById('pipelineBody'),
@@ -221,6 +223,9 @@
       pipeline_callback_failed: '研究发布回调失败，旧数据保持不变。',
       lease_path_invalid: '更新租约无效，旧数据保持不变。',
       portal_refresh_failed: '门户刷新失败，旧数据保持不变。',
+      insufficient_history: '部分股票历史不足，旧数据保持不变。',
+      target_date_missing: '部分股票缺少目标日数据，旧数据保持不变。',
+      suspended: '部分股票停牌，旧数据保持不变。',
       step_failed: '步骤失败', update_failed: '更新失败', status_unavailable: '状态文件不可用',
       aborted: '已中止', application_shutdown: '应用关闭，更新已中止',
       manual_stop: '已停止等待', stale_running: '发现过期任务，已安全中止',
@@ -265,6 +270,9 @@
       pipeline_schema_invalid: '研究数据格式校验失败，旧数据保持不变。',
       pipeline_publish_failed: '研究数据发布失败，旧数据保持不变。',
       portal_refresh_failed: '门户刷新失败，旧数据保持不变。',
+      insufficient_history: '部分股票历史不足，旧数据保持不变。',
+      target_date_missing: '部分股票缺少目标日数据，旧数据保持不变。',
+      suspended: '部分股票停牌，旧数据保持不变。',
       calendar_closed: '交易日历显示今日休市。',
       before_cutoff: '18:30 后可运行。',
       already_running: '已有更新正在运行，请稍候。',
@@ -353,13 +361,32 @@
         ? Math.min(Number(payload.elapsed_seconds), 86400) : 0,
       progress: {
         completed: Number.isInteger(payload.progress?.completed) && payload.progress.completed >= 0
-          ? Math.min(payload.progress.completed, 100) : 0,
+          ? payload.progress.completed : 0,
         total: Number.isInteger(payload.progress?.total) && payload.progress.total >= 0
-          ? Math.min(payload.progress.total, 100) : 0,
+          ? payload.progress.total : 0,
         current: typeof payload.progress?.current === 'string'
           && /^[a-z][a-z0-9_]{0,47}$/.test(payload.progress.current)
           ? payload.progress.current : null,
       },
+      pipeline_progress: {
+        completed: Number.isInteger(payload.pipeline_progress?.completed) && payload.pipeline_progress.completed >= 0
+          ? payload.pipeline_progress.completed : 0,
+        total: Number.isInteger(payload.pipeline_progress?.total) && payload.pipeline_progress.total >= 0
+          ? payload.pipeline_progress.total : 4,
+        current: typeof payload.pipeline_progress?.current === 'string'
+          && /^[a-z][a-z0-9_]{0,47}$/.test(payload.pipeline_progress.current)
+          ? payload.pipeline_progress.current : null,
+      },
+      stock_progress: Object.fromEntries(['completed', 'total', 'failed', 'pending'].map((key) => [
+        key, Number.isInteger(payload.stock_progress?.[key]) && payload.stock_progress[key] >= 0
+          ? payload.stock_progress[key] : 0,
+      ])),
+      data_quality: Object.fromEntries(['history_sufficient', 'insufficient_history', 'suspended', 'fetch_failed', 'unknown'].map((key) => [
+        key, Number.isInteger(payload.data_quality?.[key]) && payload.data_quality[key] >= 0
+          ? payload.data_quality[key] : null,
+      ])),
+      current_complete_date: safeDate(payload.current_complete_date) === '未确认' ? null : safeDate(payload.current_complete_date),
+      current_portal_date: safeDate(payload.current_portal_date) === '未确认' ? null : safeDate(payload.current_portal_date),
     };
     return clean;
   }
@@ -852,6 +879,7 @@
       els.manualUpdateStatus.textContent = '手动更新暂不可用，请稍后刷新。';
       els.manualUpdateStatus.dataset.state = 'error';
       if (els.manualUpdateProgress) els.manualUpdateProgress.textContent = '进度：未确认';
+      if (els.manualUpdateQuality) els.manualUpdateQuality.textContent = '数据质量：未确认';
       if (els.manualUpdateOutputs) {
         const labels = { portal: '门户', factors: '因子', decision: '决策', sync: '同步' };
         document.querySelectorAll('[data-update-output]').forEach((node) => {
@@ -866,16 +894,22 @@
     const stateValue = payload.state;
     const active = stateValue === 'accepted' || stateValue === 'running';
     els.manualUpdate.disabled = active;
-    els.manualUpdateStatus.textContent = `状态：${manualStateLabel(stateValue)} · 目标日期：${payload.trade_date || '未确认'} · ${manualReasonLabel(payload.reason)}`;
+    els.manualUpdateStatus.textContent = `状态：${manualStateLabel(stateValue)} · 当前完整数据：${payload.current_complete_date || '未确认'} · 门户快照：${payload.current_portal_date || '未确认'} · 本次目标：${payload.trade_date || '解析中'} · ${manualReasonLabel(payload.reason)}`;
     els.manualUpdateStatus.dataset.state = ['success', 'portal_success'].includes(stateValue) ? 'good'
       : ['failure', 'aborted', 'timed_out'].includes(stateValue) ? 'error' : '';
     if (els.manualUpdateProgress) {
-      const progress = payload.progress || {};
+      const progress = payload.pipeline_progress || {};
+      const stocks = payload.stock_progress || {};
       const current = progress.current ? ` · 当前步骤：${progress.current}` : '';
       const elapsed = Number.isFinite(payload.elapsed_seconds)
         ? ` · 已用 ${Math.floor(payload.elapsed_seconds)} 秒` : '';
       els.manualUpdateProgress.textContent =
-        `进度：${progress.completed || 0}/${progress.total || 0}${current}${elapsed}`;
+        `流水线：${progress.completed || 0}/${progress.total || 4}${current} · 股票：${stocks.completed || 0}/${stocks.total || 0}，失败 ${stocks.failed || 0}，待处理 ${stocks.pending || 0}${elapsed}`;
+    }
+    if (els.manualUpdateQuality) {
+      const quality = payload.data_quality || {};
+      const shown = (value) => Number.isInteger(value) ? String(value) : '未确认';
+      els.manualUpdateQuality.textContent = `数据质量：历史满足 ${shown(quality.history_sufficient)} · 历史不足 ${shown(quality.insufficient_history)} · 停牌 ${shown(quality.suspended)} · 抓取失败 ${shown(quality.fetch_failed)} · 未知 ${shown(quality.unknown)}`;
     }
     const outputs = asObject(payload.outputs) || {};
     const labels = { portal: '门户', factors: '因子', decision: '决策', sync: '同步' };
