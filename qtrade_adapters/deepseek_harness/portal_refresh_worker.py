@@ -88,6 +88,9 @@ _REASONS = frozenset({
     "provider_unreachable",
     "provider_schema",
     "provider_failed",
+    "insufficient_history",
+    "target_date_missing",
+    "suspended",
     "publishing",
     "publish_timeout",
     "item_timeout",
@@ -853,8 +856,13 @@ def _child_fetch(provider, symbol: str, target: str, connection, history_window:
         payload = {"ok": True, "item": item}
     except PortalWorkerError as error:
         payload = {"ok": False, "reason": error.reason, "transient": error.transient}
-    except Exception:
-        payload = {"ok": False, "reason": "provider_failed", "transient": False}
+    except Exception as exc:
+        reason = getattr(exc, "reason", None)
+        payload = {
+            "ok": False,
+            "reason": reason if reason in _REASONS else "provider_failed",
+            "transient": False,
+        }
     try:
         _send_json(
             connection,
@@ -1063,6 +1071,7 @@ class PortalRefreshWorker:
         publish_current: bool = True,
         staged_publish_process_factory=None,
         history_window: int = 0,
+        status_callback=None,
     ):
         if not MIN_BATCH_SIZE <= int(batch_size) <= MAX_BATCH_SIZE:
             raise ValueError("invalid batch size")
@@ -1086,6 +1095,7 @@ class PortalRefreshWorker:
         self.max_attempts = int(max_attempts)
         self.retry_delay = float(retry_delay_seconds)
         self.history_window = int(history_window)
+        self.status_callback = status_callback
         self.process_factory = process_factory or _default_process_factory
         self.publish_current = bool(publish_current)
         self.publish_process_factory = publish_process_factory or (
@@ -1231,6 +1241,11 @@ class PortalRefreshWorker:
         safe = self._safe_status(checkpoint, state=state, reason=reason)
         with self._lock:
             self._memory_status = dict(safe)
+        if self.status_callback is not None:
+            try:
+                self.status_callback(dict(safe))
+            except Exception:
+                pass
         return safe
 
     def _persist_terminal(

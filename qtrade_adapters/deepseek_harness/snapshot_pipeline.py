@@ -1014,7 +1014,8 @@ def build_decision_records(factors: Mapping[str, object], *, target_date: str) -
     return {"candidate": sum(item["action"] == "buy" for item in records), "records": records}
 
 
-def _status_payload(state: str, reason: str, target: str, started_at: str, *, step: str | None = None, outputs=None, freshness=None, output_meta=None, finished_at=None, progress=None, job_id=None) -> dict[str, object]:
+def _status_payload(state: str, reason: str, target: str, started_at: str, *, step: str | None = None, outputs=None, freshness=None, output_meta=None, finished_at=None, progress=None, stock_progress=None, data_quality=None, current_complete_date=None, current_portal_date=None, job_id=None) -> dict[str, object]:
+    pipeline_progress = progress or {"completed": 0, "total": 4, "current": step}
     return {
         "schema_version": 1, "mode": "full_pipeline", "accepted": state == "accepted", "state": state,
         "trade_date": target, "started_at": started_at, "finished_at": finished_at, "reason": reason,
@@ -1022,7 +1023,12 @@ def _status_payload(state: str, reason: str, target: str, started_at: str, *, st
         "freshness": freshness or {}, "output_meta": output_meta or {},
         "retry": {"attempt": 0, "max_attempts": 0, "next_attempt_at": None},
         "job_id": job_id, "heartbeat_at": finished_at or datetime.now().isoformat(timespec="seconds"),
-        "elapsed_seconds": 0.0, "progress": progress or {"completed": 0, "total": 4, "current": step},
+        "elapsed_seconds": 0.0, "progress": pipeline_progress,
+        "pipeline_progress": pipeline_progress,
+        "stock_progress": stock_progress or {"completed": 0, "total": 0, "failed": 0, "pending": 0},
+        "data_quality": data_quality or {},
+        "current_complete_date": current_complete_date,
+        "current_portal_date": current_portal_date,
     }
 
 
@@ -1098,6 +1104,8 @@ def run_snapshot_pipeline(
     previous_pointer = None
     previous_pipeline = None
     pipeline_lease = None
+    current_complete_date = None
+    current_portal_date = None
 
     def check_deadline() -> None:
         if stop_event.is_set():
@@ -1128,6 +1136,12 @@ def run_snapshot_pipeline(
     try:
         paths = _paths(state_dir, user_data_dir)
         _validate_layout(paths, create=True)
+        existing_pipeline = read_current_pipeline(state_dir, user_data_dir=user_data_dir)
+        if existing_pipeline is not None:
+            current_complete_date = _date(existing_pipeline.manifest.get("target_date"))
+        existing_portal = portal_refresh.read_current_snapshot(state_dir, user_data_dir=user_data_dir)
+        if existing_portal is not None:
+            current_portal_date = _date(existing_portal.manifest.get("target_date"))
         status_path = portal_refresh._contained(paths.state, Path(status_file) if status_file else paths.state / "daily_update_1830.status.json")
         if status_path.name != "daily_update_1830.status.json":
             raise SnapshotPipelineError("status_path_invalid")
@@ -1212,15 +1226,58 @@ def run_snapshot_pipeline(
             _write_status(status_path, _status_payload("skip" if reason in {"weekend", "calendar_closed"} else "failure", reason, target, started_at, finished_at=datetime.now().isoformat(timespec="seconds"), job_id=identifier))
             return 0 if reason in {"weekend", "calendar_closed"} else 1
         worker_type = worker_factory or PortalRefreshWorker
+        worker_kwargs = {
+            "user_data_dir": user_data_dir,
+            "state_dir": state_dir,
+            "provider": provider,
+            "publish_current": False,
+            "history_window": portal_refresh.HISTORY_WINDOW,
+        }
+        if worker_type is PortalRefreshWorker:
+            def publish_worker_progress(worker_status):
+                total = worker_status.get("total", len(plan.symbols))
+                completed = worker_status.get("completed", 0)
+                failed = worker_status.get("failed", 0)
+                progress = {
+                    "completed": completed,
+                    "total": total,
+                    "failed": failed,
+                    "pending": max(0, total - completed - failed),
+                }
+                _write_status(status_path, _status_payload(
+                    "running", "pipeline_running", target, started_at,
+                    step="portal", progress={"completed": 0, "total": 4, "current": "portal"},
+                    stock_progress=progress,
+                    current_complete_date=current_complete_date,
+                    current_portal_date=current_portal_date,
+                    job_id=identifier,
+                ))
+            worker_kwargs["status_callback"] = publish_worker_progress
         worker = worker_type(
-            user_data_dir=user_data_dir,
-            state_dir=state_dir,
-            provider=provider,
-            publish_current=False,
-            history_window=portal_refresh.HISTORY_WINDOW,
+            **worker_kwargs,
         )
         result = worker.run(plan, provider=provider, stop_event=stop_event)
         check_deadline()
+        stock_total = result.get("total") if isinstance(result.get("total"), int) else len(plan.symbols)
+        stock_completed = result.get("completed") if isinstance(result.get("completed"), int) else 0
+        stock_failed = result.get("failed") if isinstance(result.get("failed"), int) else 0
+        stock_progress = {
+            "completed": max(0, stock_completed),
+            "total": max(0, stock_total),
+            "failed": max(0, stock_failed),
+            "pending": max(0, stock_total - stock_completed - stock_failed),
+        }
+        worker_reason = result.get("reason")
+        classified_fetch_failure = stock_failed if worker_reason in {"provider_failed", "provider_unreachable", "item_timeout"} else 0
+        classified_history_failure = stock_failed if worker_reason == "insufficient_history" else 0
+        classified_suspended = stock_failed if worker_reason == "suspended" else 0
+        data_quality = {
+            "history_sufficient": max(0, stock_completed),
+            "insufficient_history": classified_history_failure if worker_reason == "insufficient_history" else None,
+            "fetch_failed": classified_fetch_failure if worker_reason in {"provider_failed", "provider_unreachable", "item_timeout"} else None,
+            "suspended": classified_suspended if worker_reason == "suspended" else None,
+            "unknown": max(0, stock_total - stock_completed - classified_fetch_failure - classified_history_failure - classified_suspended),
+        }
         if result.get("state") != "success":
             worker_state = result.get("state")
             worker_reason = result.get("reason")
@@ -1230,14 +1287,14 @@ def run_snapshot_pipeline(
                 state, reason = "timed_out", worker_reason if worker_reason in {"item_timeout", "batch_timeout", "job_timeout", "publish_timeout"} else "job_timeout"
             else:
                 state, reason = "failure", worker_reason if isinstance(worker_reason, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,47}", worker_reason) else "portal_refresh_failed"
-            _write_status(status_path, _status_payload(state, reason, target, started_at, step="portal", finished_at=datetime.now().isoformat(timespec="seconds"), job_id=identifier))
+            _write_status(status_path, _status_payload(state, reason, target, started_at, step="portal", finished_at=datetime.now().isoformat(timespec="seconds"), stock_progress=stock_progress, data_quality=data_quality, current_complete_date=current_complete_date, current_portal_date=current_portal_date, job_id=identifier))
             return 1
         portal_generation = result.get("published_generation")
         portal = portal_refresh.read_generation_snapshot(state_dir, user_data_dir=user_data_dir, generation=portal_generation)
         if portal is None or portal.manifest.get("target_date") != target or portal.manifest.get("universe_token") != plan.universe_token:
             raise SnapshotPipelineError("portal_binding_invalid")
         freshness = {"portal": {"verified": True, "as_of": target, "source": "qtrade_mirror", "reason": "verified", "total": len(plan.symbols), "coverage": len(plan.symbols)}}
-        _write_status(status_path, _status_payload("running", "pipeline_running", target, started_at, step="factors", outputs={"portal": True, "factors": False, "decision": False, "sync": False}, freshness=freshness, progress={"completed": 1, "total": 4, "current": "factors"}, job_id=identifier))
+        _write_status(status_path, _status_payload("running", "pipeline_running", target, started_at, step="factors", outputs={"portal": True, "factors": False, "decision": False, "sync": False}, freshness=freshness, progress={"completed": 1, "total": 4, "current": "factors"}, stock_progress=stock_progress, data_quality=data_quality, current_complete_date=current_complete_date, current_portal_date=target, job_id=identifier))
         factors = _run_owned_call(
             factor_builder, (portal,), {}, deadline=started_clock + deadline_seconds,
             stop_event=stop_event, token=identifier,
@@ -1245,13 +1302,14 @@ def run_snapshot_pipeline(
         check_deadline()
         factor_count = len(factors.get("records", []))
         freshness["factors"] = {"verified": True, "as_of": target, "source": "qtrade_mirror", "reason": "verified", "factor_count": factor_count, "valid_count": factor_count}
-        _write_status(status_path, _status_payload("running", "pipeline_running", target, started_at, step="decision", outputs={"portal": True, "factors": True, "decision": False, "sync": False}, freshness=freshness, progress={"completed": 2, "total": 4, "current": "decision"}, job_id=identifier))
+        _write_status(status_path, _status_payload("running", "pipeline_running", target, started_at, step="decision", outputs={"portal": True, "factors": True, "decision": False, "sync": False}, freshness=freshness, progress={"completed": 2, "total": 4, "current": "decision"}, stock_progress=stock_progress, data_quality=data_quality, current_complete_date=current_complete_date, current_portal_date=target, job_id=identifier))
         decisions = _run_owned_call(
             decision_builder, (factors,), {"target_date": target},
             deadline=started_clock + deadline_seconds, stop_event=stop_event, token=identifier,
         )
         check_deadline()
         freshness["decision"] = {"verified": True, "as_of": target, "source": "qtrade_mirror", "reason": "verified", "pool_count": len(decisions.get("records", []))}
+        _write_status(status_path, _status_payload("running", "pipeline_running", target, started_at, step="sync", outputs={"portal": True, "factors": True, "decision": True, "sync": False}, freshness=freshness, progress={"completed": 3, "total": 4, "current": "sync"}, stock_progress=stock_progress, data_quality=data_quality, current_complete_date=current_complete_date, current_portal_date=target, job_id=identifier))
         pipeline_root = _paths(state_dir, user_data_dir)
         try:
             previous_pointer = pipeline_root.current.read_bytes()
@@ -1275,7 +1333,7 @@ def run_snapshot_pipeline(
         check_deadline()
         freshness["sync"] = {"verified": True, "as_of": target, "source": "qtrade_mirror", "reason": "verified"}
         output_meta = {"pipeline": {"generation": pipeline.manifest["generation"], "portal_generation": pipeline.manifest["portal_generation"], "content_sha256": pipeline.manifest["portal_content_sha256"], "universe_token": pipeline.manifest["universe_token"], "target_date": target, "total": pipeline.manifest["total"]}}
-        final_status = _status_payload("success", "completed", target, started_at, step="sync", outputs={"portal": True, "factors": True, "decision": True, "sync": True}, freshness=freshness, output_meta=output_meta, progress={"completed": 4, "total": 4, "current": None}, finished_at=datetime.now().isoformat(timespec="seconds"), job_id=identifier)
+        final_status = _status_payload("success", "completed", target, started_at, step="sync", outputs={"portal": True, "factors": True, "decision": True, "sync": True}, freshness=freshness, output_meta=output_meta, progress={"completed": 4, "total": 4, "current": None}, stock_progress=stock_progress, data_quality=data_quality, current_complete_date=target, current_portal_date=target, finished_at=datetime.now().isoformat(timespec="seconds"), job_id=identifier)
         if activate_fn is not None and owned_hook(activate_fn, pipeline) is not True:
             activation_attempted = True
             _restore_pointer(pipeline_root, previous_pointer)
@@ -1310,7 +1368,23 @@ def run_snapshot_pipeline(
             if isinstance(status_path, Path):
                 error_reason = exc.reason if isinstance(exc, SnapshotPipelineError) else "pipeline_failed"
                 terminal_state = "aborted" if error_reason == "aborted" else "timed_out" if error_reason in {"job_timeout", "item_timeout", "batch_timeout", "publish_timeout"} else "failure"
-                _write_status(status_path, _status_payload(terminal_state, error_reason, target, started_at, finished_at=datetime.now().isoformat(timespec="seconds"), job_id=identifier))
+                try:
+                    previous_status = json.loads(status_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError, TypeError):
+                    previous_status = {}
+                _write_status(status_path, _status_payload(
+                    terminal_state, error_reason, target, started_at,
+                    step=previous_status.get("step"),
+                    outputs=previous_status.get("outputs"),
+                    freshness=locals().get("freshness"),
+                    progress=previous_status.get("pipeline_progress"),
+                    stock_progress=locals().get("stock_progress"),
+                    data_quality=locals().get("data_quality"),
+                    current_complete_date=current_complete_date,
+                    current_portal_date=(target if locals().get("portal") is not None else current_portal_date),
+                    finished_at=datetime.now().isoformat(timespec="seconds"),
+                    job_id=identifier,
+                ))
         except (OSError, ValueError, TypeError):
             pass
         return 1

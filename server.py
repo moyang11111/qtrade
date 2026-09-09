@@ -3012,6 +3012,9 @@ _UPDATE_STATUS_REASONS = frozenset({
     "universe_unavailable",
     "provider_schema",
     "provider_failed",
+    "insufficient_history",
+    "target_date_missing",
+    "suspended",
     "provider_unreachable",
     "checkpoint_corrupt",
     "checkpoint_io",
@@ -3440,6 +3443,11 @@ def _safe_manual_update_payload(payload) -> dict:
         "heartbeat_at": None,
         "elapsed_seconds": 0.0,
         "progress": {"completed": 0, "total": 0, "current": None},
+        "pipeline_progress": {"completed": 0, "total": 4, "current": None},
+        "stock_progress": {"completed": 0, "total": 0, "failed": 0, "pending": 0},
+        "data_quality": {},
+        "current_complete_date": None,
+        "current_portal_date": None,
     }
     if not isinstance(payload, dict):
         return fallback
@@ -3472,11 +3480,22 @@ def _safe_manual_update_payload(payload) -> dict:
         total = progress.get("total")
         current = progress.get("current")
         if isinstance(completed, int) and not isinstance(completed, bool) and completed >= 0:
-            result["progress"]["completed"] = min(completed, 100)
+            result["progress"]["completed"] = completed
         if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
-            result["progress"]["total"] = min(total, 100)
+            result["progress"]["total"] = total
         if isinstance(current, str) and current in _MANUAL_UPDATE_STEPS:
             result["progress"]["current"] = current
+    result["pipeline_progress"] = update_runtime._safe_manual_progress(
+        payload.get("pipeline_progress", payload.get("progress"))
+    )
+    result["stock_progress"] = update_runtime._safe_stock_progress(payload.get("stock_progress"))
+    result["data_quality"] = update_runtime._safe_data_quality(payload.get("data_quality"))
+    for key in ("current_complete_date", "current_portal_date"):
+        value = payload.get(key)
+        if isinstance(value, str) and _UPDATE_STATUS_DATE.fullmatch(value[:10]):
+            result[key] = value[:10]
+    if result["state"] == "success" and result["current_complete_date"] is None:
+        result["current_complete_date"] = result["trade_date"]
     reason = payload.get("reason")
     if isinstance(reason, str) and reason.startswith("calendar_unavailable:"):
         result["reason"] = "calendar_unavailable"

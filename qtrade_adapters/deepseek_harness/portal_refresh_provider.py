@@ -52,6 +52,14 @@ class PortalPlanError(RuntimeError):
         super().__init__(reason)
 
 
+class PortalHistoryError(RuntimeError):
+    """A stable, non-sensitive history validation classification."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
 def _bounded_response(response):
     """Consume a provider response through a small, fail-closed byte budget."""
 
@@ -293,7 +301,8 @@ class AksharePortalProvider:
         except Exception as exc:
             raise RuntimeError("provider request failed") from exc
         if frame is None or frame.empty:
-            raise RuntimeError("provider returned insufficient history")
+            reason = "suspended" if self.metadata[code].get("suspended") is True else "insufficient_history"
+            raise PortalHistoryError(reason)
         by_date: dict[str, dict[str, object]] = {}
         try:
             candidates = frame.to_dict(orient="records")
@@ -322,8 +331,11 @@ class AksharePortalProvider:
                 raise RuntimeError("provider schema invalid") from exc
             by_date[date] = values
         rows = [by_date[key] for key in sorted(by_date)]
-        if len(rows) < HISTORY_WINDOW or not rows or rows[-1]["date"] != target_date:
-            raise RuntimeError("provider returned insufficient history")
+        if not rows or rows[-1]["date"] != target_date:
+            reason = "suspended" if self.metadata[code].get("suspended") is True else "target_date_missing"
+            raise PortalHistoryError(reason)
+        if len(rows) < HISTORY_WINDOW:
+            raise PortalHistoryError("insufficient_history")
         rows = rows[-HISTORY_WINDOW:]
         if len(rows) != HISTORY_WINDOW or rows[-1]["date"] != target_date:
             raise RuntimeError("provider returned stale history")
@@ -431,6 +443,7 @@ def build_bound_plan(
 __all__ = [
     "AksharePortalProvider",
     "PortalPlanError",
+    "PortalHistoryError",
     "PROVIDER_VERSION",
     "build_bound_plan",
     "build_trusted_plan",
