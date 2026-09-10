@@ -1,63 +1,47 @@
-/* QTrade design tokens: the single source for shared interface semantics. */
+/* QTrade hybrid workbench tokens: dark trading surfaces + light research surfaces. */
 :root {
-  /* Surfaces and lines */
-  --qt-bg-primary: #0a0a0b;
-  --qt-bg-secondary: #0f0f13;
-  --qt-bg-card: #131316;
-  --qt-bg-input: #1c1c22;
-  --qt-bg-elev: #16161a;
-  --qt-border: #2a2a30;
-  --qt-line: rgba(255, 255, 255, .08);
+  color-scheme: dark;
+  --qt-dark-page: #0c1523; --qt-dark-panel: #111e30; --qt-dark-panel-raised: #16243a;
+  --qt-dark-input: #19283d; --qt-dark-line: #28384d; --qt-dark-text: #e6edf7;
+  --qt-dark-muted: #9eafc5; --qt-dark-dim: #71839a;
+  --qt-light-page: #edf1f5; --qt-light-panel: #ffffff; --qt-light-panel-muted: #f5f7fa;
+  --qt-light-input: #f8fafc; --qt-light-line: #d6dfe9; --qt-light-text: #1c2d43;
+  --qt-light-muted: #586b81; --qt-light-dim: #7b8ca0;
 
-  /* QTrade brand and A-share semantics: red up, green down. */
-  --qt-color-up: #eb5757;
-  --qt-color-up-glow: rgba(235, 87, 87, .18);
-  --qt-color-down: #27ae60;
-  --qt-color-down-glow: rgba(39, 174, 96, .18);
-  --qt-color-brand: #5e6ad2;
-  --qt-color-brand-strong: #8b5cf6;
-  --qt-color-signal: #f2c94c;
+  --qt-bg-primary: var(--qt-dark-page); --qt-bg-secondary: #0f1a2a;
+  --qt-bg-card: var(--qt-dark-panel); --qt-bg-input: var(--qt-dark-input);
+  --qt-bg-elev: var(--qt-dark-panel-raised); --qt-border: var(--qt-dark-line);
+  --qt-line: rgba(158, 175, 197, .16);
+  /* A-share convention: red rises, green falls. */
+  --qt-color-up: #ff777d; --qt-color-up-glow: rgba(255, 119, 125, .14);
+  --qt-color-down: #59c7a0; --qt-color-down-glow: rgba(89, 199, 160, .14);
+  --qt-color-brand: #55ced1; --qt-color-brand-strong: #2ca8ad; --qt-color-signal: #efc477;
+  --qt-text: var(--qt-dark-text); --qt-text-secondary: var(--qt-dark-muted); --qt-text-dim: var(--qt-dark-dim);
 
-  /* Text */
-  --qt-text: #f4f4f5;
-  --qt-text-secondary: #a1a1aa;
-  --qt-text-dim: #71717a;
-
-  /* Typography */
   --qt-font-sans: 'Inter', 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', -apple-system, sans-serif;
-  --qt-font-mono: 'Inter', 'SF Pro Display', 'Segoe UI', 'PingFang SC', sans-serif;
+  --qt-font-mono: 'SFMono-Regular', 'Cascadia Code', 'Roboto Mono', Consolas, monospace;
+  --qt-space-1: 4px; --qt-space-2: 8px; --qt-space-3: 12px; --qt-space-4: 16px;
+  --qt-space-5: 20px; --qt-space-6: 24px;
+  --qt-radius-sm: 4px; --qt-radius-md: 6px; --qt-radius-lg: 8px; --qt-radius-pill: 999px;
+  --qt-shadow-card: 0 1px 2px rgba(13, 31, 50, .08);
+  --qt-shadow-hover: 0 8px 20px rgba(13, 31, 50, .12);
+  --qt-z-rail: 300; --qt-z-overlay: 210; --qt-z-modal: 400;
+  --qt-ease-out: cubic-bezier(.16, 1, .3, 1); --qt-ease-hover: cubic-bezier(.33, 1, .68, 1);
+  --qt-motion-fast: 120ms; --qt-motion-normal: 180ms; --qt-motion-slow: 320ms;
+}
 
-  /* Spacing */
-  --qt-space-1: 4px;
-  --qt-space-2: 8px;
-  --qt-space-3: 12px;
-  --qt-space-4: 16px;
-  --qt-space-5: 20px;
-  --qt-space-6: 24px;
-
-  /* Shape, elevation and layering */
-  --qt-radius-sm: 6px;
-  --qt-radius-md: 8px;
-  --qt-radius-lg: 12px;
-  --qt-radius-pill: 999px;
-  --qt-shadow-card: 0 1px 2px rgba(0, 0, 0, .04), 0 1px 3px rgba(0, 0, 0, .06);
-  --qt-shadow-hover: 0 12px 24px -8px rgba(0, 0, 0, .16), 0 4px 8px -4px rgba(0, 0, 0, .10);
-  --qt-z-rail: 300;
-  --qt-z-overlay: 210;
-  --qt-z-modal: 400;
-
-  /* Motion */
-  --qt-ease-out: cubic-bezier(.16, 1, .3, 1);
-  --qt-ease-hover: cubic-bezier(.33, 1, .68, 1);
-  --qt-motion-fast: 150ms;
-  --qt-motion-normal: 200ms;
-  --qt-motion-slow: 500ms;
+body[data-workspace-tone="light"], html.qtrade-adapted {
+  color-scheme: light;
+  --qt-bg-primary: var(--qt-light-page); --qt-bg-secondary: #e7ecf2;
+  --qt-bg-card: var(--qt-light-panel); --qt-bg-input: var(--qt-light-input);
+  --qt-bg-elev: var(--qt-light-panel-muted); --qt-border: var(--qt-light-line);
+  --qt-line: rgba(28, 45, 67, .12);
+  --qt-color-up: #c73949; --qt-color-up-glow: rgba(199, 57, 73, .09);
+  --qt-color-down: #187d60; --qt-color-down-glow: rgba(24, 125, 96, .09);
+  --qt-color-brand: #087e8b; --qt-color-brand-strong: #056a75; --qt-color-signal: #986012;
+  --qt-text: var(--qt-light-text); --qt-text-secondary: var(--qt-light-muted); --qt-text-dim: var(--qt-light-dim);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  :root {
-    --qt-motion-fast: 0ms;
-    --qt-motion-normal: 0ms;
-    --qt-motion-slow: 0ms;
-  }
+  :root { --qt-motion-fast: 0ms; --qt-motion-normal: 0ms; --qt-motion-slow: 0ms; }
 }

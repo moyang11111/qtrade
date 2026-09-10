@@ -15,25 +15,30 @@
 <body>
 
   <!-- ====== 决策台侧边导航 ====== -->
-  <nav class="deck-rail" id="deckRail">
+  <nav class="deck-rail" id="deckRail" aria-label="工作区导航">
+    <div class="deck-brand" aria-label="QTrade"><span class="deck-brand-mark">Q</span><span>QTrade</span></div>
+    <div class="deck-group-label">市场</div>
     <button class="deck-item" data-page="market" title="行情"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><span>行情</span></button>
     <button class="deck-item" data-page="portal" title="门户"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg><span>门户</span></button>
     <button class="deck-item" data-page="pitch" title="决策"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg><span>决策</span></button>
-    <button class="deck-item" data-page="control" title="控制台"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg><span>控制台</span></button>
+    <div class="deck-group-label">研究</div>
     <button class="deck-item" data-page="factors" title="因子库"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v6L4.5 18a2 2 0 0 0 1.8 3h11.4a2 2 0 0 0 1.8-3L14 8V2"/><path d="M8 2h8"/><path d="M7 14h10"/></svg><span>因子库</span></button>
     <button class="deck-item" data-page="factorboard" title="因子仪表盘"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg><span>因子仪表</span></button>
-    <button class="deck-item" data-page="risk" title="风控/复盘"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z"/></svg><span>风控</span></button>
     <button class="deck-item" data-page="backtest" title="回测"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg><span>回测</span></button>
+    <div class="deck-group-label">演练</div>
     <button class="deck-item" data-page="training" title="训练营"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10L12 5 2 10l10 5 10-5z"/><path d="M6 12v5c0 1.7 2.7 3 6 3s6-1.3 6-3v-5"/></svg><span>训练</span></button>
     <button class="deck-item" data-page="autopaper" title="自动模拟盘"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>模拟盘</span></button>
+    <button class="deck-item" data-page="risk" title="风控/复盘"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z"/></svg><span>风控</span></button>
+    <div class="deck-group-label">系统</div>
+    <button class="deck-item" data-page="control" title="数据与运行"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg><span>数据与运行</span></button>
   </nav>
 
   <!-- ====== 工具栏 ====== -->
   <header class="toolbar">
     <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Q<span>Trade</span></div>
-    <input type="text" id="searchInput" placeholder="搜索股票代码...">
-    <button class="btn" id="btnRefresh">🔄 刷新</button>
-    <span class="live-badge" id="liveBadge" hidden>● 实时</span>
+    <input type="text" id="searchInput" aria-label="搜索股票" placeholder="搜索代码或名称">
+    <button class="btn" id="btnRefresh">刷新</button>
+    <span class="live-badge" id="liveBadge" hidden>实时</span>
     <span class="update-status" id="updateStatus" role="status" aria-live="polite" hidden></span>
     <div class="spacer"></div>
     <div class="clock" id="clock">--</div>
@@ -44,9 +49,9 @@
 
     <!-- 左栏：股票列表 -->
     <aside class="sidebar-left">
-      <div class="section-title">⭐ 自选股 <span id="watchlistCount">(0)</span></div>
+      <div class="section-title">自选股 <span id="watchlistCount">(0)</span></div>
       <div id="watchlistStocks"></div>
-      <div class="section-title">🕐 最近浏览</div>
+      <div class="section-title">最近浏览</div>
       <div id="recentStocks"></div>
       <div class="section-title">全部 A 股 <span id="stockCount">(--)</span></div>
       <div class="stock-list" id="stockList">
@@ -352,9 +357,9 @@
   <!-- ====== QTrade 门户（可选本地底座）===== -->
   <div class="auto-overlay embedded-page" id="pagePortal" hidden>
     <div class="auto-header">
-      <div class="auto-title">🏠 QTrade 门户</div>
+      <div class="auto-title">QTrade 门户</div>
       <div class="auto-status" id="portalHint">本地适配页面（同端口）</div>
-      <div class="auto-controls"><button class="btn" id="btnPortalClose">✕ 返回行情</button></div>
+      <div class="auto-controls"><button class="btn" id="btnPortalClose">返回行情</button></div>
     </div>
     <iframe id="iframePortal" class="embedded-deck-frame" src="/portal" title="QTrade 门户"></iframe>
   </div>
@@ -362,9 +367,9 @@
   <!-- ====== QTrade 决策台（可选本地底座）===== -->
   <div class="auto-overlay embedded-page" id="pagePitch" hidden>
     <div class="auto-header">
-      <div class="auto-title">🎛 QTrade 决策</div>
+      <div class="auto-title">QTrade 决策</div>
       <div class="auto-status">本地决策审批页面（同端口）</div>
-      <div class="auto-controls"><button class="btn" id="btnPitchClose">✕ 返回行情</button></div>
+      <div class="auto-controls"><button class="btn" id="btnPitchClose">返回行情</button></div>
     </div>
     <iframe id="iframePitch" class="embedded-deck-frame" src="/pitch" title="QTrade 决策台"></iframe>
   </div>
@@ -372,9 +377,9 @@
   <!-- ====== QTrade 因子仪表盘（可选本地底座）===== -->
   <div class="auto-overlay embedded-page" id="pageFactorBoard" hidden>
     <div class="auto-header">
-      <div class="auto-title">📊 QTrade 因子仪表盘</div>
+      <div class="auto-title">QTrade 因子仪表盘</div>
       <div class="auto-status">本地因子页面（同端口）</div>
-      <div class="auto-controls"><button class="btn" id="btnFactorBoardClose">✕ 返回行情</button></div>
+      <div class="auto-controls"><button class="btn" id="btnFactorBoardClose">返回行情</button></div>
     </div>
     <section class="factor-filter-panel" id="factorFilterPanel">
       <button class="factor-filter-toggle" id="factorFilterToggle" type="button" aria-expanded="true" aria-controls="factorFilterBody">筛选并保存方案</button>
@@ -410,11 +415,11 @@
   <!-- ====== QTrade 控制台（可选本地底座）===== -->
   <div class="auto-overlay embedded-page" id="pageControl" hidden>
     <div class="auto-header">
-      <div class="auto-title">🤖 QTrade 控制台</div>
-      <div class="auto-status">本地量化对话控制台</div>
+      <div class="auto-title">数据与运行</div>
+      <div class="auto-status">本地只读控制台</div>
       <div class="auto-controls">
         <a class="btn external-link" href="http://127.0.0.1:3080" target="_blank" rel="noopener">GUI ↗</a>
-        <button class="btn" id="btnControlClose">✕ 返回行情</button>
+        <button class="btn" id="btnControlClose">返回行情</button>
       </div>
     </div>
     <iframe id="iframeControl" class="embedded-deck-frame" src="/control" title="QTrade 控制台"></iframe>

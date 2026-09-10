@@ -410,3 +410,40 @@ h2 {
 @media (prefers-reduced-motion: reduce) {
   .control-button { transition: none; }
 }
+
+/* Light operations workspace: flat, auditable and deliberately calm. */
+body {
+  background: var(--qt-light-page);
+  color: var(--qt-light-text);
+}
+.control-shell { width: min(1240px, 100%); padding: clamp(20px, 2.5vw, 32px); }
+.control-hero,
+.control-navigation,
+.deepseek-chat-panel,
+.control-card {
+  background: var(--qt-light-panel);
+  border-color: var(--qt-light-line);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(28, 45, 67, .06);
+}
+.control-hero { padding: 24px 26px; }
+.control-eyebrow, .control-card-kicker { color: var(--qt-color-brand); }
+h1 { color: var(--qt-light-text); font-size: clamp(24px, 3vw, 30px); }
+.control-safety { color: var(--qt-color-signal); }
+.control-button {
+  background: var(--qt-light-panel);
+  border-color: var(--qt-light-line);
+  color: var(--qt-light-text);
+  box-shadow: none;
+}
+.control-button:hover { background: var(--qt-light-panel-muted); border-color: var(--qt-color-brand); }
+.control-button-primary { background: var(--qt-color-brand); border-color: var(--qt-color-brand); color: #fff; }
+.control-button-primary:hover { background: var(--qt-color-brand-strong); color: #fff; }
+.control-state { background: var(--qt-light-panel-muted); }
+.control-card-mark { color: var(--qt-color-brand); }
+.control-row { padding-block: 2px; }
+.deepseek-chat-label textarea { background: var(--qt-light-input); color: var(--qt-light-text); }
+
+@media (max-width: 980px) {
+  .control-grid { grid-template-columns: minmax(0, 1fr); }
+}

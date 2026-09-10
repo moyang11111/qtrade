@@ -30,10 +30,11 @@ def test_tokens_are_unique_first_loaded_and_preserve_legacy_aliases():
     assert index.count(token_link) == 1
     assert index.count(style_link) == 1
     assert index.index(token_link) < index.index(style_link)
-    assert "--qt-bg-primary: #0a0a0b" in tokens
-    assert "--qt-color-brand: #5e6ad2" in tokens
-    assert "--qt-color-up: #eb5757" in tokens
-    assert "--qt-color-down: #27ae60" in tokens
+    assert "--qt-dark-page: #0c1523" in tokens
+    assert "--qt-light-page: #edf1f5" in tokens
+    assert "--qt-color-brand: #55ced1" in tokens
+    assert "--qt-color-up: #ff777d" in tokens
+    assert "--qt-color-down: #59c7a0" in tokens
     assert "prefers-reduced-motion: reduce" in tokens
     assert "--bg-primary: var(--qt-bg-primary)" in style
     assert "--up: var(--qt-color-up)" in style
@@ -80,12 +81,25 @@ def test_tokens_and_adapter_preserve_a_share_red_up_green_down_semantics():
     adapter = _read(ADAPTER_CSS)
     style = _read(STYLE)
 
-    assert "--qt-color-up: #eb5757" in tokens
-    assert "--qt-color-down: #27ae60" in tokens
+    assert "--qt-color-up: #ff777d" in tokens
+    assert "--qt-color-down: #59c7a0" in tokens
     assert ".d-up" in adapter and "var(--qt-color-up)" in adapter
     assert ".d-down" in adapter and "var(--qt-color-down)" in adapter
     assert "--red: var(--qt-color-up)" in style
     assert "--green: var(--qt-color-down)" in style
+
+
+def test_hybrid_workbench_groups_navigation_and_switches_tone():
+    index = _read(INDEX)
+    style = _read(STYLE)
+    app = _read(PROJECT_ROOT / "static" / "js" / "app.js")
+
+    for group in ("市场", "研究", "演练", "系统"):
+        assert f'<div class="deck-group-label">{group}</div>' in index
+    assert 'aria-label="工作区导航"' in index
+    assert "darkWorkspacePages" in app
+    assert "document.body.dataset.workspaceTone" in app
+    assert 'body[data-workspace-tone="light"]' in style
 
 
 def test_adapter_css_is_scoped_and_hides_only_verified_duplicates():
