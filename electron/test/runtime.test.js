@@ -12,6 +12,10 @@ const runtime = require('../runtime');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 
+test('desktop startup allows a bounded full-cache initialization window', () => {
+  assert.equal(runtime.DEFAULT_STARTUP_TIMEOUT_MS, 60_000);
+});
+
 function preflightOutput({
   python = 'C:\\Python312\\python.exe',
   version = '3.12.0',

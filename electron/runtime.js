@@ -7,7 +7,9 @@ const http = require('http');
 const { spawn, spawnSync } = require('child_process');
 
 const HEALTH_PATH = '/api/health';
-const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
+// Loading an existing full local market-data cache can legitimately take more
+// than 30 seconds on Windows before the HTTP listener becomes ready.
+const DEFAULT_STARTUP_TIMEOUT_MS = 60_000;
 const DEFAULT_POLL_INTERVAL_MS = 150;
 const DEFAULT_PYTHON_PREFLIGHT_TIMEOUT_MS = 15_000;
 const MAX_PYTHON_PREFLIGHT_ATTEMPTS = 2;
@@ -687,6 +689,7 @@ async function startBackend({
 }
 
 module.exports = {
+  DEFAULT_STARTUP_TIMEOUT_MS,
   DEFAULT_PYTHON_PREFLIGHT_TIMEOUT_MS,
   MAX_PYTHON_PREFLIGHT_ATTEMPTS,
   DEFAULT_REQUIRED_PYTHON_MODULES,
