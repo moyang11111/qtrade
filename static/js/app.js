@@ -537,6 +537,8 @@
   // ======================== 决策台页面 ========================
   function setRailActive(page) {
     state.activePage = page;
+    const darkWorkspacePages = new Set(['market', 'training', 'autopaper']);
+    document.body.dataset.workspaceTone = darkWorkspacePages.has(page) ? 'dark' : 'light';
     document.querySelectorAll('.deck-item').forEach(b =>
       b.classList.toggle('active', b.dataset.page === page));
   }

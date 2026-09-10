@@ -52,7 +52,7 @@ def test_control_route_is_qtrade_owned_without_external_base(monkeypatch):
     assert handler.responses[0]["status"] == 200
     html = handler.wfile.getvalue().decode("utf-8")
     assert 'data-qtrade-native-control="true"' in html
-    assert "QTrade 运维与研究控制台" in html
+    assert "数据与运行" in html
     assert "不会执行交易或系统命令" in html
     assert "deepseek-harness-quant" not in html.lower()
 
