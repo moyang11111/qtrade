@@ -53,6 +53,8 @@ OBSERVABLE_ENV = "QTRADE_UPDATE_OBSERVABLE"
 JOB_ID_ENV = "QTRADE_UPDATE_JOB_ID"
 STALE_STATUS_SECONDS = 15 * 60
 PIPELINE_STEP_COUNT = 10
+CALENDAR_FETCH_ATTEMPTS = 3
+CALENDAR_RETRY_DELAY_SECONDS = 1.0
 
 
 def _job_id() -> str:
@@ -453,8 +455,11 @@ def resolve_trading_day(
     *,
     cache_path: Path,
     calendar_loader: Callable[[], Iterable[object]] | None = None,
+    max_attempts: int = CALENDAR_FETCH_ATTEMPTS,
+    retry_delay_seconds: float = CALENDAR_RETRY_DELAY_SECONDS,
+    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> tuple[bool | None, str]:
-    """Resolve a day from cache/API, returning ``None`` when unconfirmed."""
+    """Resolve a day from cache/API, retrying transient calendar failures."""
 
     if target.weekday() >= 5:
         return False, "weekend"
@@ -467,17 +472,24 @@ def resolve_trading_day(
             return False, "calendar_cache_closed"
 
     loader = fetch_trade_dates if calendar_loader is None else calendar_loader
-    try:
-        dates = _normalise_dates(loader())
-        if not dates:
-            raise ValueError("empty trading calendar")
+    attempts = max(1, int(max_attempts))
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
         try:
-            save_calendar_cache(cache_path, dates)
-        except OSError as error:
-            log(f"WARN: 交易日历缓存写入失败：{error}")
-        return (target in dates, "calendar_api" if target in dates else "calendar_api_closed")
-    except Exception as error:  # noqa: BLE001 - fail closed at process boundary
-        return None, f"calendar_unavailable: {error}"
+            dates = _normalise_dates(loader())
+            if not dates:
+                raise ValueError("empty trading calendar")
+            try:
+                save_calendar_cache(cache_path, dates)
+            except OSError as error:
+                log(f"WARN: 交易日历缓存写入失败：{error}")
+            return (target in dates, "calendar_api" if target in dates else "calendar_api_closed")
+        except Exception as error:  # noqa: BLE001 - fail closed at process boundary
+            last_error = error
+            if attempt < attempts:
+                log(f"WARN: 交易日历读取失败，第 {attempt}/{attempts} 次：{error}")
+                sleep_fn(max(0.0, retry_delay_seconds))
+    return None, f"calendar_unavailable: {last_error}"
 
 
 @contextmanager

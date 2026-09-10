@@ -241,6 +241,33 @@ def test_calendar_failure_without_cache_fails_closed(tmp_path, monkeypatch):
     assert payload["reason"].startswith("calendar_unavailable:")
 
 
+def test_calendar_fetch_retries_transient_failure_then_caches_result(tmp_path):
+    cache = tmp_path / "cache.json"
+    target = dt.date(2026, 8, 25)
+    calls = []
+    delays = []
+
+    def loader():
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("temporary network failure")
+        return [target]
+
+    state, reason = daily_update.resolve_trading_day(
+        target,
+        cache_path=cache,
+        calendar_loader=loader,
+        retry_delay_seconds=0.25,
+        sleep_fn=delays.append,
+    )
+
+    assert state is True
+    assert reason == "calendar_api"
+    assert len(calls) == 2
+    assert delays == [0.25]
+    assert daily_update.load_calendar_cache(cache) == {target}
+
+
 def test_holiday_from_calendar_skips_without_running_pipeline(tmp_path, monkeypatch):
     _configure_daily(monkeypatch, tmp_path)
     status = tmp_path / "status.json"
