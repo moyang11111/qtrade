@@ -24,7 +24,9 @@ from .portal_refresh_worker import PortalRefreshPlan, _plan_universe_token
 
 PROVIDER_VERSION = "akshare-sina-daily-qfq-v2"
 _DATE_FORMAT = "%Y-%m-%d"
-_MAX_CALENDAR_DATES = 8_000
+# Sina currently returns the complete exchange history (already above 8,000
+# rows). Keep a generous finite bound so malformed responses still fail closed.
+_MAX_CALENDAR_DATES = 20_000
 _NETWORK_CONNECT_TIMEOUT = 10.0
 _NETWORK_READ_TIMEOUT = 20.0
 _NETWORK_TOTAL_TIMEOUT = 30.0

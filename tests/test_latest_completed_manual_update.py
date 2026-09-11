@@ -43,6 +43,32 @@ def test_latest_completed_trade_date_fails_closed_for_bad_or_stale_calendar():
             raise AssertionError("calendar must fail closed")
 
 
+def test_latest_completed_trade_date_accepts_full_sina_history_size():
+    start = dt.date(1990, 1, 1)
+    calendar = [start + dt.timedelta(days=offset) for offset in range(8_797)]
+    now = dt.datetime.combine(calendar[-1], dt.time(19, 0))
+
+    assert runtime.resolve_latest_completed_trade_date(now, calendar) == calendar[-1]
+
+
+def test_latest_completed_trade_date_rejects_unbounded_calendar_payload():
+    start = dt.date(1970, 1, 1)
+    calendar = [
+        start + dt.timedelta(days=offset)
+        for offset in range(runtime.MAX_TRADE_CALENDAR_DATES + 1)
+    ]
+
+    try:
+        runtime.resolve_latest_completed_trade_date(
+            dt.datetime.combine(calendar[-1], dt.time(19, 0)),
+            calendar,
+        )
+    except ValueError as error:
+        assert str(error) == "calendar_unavailable"
+    else:
+        raise AssertionError("oversized calendar must fail closed")
+
+
 def test_manual_calendar_resolution_runs_in_worker_and_freezes_target(tmp_path):
     calls = []
     clock_values = iter([

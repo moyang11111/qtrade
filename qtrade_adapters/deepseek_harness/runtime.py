@@ -30,6 +30,7 @@ MANUAL_UPDATE_PROCESS_POLL_SECONDS = 0.1
 MANUAL_UPDATE_STOP_TIMEOUT_SECONDS = 2.0
 MANUAL_UPDATE_STARTUP_TIMEOUT_SECONDS = 3.0
 MANUAL_UPDATE_LOG_MAX_BYTES = 256 * 1024
+MAX_TRADE_CALENDAR_DATES = 20_000
 _AUTO_UPDATE_LOCK = threading.Lock()
 _AUTO_UPDATE_SCHEDULER = None
 _AUTO_UPDATE_THREAD = None
@@ -928,7 +929,7 @@ def resolve_latest_completed_trade_date(now, calendar_dates):
         })
     except (TypeError, ValueError, AttributeError) as exc:
         raise ValueError("calendar_unavailable") from exc
-    if not normalized or len(normalized) > 8000 or normalized[-1] < local.date():
+    if not normalized or len(normalized) > MAX_TRADE_CALENDAR_DATES or normalized[-1] < local.date():
         raise ValueError("calendar_unavailable")
     boundary = local.date()
     if local.time().replace(tzinfo=None) < DAILY_UPDATE_TIME:
