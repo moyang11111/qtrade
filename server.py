@@ -3258,6 +3258,7 @@ def get_manual_update_controller():
             prepare_fn=snapshot_pipeline.prepare_snapshot_candidate,
             activate_fn=snapshot_pipeline.prepare_snapshot_candidate,
             commit_fn=_commit_snapshot_pipeline,
+            plan_builder=snapshot_pipeline.build_trusted_plan,
             plan_inputs_builder=_build_qtrade_bound_plan_inputs,
             calendar_loader=snapshot_pipeline.load_trade_calendar_dates,
         )
@@ -3276,10 +3277,10 @@ def _reload_portal_snapshot(status: dict | None = None) -> bool:
 
 
 def _build_qtrade_bound_plan_inputs(*, base_dir, target_date, calendar_dates, state_dir, user_data_dir):
-    """Read only the verified QTrade-owned current history overlay."""
+    """Read the verified overlay or signal a trusted first-run bootstrap."""
 
-    del base_dir
-    return snapshot_pipeline.load_current_bound_plan_inputs(
+    return snapshot_pipeline.load_current_or_bootstrap_bound_plan_inputs(
+        base_dir=base_dir,
         state_dir=state_dir,
         user_data_dir=user_data_dir,
         target_date=target_date,
@@ -4621,6 +4622,7 @@ def _maybe_auto_update():
         prepare_fn=snapshot_pipeline.prepare_snapshot_candidate,
         activate_fn=snapshot_pipeline.prepare_snapshot_candidate,
         commit_fn=_commit_snapshot_pipeline,
+        plan_builder=snapshot_pipeline.build_trusted_plan,
         plan_inputs_builder=_build_qtrade_bound_plan_inputs,
         calendar_loader=snapshot_pipeline.load_trade_calendar_dates,
     )
