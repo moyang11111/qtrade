@@ -113,6 +113,8 @@ _BATCH_KEYS = frozenset({
     "batch_index", "symbols", "items", "state",
 })
 _ITEM_KEYS = frozenset({"symbol", "rows", "metadata"})
+_EXCLUSION_REASONS = frozenset({"target_date_missing", "suspended", "insufficient_history"})
+_EXCLUSION_KEYS = frozenset({"symbol", "reason"})
 
 
 class PortalWorkerError(RuntimeError):
@@ -218,6 +220,7 @@ class PortalRefreshPlan:
     calendar_verified: bool
     calendar_token: str
     provider_version: str
+    excluded_by_reason: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -335,7 +338,18 @@ def _validated_plan(value: object) -> PortalRefreshPlan:
     expected_token = _plan_universe_token(symbols, target, calendar_token, provider_version)
     if token != expected_token:
         raise PortalWorkerError("universe_unavailable")
-    return PortalRefreshPlan(symbols, target, token, True, calendar_token, provider_version)
+    excluded = value.excluded_by_reason
+    if not isinstance(excluded, tuple) or len(excluded) > 4:
+        raise PortalWorkerError("universe_unavailable")
+    if any(
+        not isinstance(item, tuple) or len(item) != 2
+        or item[0] not in {"risk_warning", "suspended", "not_tradable"}
+        or not isinstance(item[1], int) or isinstance(item[1], bool)
+        or item[1] < 0 or item[1] > portal_refresh.MAX_SYMBOLS
+        for item in excluded
+    ) or len({item[0] for item in excluded}) != len(excluded):
+        raise PortalWorkerError("universe_unavailable")
+    return PortalRefreshPlan(symbols, target, token, True, calendar_token, provider_version, excluded)
 
 
 def _safe_worker_paths(state_dir: str | Path | None, user_data_dir: str | Path) -> PortalWorkerPaths:
@@ -546,7 +560,7 @@ def _safe_batch_payload(
     symbols: Sequence[str],
     history_window: int = 0,
 ) -> dict[str, object]:
-    if not isinstance(payload, dict) or set(payload) != _BATCH_KEYS:
+    if not isinstance(payload, dict) or set(payload) not in (_BATCH_KEYS, _BATCH_KEYS | {"excluded"}):
         raise PortalWorkerError("checkpoint_corrupt")
     if payload.get("schema_version") != WORKER_SCHEMA_VERSION or payload.get("job_id") != job_id:
         raise PortalWorkerError("checkpoint_corrupt")
@@ -587,7 +601,19 @@ def _safe_batch_payload(
         if not isinstance(rows, list) or not rows or not isinstance(metadata, dict):
             raise PortalWorkerError("checkpoint_corrupt")
         by_symbol[symbol] = normalized_item
-    if state == "complete" and len(by_symbol) != len(symbols):
+    raw_excluded = payload.get("excluded", [])
+    if not isinstance(raw_excluded, list) or len(raw_excluded) > len(symbols):
+        raise PortalWorkerError("checkpoint_corrupt")
+    excluded: dict[str, str] = {}
+    for raw in raw_excluded:
+        if not isinstance(raw, dict) or set(raw) != _EXCLUSION_KEYS:
+            raise PortalWorkerError("checkpoint_corrupt")
+        symbol = normalize_code(raw.get("symbol"))
+        reason = raw.get("reason")
+        if symbol is None or symbol not in symbols or symbol in by_symbol or symbol in excluded or reason not in _EXCLUSION_REASONS:
+            raise PortalWorkerError("checkpoint_corrupt")
+        excluded[symbol] = reason
+    if state == "complete" and len(by_symbol) + len(excluded) != len(symbols):
         raise PortalWorkerError("checkpoint_corrupt")
     return {
         "schema_version": WORKER_SCHEMA_VERSION,
@@ -599,12 +625,13 @@ def _safe_batch_payload(
         "batch_index": index,
         "symbols": list(symbols),
         "items": [by_symbol[symbol] for symbol in symbols if symbol in by_symbol],
+        "excluded": [{"symbol": symbol, "reason": excluded[symbol]} for symbol in symbols if symbol in excluded],
         "state": state,
     }
 
 
 def _validate_checkpoint(payload: object) -> dict[str, object]:
-    if not isinstance(payload, dict) or set(payload) != _CHECKPOINT_KEYS:
+    if not isinstance(payload, dict) or set(payload) not in (_CHECKPOINT_KEYS, _CHECKPOINT_KEYS | {"excluded", "excluded_by_reason", "published_universe_token"}):
         raise PortalWorkerError("checkpoint_corrupt")
     if payload.get("schema_version") != WORKER_SCHEMA_VERSION:
         raise PortalWorkerError("checkpoint_corrupt")
@@ -648,7 +675,7 @@ def _validate_checkpoint(payload: object) -> dict[str, object]:
     expected_batches = (len(symbols) + batch_size - 1) // batch_size
     seen: set[int] = set()
     for record in batches:
-        if not isinstance(record, dict) or set(record) != _BATCH_RECORD_KEYS:
+        if not isinstance(record, dict) or set(record) not in (_BATCH_RECORD_KEYS, _BATCH_RECORD_KEYS | {"excluded"}):
             raise PortalWorkerError("checkpoint_corrupt")
         index = record.get("index")
         if not isinstance(index, int) or isinstance(index, bool) or index in seen or not 0 <= index < expected_batches:
@@ -659,6 +686,8 @@ def _validate_checkpoint(payload: object) -> dict[str, object]:
         if not isinstance(record.get("completed"), int) or not 0 <= record["completed"] <= record["count"]:
             raise PortalWorkerError("checkpoint_corrupt")
         if not isinstance(record.get("failed"), int) or record["failed"] < 0:
+            raise PortalWorkerError("checkpoint_corrupt")
+        if not isinstance(record.get("excluded", 0), int) or isinstance(record.get("excluded", 0), bool) or not 0 <= record.get("excluded", 0) <= record["count"]:
             raise PortalWorkerError("checkpoint_corrupt")
         expected_symbols = symbols[index * batch_size:(index + 1) * batch_size]
         expected_file = f"{BATCH_DIR_NAME}/batch-{index:06d}-{job_id}.json"
@@ -676,6 +705,18 @@ def _validate_checkpoint(payload: object) -> dict[str, object]:
     if not isinstance(completed, int) or not 0 <= completed <= len(symbols):
         raise PortalWorkerError("checkpoint_corrupt")
     if not isinstance(failed, int) or isinstance(failed, bool) or failed < 0:
+        raise PortalWorkerError("checkpoint_corrupt")
+    excluded = payload.get("excluded", 0)
+    if not isinstance(excluded, int) or isinstance(excluded, bool) or not 0 <= excluded <= len(symbols):
+        raise PortalWorkerError("checkpoint_corrupt")
+    if excluded != sum(int(record.get("excluded", 0)) for record in batches):
+        raise PortalWorkerError("checkpoint_corrupt")
+    excluded_by_reason = payload.get("excluded_by_reason", {})
+    if not isinstance(excluded_by_reason, dict) or set(excluded_by_reason) - _EXCLUSION_REASONS:
+        raise PortalWorkerError("checkpoint_corrupt")
+    if any(not isinstance(count, int) or isinstance(count, bool) or count < 0 for count in excluded_by_reason.values()):
+        raise PortalWorkerError("checkpoint_corrupt")
+    if sum(excluded_by_reason.values()) != excluded:
         raise PortalWorkerError("checkpoint_corrupt")
     staged_bytes = payload.get("staged_bytes")
     if not isinstance(staged_bytes, int) or isinstance(staged_bytes, bool) or not 0 <= staged_bytes <= MAX_STAGED_BYTES:
@@ -707,7 +748,7 @@ def _validate_checkpoint(payload: object) -> dict[str, object]:
     for key in ("started_at", "heartbeat_at", "finished_at"):
         if payload.get(key) is not None and _timestamp(payload.get(key)) is None:
             raise PortalWorkerError("checkpoint_corrupt")
-    if state == "success" and (completed != len(symbols) or as_of != target or payload.get("finished_at") is None):
+    if state == "success" and (completed + excluded != len(symbols) or as_of != target or payload.get("finished_at") is None):
         raise PortalWorkerError("checkpoint_corrupt")
     published_generation = payload.get("published_generation")
     published_content = payload.get("published_content_sha256")
@@ -721,12 +762,21 @@ def _validate_checkpoint(payload: object) -> dict[str, object]:
         raise PortalWorkerError("checkpoint_corrupt")
     if (published_generation is None) != (published_content is None):
         raise PortalWorkerError("checkpoint_corrupt")
+    published_universe = payload.get("published_universe_token")
+    if published_universe is not None and (not isinstance(published_universe, str) or _TOKEN_RE.fullmatch(published_universe) is None):
+        raise PortalWorkerError("checkpoint_corrupt")
+    if excluded and state == "success" and published_universe is None:
+        raise PortalWorkerError("checkpoint_corrupt")
     if state == "success" and published_generation is None:
         raise PortalWorkerError("checkpoint_corrupt")
     elapsed = payload.get("elapsed_seconds")
     if not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool) or elapsed < 0:
         raise PortalWorkerError("checkpoint_corrupt")
-    return dict(payload)
+    normalized = dict(payload)
+    normalized.setdefault("excluded", 0)
+    normalized.setdefault("excluded_by_reason", {})
+    normalized.setdefault("published_universe_token", None)
+    return normalized
 
 
 def _lease_record(path: Path) -> tuple[int, str, str, tuple[int, int]] | None:
@@ -1029,6 +1079,8 @@ def _new_checkpoint(
         "batches": [],
         "completed": 0,
         "failed": 0,
+        "excluded": 0,
+        "excluded_by_reason": {},
         "retry": {"attempt": 0, "max_attempts": DEFAULT_MAX_ATTEMPTS, "next_attempt_at": None},
         "current_batch": None,
         "as_of": None,
@@ -1041,6 +1093,7 @@ def _new_checkpoint(
         "staged_bytes": 0,
         "published_generation": None,
         "published_content_sha256": None,
+        "published_universe_token": None,
     }
 
 
@@ -1129,6 +1182,8 @@ class PortalRefreshWorker:
                 "total": 0,
                 "completed": 0,
                 "failed": 0,
+                "excluded": 0,
+                "excluded_by_reason": {},
                 "retry": {"attempt": 0, "max_attempts": DEFAULT_MAX_ATTEMPTS, "next_attempt_at": None},
                 "current_batch": None,
                 "as_of": None,
@@ -1140,6 +1195,7 @@ class PortalRefreshWorker:
                 "history_schema": "legacy.v1",
                 "published_generation": None,
                 "published_content_sha256": None,
+                "published_universe_token": None,
             }
         safe_reason = reason if reason in _REASONS else str(checkpoint.get("reason", "provider_failed"))
         if safe_reason not in _REASONS:
@@ -1166,6 +1222,8 @@ class PortalRefreshWorker:
             "total": checkpoint.get("total", 0),
             "completed": checkpoint.get("completed", 0),
             "failed": checkpoint.get("failed", 0),
+            "excluded": checkpoint.get("excluded", 0),
+            "excluded_by_reason": dict(checkpoint.get("excluded_by_reason", {})),
             "retry": safe_retry,
             "current_batch": checkpoint.get("current_batch"),
             "as_of": checkpoint.get("as_of"),
@@ -1179,6 +1237,7 @@ class PortalRefreshWorker:
             # to prove that the service reloads this exact publication.
             "published_generation": checkpoint.get("published_generation"),
             "published_content_sha256": checkpoint.get("published_content_sha256"),
+            "published_universe_token": checkpoint.get("published_universe_token"),
         }
 
     def _validate_checkpoint_artifacts(
@@ -1192,6 +1251,8 @@ class PortalRefreshWorker:
         if not isinstance(records, list):
             raise PortalWorkerError("checkpoint_corrupt")
         total_completed = 0
+        total_excluded = 0
+        excluded_by_reason: dict[str, int] = {}
         staged_bytes = 0
         for record in records:
             if not isinstance(record, Mapping):
@@ -1206,11 +1267,20 @@ class PortalRefreshWorker:
             item_count = len(payload["items"])
             if int(record["completed"]) != item_count:
                 raise PortalWorkerError("checkpoint_corrupt")
-            if payload["state"] == "complete" and item_count != len(batch_symbols):
+            excluded_count = len(payload["excluded"])
+            if int(record.get("excluded", 0)) != excluded_count:
                 raise PortalWorkerError("checkpoint_corrupt")
+            if payload["state"] == "complete" and item_count + excluded_count != len(batch_symbols):
+                raise PortalWorkerError("checkpoint_corrupt")
+            for item in payload["excluded"]:
+                reason = item["reason"]
+                excluded_by_reason[reason] = excluded_by_reason.get(reason, 0) + 1
             total_completed += item_count
+            total_excluded += excluded_count
             staged_bytes += int(record["size"])
         if total_completed != checkpoint["completed"]:
+            raise PortalWorkerError("checkpoint_corrupt")
+        if total_excluded != checkpoint["excluded"] or excluded_by_reason != checkpoint["excluded_by_reason"]:
             raise PortalWorkerError("checkpoint_corrupt")
         if staged_bytes != checkpoint["staged_bytes"]:
             raise PortalWorkerError("checkpoint_corrupt")
@@ -1290,8 +1360,8 @@ class PortalRefreshWorker:
                 return False
             return (
                 current.manifest.get("target_date") == checkpoint.get("target_date")
-                and current.manifest.get("universe_token") == checkpoint.get("universe_token")
-                and current.manifest.get("total") == checkpoint.get("total")
+                and current.manifest.get("universe_token") == (checkpoint.get("published_universe_token") or checkpoint.get("universe_token"))
+                and current.manifest.get("total") == checkpoint.get("completed")
                 and current.manifest.get("generation") == checkpoint.get("published_generation")
                 and current.manifest.get("content_sha256") == checkpoint.get("published_content_sha256")
             )
@@ -1551,6 +1621,7 @@ class PortalRefreshWorker:
         symbols: Sequence[str],
         items: Sequence[Mapping[str, object]],
         state: str,
+        excluded: Sequence[Mapping[str, str]] = (),
     ) -> tuple[str, str, int]:
         job_id = str(checkpoint["job_id"])
         target = str(checkpoint["target_date"])
@@ -1564,6 +1635,7 @@ class PortalRefreshWorker:
             "batch_index": index,
             "symbols": list(symbols),
             "items": [dict(item) for item in items],
+            "excluded": [dict(item) for item in excluded],
             "state": state,
         }
         _safe_batch_payload(
@@ -1630,13 +1702,15 @@ class PortalRefreshWorker:
         batch_deadline = min(self.clock() + self.batch_timeout, started + self.job_timeout)
         existing = next((record for record in checkpoint["batches"] if record["index"] == index), None)
         items: dict[str, Mapping[str, object]] = {}
+        excluded: dict[str, str] = {}
         if existing is not None:
             payload = self._read_batch(paths, existing, checkpoint, batch_symbols)
             items = {str(item["symbol"]): item for item in payload["items"]}
+            excluded = {str(item["symbol"]): str(item["reason"]) for item in payload["excluded"]}
             if payload["state"] == "complete":
                 return "complete", payload
         for symbol in batch_symbols:
-            if symbol in items:
+            if symbol in items or symbol in excluded:
                 continue
             if self._stop_event.is_set():
                 return "aborted", None
@@ -1650,15 +1724,42 @@ class PortalRefreshWorker:
                 outcome = self._run_item(provider=self.provider_for_job, symbol=symbol, target=target, deadline=batch_deadline)
                 if outcome.ok and outcome.item is not None:
                     items[symbol] = outcome.item
+                elif outcome.reason in _EXCLUSION_REASONS and self.history_window:
+                    excluded[symbol] = outcome.reason
+                else:
+                    if outcome.reason == "aborted" or self._stop_event.is_set():
+                        return "aborted", None
+                    if not outcome.transient or attempt >= self.max_attempts:
+                        checkpoint["failed"] = int(checkpoint.get("failed", 0)) + 1
+                        checkpoint["reason"] = outcome.reason
+                        self._write_checkpoint(paths, checkpoint)
+                        return outcome.reason, None
+                    delay = min(self.retry_delay * (2 ** (attempt - 1)), max(0.0, batch_deadline - self.clock()))
+                    checkpoint["reason"] = "retrying"
+                    checkpoint["retry"] = {"attempt": attempt, "max_attempts": self.max_attempts, "next_attempt_at": (self.wall_clock() + _datetime.timedelta(seconds=delay)).isoformat(timespec="seconds")}
+                    self._heartbeat(checkpoint, lease, started)
+                    self._write_checkpoint(paths, checkpoint)
+                    if self.sleeper is time.sleep:
+                        if self._stop_event.wait(delay):
+                            return "aborted", None
+                    else:
+                        self.sleeper(delay)
+                    if self.clock() >= batch_deadline:
+                        return "batch_timeout", None
+                    continue
+                if symbol in items or symbol in excluded:
+                    excluded_items = [{"symbol": code, "reason": excluded[code]} for code in batch_symbols if code in excluded]
                     relative, digest, size = self._write_batch(
                         paths, checkpoint, index, batch_symbols, list(items.values()),
-                        "complete" if len(items) == len(batch_symbols) else "partial",
+                        "complete" if len(items) + len(excluded) == len(batch_symbols) else "partial",
+                        excluded_items,
                     )
                     record = {
                         "index": index,
                         "count": len(batch_symbols),
                         "completed": len(items),
                         "failed": 0,
+                        "excluded": len(excluded),
                         "file": relative,
                         "sha256": digest,
                         "size": size,
@@ -1666,6 +1767,11 @@ class PortalRefreshWorker:
                     checkpoint["batches"] = [old for old in checkpoint["batches"] if old["index"] != index] + [record]
                     checkpoint["batches"].sort(key=lambda old: old["index"])
                     checkpoint["completed"] = sum(old["completed"] for old in checkpoint["batches"])
+                    checkpoint["excluded"] = sum(old.get("excluded", 0) for old in checkpoint["batches"])
+                    if symbol in excluded:
+                        reason = excluded[symbol]
+                        counts = checkpoint["excluded_by_reason"]
+                        counts[reason] = counts.get(reason, 0) + 1
                     checkpoint["staged_bytes"] = sum(int(old["size"]) for old in checkpoint["batches"])
                     if checkpoint["staged_bytes"] > MAX_STAGED_BYTES:
                         return "checkpoint_io", None
@@ -1674,25 +1780,6 @@ class PortalRefreshWorker:
                     self._heartbeat(checkpoint, lease, started)
                     self._write_checkpoint(paths, checkpoint)
                     break
-                if outcome.reason == "aborted" or self._stop_event.is_set():
-                    return "aborted", None
-                if not outcome.transient or attempt >= self.max_attempts:
-                    checkpoint["failed"] = int(checkpoint.get("failed", 0)) + 1
-                    checkpoint["reason"] = outcome.reason
-                    self._write_checkpoint(paths, checkpoint)
-                    return outcome.reason, None
-                delay = min(self.retry_delay * (2 ** (attempt - 1)), max(0.0, batch_deadline - self.clock()))
-                checkpoint["reason"] = "retrying"
-                checkpoint["retry"] = {"attempt": attempt, "max_attempts": self.max_attempts, "next_attempt_at": (self.wall_clock() + _datetime.timedelta(seconds=delay)).isoformat(timespec="seconds")}
-                self._heartbeat(checkpoint, lease, started)
-                self._write_checkpoint(paths, checkpoint)
-                if self.sleeper is time.sleep:
-                    if self._stop_event.wait(delay):
-                        return "aborted", None
-                else:
-                    self.sleeper(delay)
-                if self.clock() >= batch_deadline:
-                    return "batch_timeout", None
         payload = {
             "schema_version": WORKER_SCHEMA_VERSION,
             "job_id": job_id,
@@ -1703,6 +1790,7 @@ class PortalRefreshWorker:
             "batch_index": index,
             "symbols": list(batch_symbols),
             "items": list(items.values()),
+            "excluded": [{"symbol": code, "reason": excluded[code]} for code in batch_symbols if code in excluded],
             "state": "complete",
         }
         return "complete", payload
@@ -1771,7 +1859,8 @@ class PortalRefreshWorker:
                     if (
                         current is not None
                         and current.manifest.get("target_date") == plan.target_date
-                        and current.manifest.get("universe_token") == plan.universe_token
+                        and current.manifest.get("universe_token") == (checkpoint.get("published_universe_token") or plan.universe_token)
+                        and current.manifest.get("total") == checkpoint.get("completed")
                         and current.manifest.get("generation") == checkpoint.get("published_generation")
                         and current.manifest.get("content_sha256") == checkpoint.get("published_content_sha256")
                     ):
@@ -1785,6 +1874,9 @@ class PortalRefreshWorker:
                     history_window=self.history_window,
                 )
                 self._write_checkpoint(paths, checkpoint)
+            # A terminal failed attempt is historical, not an outstanding
+            # failed symbol once the same verified checkpoint is resumed.
+            checkpoint["failed"] = 0
             checkpoint["state"] = "running"
             checkpoint["reason"] = "running"
             checkpoint["finished_at"] = None
@@ -1795,6 +1887,7 @@ class PortalRefreshWorker:
                 for offset in range(0, len(plan.symbols), self.batch_size)
             ]
             aggregate: dict[str, Mapping[str, object]] = {}
+            exclusions: dict[str, str] = {}
             for index, batch_symbols in enumerate(batches):
                 if self._stop_event.is_set():
                     return self._terminal(paths, checkpoint, state="aborted", reason="aborted", started=started)
@@ -1815,21 +1908,33 @@ class PortalRefreshWorker:
                     } else "failure"
                     return self._terminal(paths, checkpoint, state=state, reason=terminal_reason, started=started)
                 aggregate.update({str(item["symbol"]): item for item in payload["items"]})
-            if len(aggregate) != len(plan.symbols):
+                exclusions.update({str(item["symbol"]): str(item["reason"]) for item in payload["excluded"]})
+            if len(aggregate) + len(exclusions) != len(plan.symbols) or len(aggregate) < portal_refresh.MIN_SYMBOLS:
                 return self._terminal(paths, checkpoint, state="failure", reason="checkpoint_corrupt", started=started)
+            if sum(checkpoint["excluded_by_reason"].values()) != len(exclusions):
+                return self._terminal(paths, checkpoint, state="failure", reason="checkpoint_corrupt", started=started)
+            # A small, explicit quality exclusion is allowed; large coverage
+            # loss remains a hard failure instead of publishing a misleading
+            # market snapshot.
+            if len(exclusions) > max(1, len(plan.symbols) // 10):
+                return self._terminal(paths, checkpoint, state="failure", reason="universe_unavailable", started=started)
             rows = {symbol: item["rows"] for symbol, item in aggregate.items()}
-            metadata = [aggregate[symbol]["metadata"] for symbol in plan.symbols]
+            published_symbols = tuple(symbol for symbol in plan.symbols if symbol in aggregate)
+            metadata = [aggregate[symbol]["metadata"] for symbol in published_symbols]
+            published_universe_token = _plan_universe_token(
+                published_symbols, plan.target_date, plan.calendar_token, plan.provider_version,
+            )
             checkpoint["state"] = "publishing"
             checkpoint["reason"] = "publishing"
             checkpoint["current_batch"] = None
             self._heartbeat(checkpoint, lease, started)
             self._write_checkpoint(paths, checkpoint)
             published = self._run_publish(
-                plan.symbols,
+                published_symbols,
                 plan.target_date,
                 rows,
                 metadata,
-                plan.universe_token,
+                published_universe_token,
                 started,
             )
             if not published.ok:
@@ -1842,7 +1947,9 @@ class PortalRefreshWorker:
                 return self._terminal(paths, checkpoint, state="failure", reason="publish_failed", started=started)
             checkpoint["published_generation"] = published.item["generation"]
             checkpoint["published_content_sha256"] = published.item["content_sha256"]
-            checkpoint["completed"] = len(plan.symbols)
+            checkpoint["published_universe_token"] = published_universe_token
+            checkpoint["completed"] = len(published_symbols)
+            checkpoint["excluded"] = len(exclusions)
             checkpoint["current_batch"] = None
             checkpoint["as_of"] = plan.target_date
             checkpoint["state"] = "success"

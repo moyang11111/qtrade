@@ -10,6 +10,7 @@ import time
 import pytest
 
 from qtrade_adapters.deepseek_harness import portal_refresh
+from qtrade_adapters.deepseek_harness.portal_refresh_provider import PortalHistoryError
 from qtrade_adapters.deepseek_harness.portal_refresh import (
     MAX_MANIFEST_BYTES,
     MAX_METADATA_BYTES,
@@ -103,6 +104,13 @@ class FakeHistoryProvider(FakeProvider):
         item["rows"] = rows
         item["metadata"]["history_rows"] = history_window
         return item
+
+
+class FakeHistoryWithMissing(FakeHistoryProvider):
+    def fetch_history(self, symbol: str, target_date: str, history_window: int) -> dict:
+        if symbol == "600002":
+            raise PortalHistoryError("target_date_missing")
+        return super().fetch_history(symbol, target_date, history_window)
 
 
 class BadPublishProvider(FakeProvider):
@@ -201,6 +209,35 @@ def test_history_worker_publishes_v2_target_anchored_snapshot(tmp_path: Path) ->
     )
     assert rows is not None
     assert all(len(value) == portal_refresh.HISTORY_WINDOW for value in rows.values())
+
+
+def test_history_worker_excludes_missing_target_without_forging_bars(tmp_path: Path) -> None:
+    symbols = (*SYMBOLS, "600002")
+    provider = FakeHistoryWithMissing(symbols=symbols)
+    worker = _worker(
+        tmp_path,
+        provider=provider,
+        history_window=portal_refresh.HISTORY_WINDOW,
+        item_timeout_seconds=10,
+        batch_timeout_seconds=30,
+        job_timeout_seconds=90,
+    )
+
+    result = worker.run(_plan(provider, symbols=symbols))
+
+    assert result["state"] == "success"
+    assert result["completed"] == len(SYMBOLS)
+    assert result["excluded"] == 1
+    assert result["failed"] == 0
+    assert result["excluded_by_reason"] == {"target_date_missing": 1}
+    snapshot = read_current_snapshot(
+        tmp_path / "user-data" / "state", user_data_dir=tmp_path / "user-data",
+    )
+    assert snapshot is not None
+    assert snapshot.manifest["symbols"] == list(SYMBOLS)
+    assert snapshot.manifest["universe_token"] == result["published_universe_token"]
+    assert result["published_universe_token"] != _plan(provider, symbols=symbols).universe_token
+    assert worker.status()["state"] == "success"
 
 
 def test_maximum_universe_and_manifest_bounds_are_deterministic(tmp_path: Path) -> None:

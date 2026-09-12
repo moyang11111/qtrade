@@ -371,27 +371,46 @@ def build_trusted_plan(
     factory = adapter_factory or MainboardMarketDataAdapter
     try:
         adapter = factory(base_dir=base_dir)
-        symbols = tuple(adapter.scan())
-        if not 5 <= len(symbols) <= 5000 or len(set(symbols)) != len(symbols):
+        scanned_symbols = tuple(adapter.scan())
+        if not 5 <= len(scanned_symbols) <= 5000 or len(set(scanned_symbols)) != len(scanned_symbols):
             raise PortalPlanError("universe_unavailable")
         metadata = {}
-        for symbol in symbols:
+        excluded_by_reason: dict[str, int] = {}
+        for symbol in scanned_symbols:
             code = normalize_code(symbol)
             if code is None or code in metadata:
                 raise PortalPlanError("universe_schema")
             record = adapter.metadata(code)
             if not isinstance(record, Mapping):
                 raise PortalPlanError("universe_unavailable")
-            metadata[code] = _safe_metadata(record, target)
+            safe = _safe_metadata(record, target)
+            reason = (
+                "risk_warning" if safe["risk_warning"]
+                else "suspended" if safe["suspended"]
+                else "not_tradable" if not safe["tradable"]
+                else None
+            )
+            if reason is not None:
+                excluded_by_reason[reason] = excluded_by_reason.get(reason, 0) + 1
+                continue
+            metadata[code] = safe
     except PortalPlanError:
         raise
     except Exception as exc:
         raise PortalPlanError("universe_unavailable") from exc
-    return build_bound_plan(
-        symbols=symbols,
+    plan, provider = build_bound_plan(
+        symbols=tuple(metadata),
         metadata=metadata,
         target_date=target,
         calendar_dates=dates,
+    )
+    return (
+        PortalRefreshPlan(
+            plan.symbols, plan.target_date, plan.universe_token,
+            plan.calendar_verified, plan.calendar_token, plan.provider_version,
+            tuple(sorted(excluded_by_reason.items())),
+        ),
+        provider,
     )
 
 
