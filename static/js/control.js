@@ -381,7 +381,7 @@
         key, Number.isInteger(payload.stock_progress?.[key]) && payload.stock_progress[key] >= 0
           ? payload.stock_progress[key] : 0,
       ])),
-      data_quality: Object.fromEntries(['history_sufficient', 'insufficient_history', 'suspended', 'fetch_failed', 'unknown'].map((key) => [
+      data_quality: Object.fromEntries(['history_sufficient', 'insufficient_history', 'suspended', 'fetch_failed', 'unknown', 'excluded', 'risk_warning', 'target_date_missing'].map((key) => [
         key, Number.isInteger(payload.data_quality?.[key]) && payload.data_quality[key] >= 0
           ? payload.data_quality[key] : null,
       ])),
@@ -909,7 +909,7 @@
     if (els.manualUpdateQuality) {
       const quality = payload.data_quality || {};
       const shown = (value) => Number.isInteger(value) ? String(value) : '未确认';
-      els.manualUpdateQuality.textContent = `数据质量：历史满足 ${shown(quality.history_sufficient)} · 历史不足 ${shown(quality.insufficient_history)} · 停牌 ${shown(quality.suspended)} · 抓取失败 ${shown(quality.fetch_failed)} · 未知 ${shown(quality.unknown)}`;
+      els.manualUpdateQuality.textContent = `数据质量：历史满足 ${shown(quality.history_sufficient)} · 排除 ${shown(quality.excluded)}（风险警示 ${shown(quality.risk_warning)}、目标日缺失 ${shown(quality.target_date_missing)}）· 历史不足 ${shown(quality.insufficient_history)} · 停牌 ${shown(quality.suspended)} · 抓取失败 ${shown(quality.fetch_failed)} · 未知 ${shown(quality.unknown)}`;
     }
     const outputs = asObject(payload.outputs) || {};
     const labels = { portal: '门户', factors: '因子', decision: '决策', sync: '同步' };

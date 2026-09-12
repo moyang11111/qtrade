@@ -1285,11 +1285,12 @@ def run_snapshot_pipeline(
                 total = worker_status.get("total", len(plan.symbols))
                 completed = worker_status.get("completed", 0)
                 failed = worker_status.get("failed", 0)
+                excluded = worker_status.get("excluded", 0)
                 progress = {
                     "completed": completed,
                     "total": total,
                     "failed": failed,
-                    "pending": max(0, total - completed - failed),
+                    "pending": max(0, total - completed - failed - excluded),
                 }
                 _write_status(status_path, _status_payload(
                     "running", "pipeline_running", target, started_at,
@@ -1308,11 +1309,14 @@ def run_snapshot_pipeline(
         stock_total = result.get("total") if isinstance(result.get("total"), int) else len(plan.symbols)
         stock_completed = result.get("completed") if isinstance(result.get("completed"), int) else 0
         stock_failed = result.get("failed") if isinstance(result.get("failed"), int) else 0
+        stock_excluded = result.get("excluded") if isinstance(result.get("excluded"), int) else 0
+        excluded_by_reason = result.get("excluded_by_reason") if isinstance(result.get("excluded_by_reason"), Mapping) else {}
+        planned_excluded = dict(plan.excluded_by_reason)
         stock_progress = {
             "completed": max(0, stock_completed),
             "total": max(0, stock_total),
             "failed": max(0, stock_failed),
-            "pending": max(0, stock_total - stock_completed - stock_failed),
+            "pending": max(0, stock_total - stock_completed - stock_failed - stock_excluded),
         }
         worker_reason = result.get("reason")
         classified_fetch_failure = stock_failed if worker_reason in {"provider_failed", "provider_unreachable", "item_timeout"} else 0
@@ -1320,10 +1324,13 @@ def run_snapshot_pipeline(
         classified_suspended = stock_failed if worker_reason == "suspended" else 0
         data_quality = {
             "history_sufficient": max(0, stock_completed),
-            "insufficient_history": classified_history_failure if worker_reason == "insufficient_history" else None,
+            "insufficient_history": classified_history_failure + excluded_by_reason.get("insufficient_history", 0),
             "fetch_failed": classified_fetch_failure if worker_reason in {"provider_failed", "provider_unreachable", "item_timeout"} else None,
-            "suspended": classified_suspended if worker_reason == "suspended" else None,
-            "unknown": max(0, stock_total - stock_completed - classified_fetch_failure - classified_history_failure - classified_suspended),
+            "suspended": classified_suspended + planned_excluded.get("suspended", 0) + excluded_by_reason.get("suspended", 0),
+            "unknown": max(0, stock_total - stock_completed - stock_excluded - classified_fetch_failure - classified_history_failure - classified_suspended),
+            "excluded": sum(planned_excluded.values()) + stock_excluded,
+            "risk_warning": planned_excluded.get("risk_warning", 0),
+            "target_date_missing": excluded_by_reason.get("target_date_missing", 0),
         }
         if result.get("state") != "success":
             worker_state = result.get("state")
@@ -1338,9 +1345,10 @@ def run_snapshot_pipeline(
             return 1
         portal_generation = result.get("published_generation")
         portal = portal_refresh.read_generation_snapshot(state_dir, user_data_dir=user_data_dir, generation=portal_generation)
-        if portal is None or portal.manifest.get("target_date") != target or portal.manifest.get("universe_token") != plan.universe_token:
+        published_universe_token = result.get("published_universe_token") or plan.universe_token
+        if portal is None or portal.manifest.get("target_date") != target or portal.manifest.get("universe_token") != published_universe_token:
             raise SnapshotPipelineError("portal_binding_invalid")
-        freshness = {"portal": {"verified": True, "as_of": target, "source": "qtrade_mirror", "reason": "verified", "total": len(plan.symbols), "coverage": len(plan.symbols)}}
+        freshness = {"portal": {"verified": True, "as_of": target, "source": "qtrade_mirror", "reason": "verified", "total": len(portal.manifest["symbols"]), "coverage": len(portal.manifest["symbols"])}}
         _write_status(status_path, _status_payload("running", "pipeline_running", target, started_at, step="factors", outputs={"portal": True, "factors": False, "decision": False, "sync": False}, freshness=freshness, progress={"completed": 1, "total": 4, "current": "factors"}, stock_progress=stock_progress, data_quality=data_quality, current_complete_date=current_complete_date, current_portal_date=target, job_id=identifier))
         factors = _run_owned_call(
             factor_builder, (portal,), {}, deadline=started_clock + deadline_seconds,

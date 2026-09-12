@@ -64,6 +64,13 @@ def _fixture_plan_builder(**_kwargs):
     ), object()
 
 
+def _fixture_exclusion_plan_builder(**_kwargs):
+    return PortalRefreshPlan(
+        tuple(SYMBOLS), TARGET, "planned-universe", True, "calendar-token",
+        PROVIDER_VERSION, excluded_by_reason=(("risk_warning", 2),),
+    ), object()
+
+
 def _fixture_plan_inputs_builder(*, target_date, **_kwargs):
     return {
         "symbols": tuple(SYMBOLS),
@@ -270,6 +277,37 @@ def test_full_runner_orders_portal_factors_decision_sync_without_external_pipeli
     assert all(set(item["values"]) == set(snapshot_pipeline.FACTOR_KEYS) for item in current.factors["records"])
     assert all(item["as_of"] == TARGET for item in current.factors["records"])
     assert all(item["action"] in {"buy", "sell", "hold"} for item in current.decision["records"])
+
+
+def test_full_runner_uses_published_universe_and_reports_exclusions(tmp_path: Path) -> None:
+    user_data, state, portal = _fixture(tmp_path)
+
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, plan, **kwargs):
+            return {
+                "state": "success",
+                "completed": len(SYMBOLS),
+                "excluded": 1,
+                "excluded_by_reason": {"target_date_missing": 1},
+                "published_generation": portal.manifest["generation"],
+                "published_content_sha256": portal.manifest["content_sha256"],
+                "published_universe_token": portal.manifest["universe_token"],
+            }
+
+    status_path = state / "daily_update_1830.status.json"
+    assert snapshot_pipeline.run_snapshot_pipeline(
+        tmp_path / "external", TARGET, user_data_dir=user_data, state_dir=state,
+        status_file=status_path, plan_builder=_fixture_exclusion_plan_builder, worker_factory=FakeWorker,
+        commit_fn=_accept_activation,
+    ) == 0
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["state"] == "success"
+    assert status["data_quality"]["excluded"] == 3
+    assert status["data_quality"]["risk_warning"] == 2
+    assert status["data_quality"]["target_date_missing"] == 1
 
 
 def test_pipeline_activation_failure_restores_pointer_and_reader_state(tmp_path: Path) -> None:

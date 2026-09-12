@@ -67,6 +67,31 @@ def test_build_plan_uses_only_server_owned_calendar_and_mainboard_metadata():
     } for item in provider.metadata.values())
 
 
+def test_trusted_plan_excludes_nontradable_symbols_and_counts_reasons():
+    class MixedAdapter(FakeAdapter):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.records["600002"]["risk_warning"] = "ST"
+            self.records["600003"]["suspended"] = True
+            self.records["000001"]["listed"] = False
+            self.records["000002"] = {
+                **self.records["600001"], "code": "000002", "exchange": "SZ",
+            }
+            self.records["000003"] = {
+                **self.records["600001"], "code": "000003", "exchange": "SZ",
+            }
+            self.records["000004"] = {
+                **self.records["600001"], "code": "000004", "exchange": "SZ",
+            }
+
+    plan, provider = _plan(adapter_factory=MixedAdapter)
+    assert plan.symbols == ("600001", "002001", "000002", "000003", "000004")
+    assert dict(plan.excluded_by_reason) == {
+        "not_tradable": 1, "risk_warning": 1, "suspended": 1,
+    }
+    assert tuple(provider.metadata) == plan.symbols
+
+
 @pytest.mark.parametrize("target", [datetime.date(2026, 8, 29), "2026-08-30"])
 def test_weekend_is_skipped_before_provider_or_calendar_access(target):
     def no_calendar():
