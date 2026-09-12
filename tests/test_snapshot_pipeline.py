@@ -436,6 +436,62 @@ def test_bound_plan_inputs_use_only_verified_current_overlay(
     assert external_calls == []
 
 
+def test_missing_pointer_requests_bootstrap_but_corrupt_pointer_fails_closed(
+    tmp_path: Path,
+) -> None:
+    user_data = tmp_path / "user-data"
+    state = user_data / "state"
+    state.mkdir(parents=True)
+    inputs = snapshot_pipeline.load_current_or_bootstrap_bound_plan_inputs(
+        base_dir=tmp_path / "trusted-base",
+        state_dir=state,
+        user_data_dir=user_data,
+        target_date=TARGET,
+        calendar_dates=[TARGET],
+    )
+    assert inputs == {"bootstrap_required": True}
+
+    root = state / "portal_refresh"
+    root.mkdir(parents=True)
+    (root / "current.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(PortalPlanError, match="universe_unavailable"):
+        snapshot_pipeline.load_current_or_bootstrap_bound_plan_inputs(
+            base_dir=tmp_path / "trusted-base",
+            state_dir=state,
+            user_data_dir=user_data,
+            target_date=TARGET,
+            calendar_dates=[TARGET],
+        )
+
+
+def test_first_pipeline_bootstraps_only_through_explicit_trusted_builder(tmp_path: Path) -> None:
+    user_data = tmp_path / "user-data"
+    state = user_data / "state"
+    state.mkdir(parents=True)
+    class TimedOutWorker:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, plan, **kwargs):
+            return {"state": "timed_out", "reason": "batch_timeout"}
+
+    result = snapshot_pipeline.run_snapshot_pipeline(
+        tmp_path / "trusted-base",
+        TARGET,
+        user_data_dir=user_data,
+        state_dir=state,
+        status_file=state / "daily_update_1830.status.json",
+        calendar_dates=[TARGET],
+        plan_builder=_fixture_plan_builder,
+        plan_inputs_builder=snapshot_pipeline.load_current_or_bootstrap_bound_plan_inputs,
+        worker_factory=TimedOutWorker,
+    )
+    assert result == 1
+    status = json.loads((state / "daily_update_1830.status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "timed_out"
+    assert status["reason"] == "batch_timeout"
+
+
 def test_bound_pipeline_without_current_overlay_is_universe_unavailable(tmp_path: Path) -> None:
     user_data = tmp_path / "user-data"
     state = user_data / "state"

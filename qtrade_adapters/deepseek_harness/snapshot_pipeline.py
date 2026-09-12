@@ -32,6 +32,7 @@ from .portal_refresh_provider import (
     _calendar_token,
     _load_trade_dates,
     build_bound_plan,
+    build_trusted_plan,
 )
 from .portal_refresh_worker import PortalRefreshWorker, _terminate_owned_process
 
@@ -370,6 +371,33 @@ def load_current_bound_plan_inputs(
         "calendar_dates": tuple(calendar_dates),
         "target_date": target,
     }
+
+
+def load_current_or_bootstrap_bound_plan_inputs(
+    *,
+    base_dir: str | Path | None = None,
+    state_dir: str | Path | None,
+    user_data_dir: str | Path,
+    target_date: str | date,
+    calendar_dates,
+) -> dict[str, object]:
+    """Use the verified overlay, or request a trusted first-run bootstrap.
+
+    Only an absent current pointer is eligible for bootstrap.  A present but
+    unreadable pointer remains a hard failure so corrupt state can never fall
+    back to external data unnoticed.
+    """
+
+    paths = portal_refresh.portal_refresh_paths(state_dir, user_data_dir=user_data_dir)
+    if not paths.current.exists():
+        return {"bootstrap_required": True}
+    return load_current_bound_plan_inputs(
+        base_dir=base_dir,
+        state_dir=state_dir,
+        user_data_dir=user_data_dir,
+        target_date=target_date,
+        calendar_dates=calendar_dates,
+    )
 
 
 def _build_bound_plan_from_inputs(
@@ -1191,24 +1219,43 @@ def run_snapshot_pipeline(
                 )
                 if not isinstance(inputs, Mapping):
                     raise SnapshotPipelineError("universe_unavailable")
-                symbols = tuple(inputs.get("symbols", ()))
-                metadata = inputs.get("metadata")
-                if not isinstance(metadata, Mapping):
-                    raise SnapshotPipelineError("universe_unavailable")
-                builder = partial(
-                    _build_bound_plan_from_inputs,
-                    symbols=symbols,
-                    metadata=dict(metadata),
-                    calendar_dates=dates,
-                )
-                plan, provider = _run_owned_call(
-                    builder,
-                    (),
-                    {"target_date": target},
-                    deadline=started_clock + deadline_seconds,
-                    stop_event=stop_event,
-                    token=identifier,
-                )
+                if dict(inputs) == {"bootstrap_required": True}:
+                    if plan_builder is None:
+                        raise SnapshotPipelineError("universe_unavailable")
+                    plan, provider = _run_owned_call(
+                        plan_builder,
+                        (),
+                        {
+                            "base_dir": base_dir,
+                            "target_date": target,
+                            "calendar_dates": dates,
+                        },
+                        deadline=started_clock + deadline_seconds,
+                        stop_event=stop_event,
+                        token=identifier,
+                    )
+                    inputs = None
+                if inputs is None:
+                    pass
+                else:
+                    symbols = tuple(inputs.get("symbols", ()))
+                    metadata = inputs.get("metadata")
+                    if not isinstance(metadata, Mapping):
+                        raise SnapshotPipelineError("universe_unavailable")
+                    builder = partial(
+                        _build_bound_plan_from_inputs,
+                        symbols=symbols,
+                        metadata=dict(metadata),
+                        calendar_dates=dates,
+                    )
+                    plan, provider = _run_owned_call(
+                        builder,
+                        (),
+                        {"target_date": target},
+                        deadline=started_clock + deadline_seconds,
+                        stop_event=stop_event,
+                        token=identifier,
+                    )
             else:
                 if plan_builder is None:
                     _write_status(status_path, _status_payload("failure", "universe_unavailable", target, started_at, finished_at=datetime.now().isoformat(timespec="seconds"), job_id=identifier))
@@ -1396,6 +1443,7 @@ def run_snapshot_pipeline(
 __all__ = [
     "DECISION_ALGORITHM_VERSION", "FACTOR_ALGORITHM_VERSION", "PipelinePaths", "PipelineSnapshot",
     "SnapshotPipelineError", "build_decision_records", "build_factor_records", "load_current_bound_plan_inputs",
+    "load_current_or_bootstrap_bound_plan_inputs",
     "load_trade_calendar_dates",
     "pipeline_paths", "prepare_snapshot_candidate", "publish_pipeline", "read_current_pipeline",
     "read_pipeline_generation", "run_snapshot_pipeline",
