@@ -7,14 +7,14 @@
   <link rel="stylesheet" href="/css/tokens.css">
   <link rel="stylesheet" href="/css/control-console.css">
 </head>
-<body data-workspace-tone="light">
+<body data-workspace-tone="dark">
   <main class="control-shell" id="controlConsole">
     <header class="control-hero">
       <div class="control-hero-copy">
         <p class="control-eyebrow">QTRADE / OPERATIONS</p>
         <h1>数据与运行</h1>
         <p class="control-subtitle">集中查看服务、数据新鲜度、主板池与研究方案状态。</p>
-        <p class="control-safety">只读控制台：不会执行交易或系统命令。</p>
+        <p class="control-safety">仅管理研究数据更新；不会执行交易或系统命令。</p>
       </div>
       <div class="control-actions" aria-label="控制台操作">
         <span class="control-state" id="controlState" role="status">正在读取状态…</span>
@@ -23,51 +23,19 @@
       </div>
     </header>
 
-    <div class="control-notice" id="controlNotice" role="status" aria-live="polite" hidden></div>
-
-    <section class="deepseek-chat-panel" id="deepseekChatPanel" aria-labelledby="deepseekChatTitle">
-      <div class="deepseek-chat-heading">
-        <div class="deepseek-chat-copy">
-          <p class="control-card-kicker">OPTIONAL / READ ONLY</p>
-          <h2 id="deepseekChatTitle">DeepSeek 对话 <span class="deepseek-chat-badge">实验性、只读</span></h2>
-          <p class="deepseek-chat-safety">不会执行交易、系统命令、脚本或配置修改。用户文本和脱敏 QTrade 汇总可能发送给 DeepSeek，并可能产生费用。</p>
-          <p class="deepseek-chat-safety">本面板不显示或输入密钥；功能状态由本地 QTrade 服务决定。</p>
-        </div>
-        <div class="deepseek-chat-actions">
-          <span class="control-state" id="deepseekChatState" role="status" aria-live="polite">正在读取状态…</span>
-          <button class="control-button" id="deepseekChatToggle" type="button" aria-expanded="false" aria-controls="deepseekChatBody">展开面板</button>
-        </div>
+    <section class="control-availability" aria-label="当前研究数据可用性">
+      <div class="control-availability-primary">
+        <span>当前完整可用数据</span>
+        <strong id="currentCompleteDate">未确认</strong>
+        <small>仅在四阶段完成并通过一致性验证后更新</small>
       </div>
-      <div class="deepseek-chat-body" id="deepseekChatBody" hidden>
-        <p class="deepseek-chat-notice" id="deepseekChatNotice" role="status" aria-live="polite"></p>
-        <ol class="deepseek-chat-history" id="deepseekChatHistory" aria-label="对话记录"></ol>
-        <div class="deepseek-chat-compose">
-          <label class="deepseek-chat-label" for="deepseekChatInput">发送只读问题
-            <textarea id="deepseekChatInput" maxlength="2000" rows="4" disabled placeholder="功能就绪后输入问题"></textarea>
-          </label>
-          <div class="deepseek-chat-compose-footer">
-            <span class="deepseek-chat-counter" id="deepseekChatCounter" aria-live="polite">0 / 2000</span>
-            <div class="deepseek-chat-buttons">
-              <button class="control-button control-button-primary" id="deepseekChatSend" type="button" disabled>发送</button>
-              <button class="control-button" id="deepseekChatCancel" type="button" disabled hidden>停止等待</button>
-            </div>
-          </div>
-        </div>
-      </div>
+      <div class="control-availability-date"><span>门户快照</span><strong id="currentPortalDate">未确认</strong></div>
+      <div class="control-availability-date"><span>本次目标</span><strong id="currentTargetDate">未确认</strong></div>
     </section>
 
-    <section class="control-grid" aria-label="QTrade 状态卡片">
-      <article class="control-card" id="cardSystem">
-        <div class="control-card-heading">
-          <div>
-            <p class="control-card-kicker">SYSTEM</p>
-            <h2>系统状态</h2>
-          </div>
-          <span class="control-card-mark" aria-hidden="true">●</span>
-        </div>
-        <div class="control-card-body" id="systemBody"></div>
-      </article>
+    <div class="control-notice" id="controlNotice" role="status" aria-live="polite" hidden></div>
 
+    <section class="control-grid" aria-label="QTrade 状态卡片">
       <article class="control-card" id="cardPipeline">
         <div class="control-card-heading">
           <div>
@@ -91,6 +59,17 @@
             <span data-update-output="sync">同步：未确认</span>
           </div>
         </div>
+      </article>
+
+      <article class="control-card" id="cardSystem">
+        <div class="control-card-heading">
+          <div>
+            <p class="control-card-kicker">SYSTEM</p>
+            <h2>系统状态</h2>
+          </div>
+          <span class="control-card-mark" aria-hidden="true">●</span>
+        </div>
+        <div class="control-card-body" id="systemBody"></div>
       </article>
 
       <article class="control-card" id="cardUniverse">
@@ -136,6 +115,37 @@
         </div>
         <div class="control-card-body" id="harnessBody"></div>
       </article>
+    </section>
+
+    <section class="deepseek-chat-panel" id="deepseekChatPanel" aria-labelledby="deepseekChatTitle">
+      <div class="deepseek-chat-heading">
+        <div class="deepseek-chat-copy">
+          <p class="control-card-kicker">OPTIONAL / READ ONLY</p>
+          <h2 id="deepseekChatTitle">DeepSeek 对话 <span class="deepseek-chat-badge">实验性、只读</span></h2>
+          <p class="deepseek-chat-safety">不会执行交易、系统命令、脚本或配置修改。用户文本和脱敏 QTrade 汇总可能发送给 DeepSeek，并可能产生费用。</p>
+          <p class="deepseek-chat-safety">本面板不显示或输入密钥；功能状态由本地 QTrade 服务决定。</p>
+        </div>
+        <div class="deepseek-chat-actions">
+          <span class="control-state" id="deepseekChatState" role="status" aria-live="polite">正在读取状态…</span>
+          <button class="control-button" id="deepseekChatToggle" type="button" aria-expanded="false" aria-controls="deepseekChatBody">展开面板</button>
+        </div>
+      </div>
+      <div class="deepseek-chat-body" id="deepseekChatBody" hidden>
+        <p class="deepseek-chat-notice" id="deepseekChatNotice" role="status" aria-live="polite"></p>
+        <ol class="deepseek-chat-history" id="deepseekChatHistory" aria-label="对话记录"></ol>
+        <div class="deepseek-chat-compose">
+          <label class="deepseek-chat-label" for="deepseekChatInput">发送只读问题
+            <textarea id="deepseekChatInput" maxlength="2000" rows="4" disabled placeholder="功能就绪后输入问题"></textarea>
+          </label>
+          <div class="deepseek-chat-compose-footer">
+            <span class="deepseek-chat-counter" id="deepseekChatCounter" aria-live="polite">0 / 2000</span>
+            <div class="deepseek-chat-buttons">
+              <button class="control-button control-button-primary" id="deepseekChatSend" type="button" disabled>发送</button>
+              <button class="control-button" id="deepseekChatCancel" type="button" disabled hidden>停止等待</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </section>
 
     <nav class="control-navigation" aria-label="QTrade 页面导航">

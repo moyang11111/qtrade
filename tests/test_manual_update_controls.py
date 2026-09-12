@@ -722,7 +722,7 @@ def test_manual_update_dom_flow_uses_fixed_payload_and_safe_states():
         const ids = [
           'controlState', 'controlNotice', 'controlRefresh', 'controlCopy',
           'manualUpdateButton', 'manualUpdateHint', 'manualUpdateStatus', 'manualUpdateProgress',
-          'manualUpdateOutputs',
+          'manualUpdateOutputs', 'currentCompleteDate', 'currentPortalDate', 'currentTargetDate',
           'systemBody', 'pipelineBody', 'universeBody', 'opportunityBody',
           'factorBody', 'harnessBody', 'deepseekChatPanel', 'deepseekChatBody',
           'deepseekChatState', 'deepseekChatToggle', 'deepseekChatNotice',
@@ -772,7 +772,10 @@ def test_manual_update_dom_flow_uses_fixed_payload_and_safe_states():
         const manualStatuses = [
           { state: 'idle', trade_date: '2026-08-28', reason: 'before_cutoff', outputs: {} },
           { state: 'accepted', trade_date: '2026-08-28', reason: 'accepted', outputs: {} },
-          { state: 'running', trade_date: '2026-08-28', reason: 'running', outputs: { portal: true } },
+          { state: 'running', trade_date: '2026-08-28', reason: 'running', outputs: { portal: true },
+            current_complete_date: '2026-08-27', current_portal_date: '2026-08-27',
+            pipeline_progress: { completed: 1, total: 4 },
+            stock_progress: { completed: 1200, total: 3617, failed: 0, pending: 2417 } },
           { state: 'success', trade_date: '2026-08-28', reason: 'completed',
             finished_at: '2026-08-28T18:31:00',
             outputs: { portal: true, factors: true, decision: true, sync: true } },
@@ -822,12 +825,17 @@ def test_manual_update_dom_flow_uses_fixed_payload_and_safe_states():
           await flush();
           assert.equal(elements.manualUpdateButton.disabled, false);
           assert.match(elements.manualUpdateStatus.textContent, /18:30/);
+          assert.match(elements.manualUpdateProgress.textContent, /未确认/);
           elements.manualUpdateButton.click();
           await flush();
           assert.match(elements.manualUpdateStatus.textContent, /已接收/);
           assert.equal(elements.manualUpdateButton.disabled, true);
           await runTimer();
           assert.match(elements.manualUpdateStatus.textContent, /更新中/);
+          assert.equal(elements.currentCompleteDate.textContent, '2026-08-27');
+          assert.equal(elements.currentPortalDate.textContent, '2026-08-27');
+          assert.equal(elements.currentTargetDate.textContent, '2026-08-28');
+          assert.match(elements.manualUpdateProgress.textContent, /1200\/3617/);
           await runTimer();
           assert.match(elements.manualUpdateStatus.textContent, /已成功/);
           assert.equal(elements.manualUpdateButton.disabled, false);

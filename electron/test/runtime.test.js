@@ -16,6 +16,14 @@ test('desktop startup allows a bounded full-cache initialization window', () => 
   assert.equal(runtime.DEFAULT_STARTUP_TIMEOUT_MS, 60_000);
 });
 
+test('desktop window allows the collapsible research layout', () => {
+  const main = fs.readFileSync(path.join(PROJECT_ROOT, 'electron', 'main.js'), 'utf8');
+  assert.match(main, /minWidth:\s*760/);
+  assert.match(main, /backgroundColor:\s*'#0B111B'/);
+  assert.match(main, /contextIsolation:\s*true/);
+  assert.match(main, /sandbox:\s*true/);
+});
+
 function preflightOutput({
   python = 'C:\\Python312\\python.exe',
   version = '3.12.0',

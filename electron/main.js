@@ -35,11 +35,11 @@ function createWindow(url, paths) {
   const window = new BrowserWindow({
     width: 1440,
     height: 920,
-    minWidth: 1000,
+    minWidth: 760,
     minHeight: 650,
     title: 'QTrade',
     ...(icon ? { icon } : {}),
-    backgroundColor: '#0B0E14',
+    backgroundColor: '#0B111B',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,

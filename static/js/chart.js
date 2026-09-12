@@ -28,30 +28,38 @@ const ChartManager = (() => {
 
     // ---- 初始化 ----
     _init() {
+      const css = getComputedStyle(document.documentElement);
+      const token = (name) => css.getPropertyValue(name).trim();
+      const palette = {
+        panel: token('--qt-bg-card'), grid: token('--qt-border'), text: token('--qt-text-secondary'),
+        up: token('--qt-color-up'), down: token('--qt-color-down'),
+        brand: token('--qt-color-brand'), warn: token('--qt-color-signal'),
+        alt: token('--qt-color-indicator-alt'),
+      };
       const c = LightweightCharts.createChart(this.container, {
         layout: {
-          background: { type: 'solid', color: '#131316' },
-          textColor: '#A1A1AA',
+          background: { type: 'solid', color: palette.panel },
+          textColor: palette.text,
         },
         grid: {
-          vertLines: { color: '#1c1c22' },
-          horzLines: { color: '#1c1c22' },
+          vertLines: { color: palette.grid },
+          horzLines: { color: palette.grid },
         },
         crosshair: { mode: 1 },
-        rightPriceScale: { borderColor: '#2a2a30' },
-        timeScale: { borderColor: '#2a2a30', timeVisible: true, secondsVisible: false },
+        rightPriceScale: { borderColor: palette.grid },
+        timeScale: { borderColor: palette.grid, timeVisible: true, secondsVisible: false },
         handleScroll: { vertTouchDrag: false },
       });
       this.chart = c;
 
       // ---- Pane 0: K 线（A股习惯：红涨/绿跌） ----
       this.series.candle = c.addCandlestickSeries({
-        upColor: '#EB5757',
-        downColor: '#27AE60',
-        borderUpColor: '#EB5757',
-        borderDownColor: '#27AE60',
-        wickUpColor: '#EB5757',
-        wickDownColor: '#27AE60',
+        upColor: palette.up,
+        downColor: palette.down,
+        borderUpColor: palette.up,
+        borderDownColor: palette.down,
+        wickUpColor: palette.up,
+        wickDownColor: palette.down,
       }, PANE_MAIN);
 
       // 成交量（overlay 在 Pane 0 底部）
@@ -66,7 +74,7 @@ const ChartManager = (() => {
       });
 
       // 均线（暗色数据密室风格）
-      const maColors = { ma5: '#F2C94C', ma10: '#5E6AD2', ma20: '#8B5CF6', ma60: '#A1A1AA' };
+      const maColors = { ma5: palette.warn, ma10: palette.brand, ma20: palette.alt, ma60: palette.text };
       this.series.ma = {};
       for (const [key, color] of Object.entries(maColors)) {
         this.series.ma[key] = c.addLineSeries({
@@ -79,27 +87,27 @@ const ChartManager = (() => {
 
       // 布林带
       this.series.boll = {
-        upper: c.addLineSeries({ color: '#EB5757', lineWidth: 1.5, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }, PANE_MAIN),
-        middle: c.addLineSeries({ color: '#F2C94C', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }, PANE_MAIN),
-        lower: c.addLineSeries({ color: '#27AE60', lineWidth: 1.5, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }, PANE_MAIN),
+        upper: c.addLineSeries({ color: palette.up, lineWidth: 1.5, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }, PANE_MAIN),
+        middle: c.addLineSeries({ color: palette.warn, lineWidth: 1, priceLineVisible: false, lastValueVisible: false }, PANE_MAIN),
+        lower: c.addLineSeries({ color: palette.down, lineWidth: 1.5, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }, PANE_MAIN),
       };
 
       // ---- Pane 1: MACD ----
       this.series.macd = {
-        line: c.addLineSeries({ color: '#5E6AD2', lineWidth: 1, priceLineVisible: false }, PANE_MACD),
-        signal: c.addLineSeries({ color: '#8B5CF6', lineWidth: 1, priceLineVisible: false }, PANE_MACD),
+        line: c.addLineSeries({ color: palette.brand, lineWidth: 1, priceLineVisible: false }, PANE_MACD),
+        signal: c.addLineSeries({ color: palette.alt, lineWidth: 1, priceLineVisible: false }, PANE_MACD),
         histogram: c.addHistogramSeries({ priceLineVisible: false, lastValueVisible: false }, PANE_MACD),
       };
 
       // ---- Pane 2: RSI ----
-      this.series.rsi = c.addLineSeries({ color: '#F2C94C', lineWidth: 1, priceLineVisible: false }, PANE_RSI);
+      this.series.rsi = c.addLineSeries({ color: palette.warn, lineWidth: 1, priceLineVisible: false }, PANE_RSI);
       // RSI 30/70 参考线
       const rsi70 = this.series.rsi.createPriceLine({
-        price: 70, color: 'rgba(235,87,87,0.5)',
+        price: 70, color: token('--qt-color-up-guide'),
         lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '',
       });
       const rsi30 = this.series.rsi.createPriceLine({
-        price: 30, color: 'rgba(39,174,96,0.5)',
+        price: 30, color: token('--qt-color-down-guide'),
         lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '',
       });
       this.rsiRefLines = [rsi70, rsi30];
