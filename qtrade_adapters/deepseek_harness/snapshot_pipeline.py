@@ -351,7 +351,8 @@ def load_current_bound_plan_inputs(
         manifest.get("schema_version") != portal_refresh.HISTORY_SCHEMA_VERSION
         or manifest.get("history_window") != portal_refresh.HISTORY_WINDOW
         or manifest.get("history_schema") != portal_refresh.HISTORY_DB_SCHEMA
-        or manifest.get("target_date") != target
+        or not isinstance(manifest.get("target_date"), str)
+        or manifest["target_date"] > target
     ):
         raise PortalPlanError("universe_unavailable")
     raw_symbols = manifest.get("symbols")
@@ -370,6 +371,7 @@ def load_current_bound_plan_inputs(
         "metadata": metadata,
         "calendar_dates": tuple(calendar_dates),
         "target_date": target,
+        "history_db": str(snapshot.database),
     }
 
 
@@ -406,15 +408,19 @@ def _build_bound_plan_from_inputs(
     metadata,
     calendar_dates,
     target_date,
+    history_db=None,
 ):
     """Build a plan only from an already server-bound, serialized input set."""
 
-    return build_bound_plan(
+    plan, provider = build_bound_plan(
         symbols=symbols,
         metadata=metadata,
         target_date=target_date,
         calendar_dates=calendar_dates,
     )
+    if history_db is not None:
+        provider.history_db = Path(history_db)
+    return plan, provider
 
 
 def _paths(state_dir: str | Path | None, user_data_dir: str | Path | None) -> PipelinePaths:
@@ -1247,6 +1253,7 @@ def run_snapshot_pipeline(
                         symbols=symbols,
                         metadata=dict(metadata),
                         calendar_dates=dates,
+                        history_db=inputs.get("history_db"),
                     )
                     plan, provider = _run_owned_call(
                         builder,
@@ -1324,13 +1331,15 @@ def run_snapshot_pipeline(
         classified_suspended = stock_failed if worker_reason == "suspended" else 0
         data_quality = {
             "history_sufficient": max(0, stock_completed),
-            "insufficient_history": classified_history_failure + excluded_by_reason.get("insufficient_history", 0),
+            "insufficient_history": classified_history_failure + excluded_by_reason.get("insufficient_history", 0) + planned_excluded.get("cache_insufficient_history", 0),
             "fetch_failed": classified_fetch_failure if worker_reason in {"provider_failed", "provider_unreachable", "item_timeout"} else None,
             "suspended": classified_suspended + planned_excluded.get("suspended", 0) + excluded_by_reason.get("suspended", 0),
             "unknown": max(0, stock_total - stock_completed - stock_excluded - classified_fetch_failure - classified_history_failure - classified_suspended),
             "excluded": sum(planned_excluded.values()) + stock_excluded,
             "risk_warning": planned_excluded.get("risk_warning", 0),
             "target_date_missing": excluded_by_reason.get("target_date_missing", 0),
+            "cache_missing": planned_excluded.get("cache_missing", 0),
+            "cache_insufficient_history": planned_excluded.get("cache_insufficient_history", 0),
         }
         if result.get("state") != "success":
             worker_state = result.get("state")

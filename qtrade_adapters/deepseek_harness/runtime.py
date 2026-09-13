@@ -907,7 +907,7 @@ def _safe_data_quality(value):
     if not isinstance(value, dict):
         return {}
     result = {}
-    for key in ("history_sufficient", "insufficient_history", "suspended", "fetch_failed", "unknown", "excluded", "risk_warning", "target_date_missing"):
+    for key in ("history_sufficient", "insufficient_history", "suspended", "fetch_failed", "unknown", "excluded", "risk_warning", "target_date_missing", "cache_missing", "cache_insufficient_history"):
         count = value.get(key)
         result[key] = count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else None
     return result

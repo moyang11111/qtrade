@@ -339,11 +339,11 @@ def _validated_plan(value: object) -> PortalRefreshPlan:
     if token != expected_token:
         raise PortalWorkerError("universe_unavailable")
     excluded = value.excluded_by_reason
-    if not isinstance(excluded, tuple) or len(excluded) > 4:
+    if not isinstance(excluded, tuple) or len(excluded) > 5:
         raise PortalWorkerError("universe_unavailable")
     if any(
         not isinstance(item, tuple) or len(item) != 2
-        or item[0] not in {"risk_warning", "suspended", "not_tradable"}
+        or item[0] not in {"risk_warning", "suspended", "not_tradable", "cache_missing", "cache_insufficient_history"}
         or not isinstance(item[1], int) or isinstance(item[1], bool)
         or item[1] < 0 or item[1] > portal_refresh.MAX_SYMBOLS
         for item in excluded

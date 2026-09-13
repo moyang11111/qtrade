@@ -474,6 +474,23 @@ def test_bound_plan_inputs_use_only_verified_current_overlay(
     assert external_calls == []
 
 
+def test_next_day_plan_reuses_verified_portal_history(tmp_path: Path) -> None:
+    user_data, state, _portal = _fixture(tmp_path)
+    next_day = "2026-08-31"
+    inputs = snapshot_pipeline.load_current_bound_plan_inputs(
+        state_dir=state, user_data_dir=user_data, target_date=next_day,
+        calendar_dates=[TARGET, next_day],
+    )
+    assert Path(inputs["history_db"]).is_file()
+    plan, provider = snapshot_pipeline._build_bound_plan_from_inputs(
+        symbols=inputs["symbols"], metadata=inputs["metadata"],
+        calendar_dates=[TARGET, next_day], target_date=next_day,
+        history_db=inputs["history_db"],
+    )
+    assert plan.target_date == next_day
+    assert provider.history_db == Path(inputs["history_db"])
+
+
 def test_missing_pointer_requests_bootstrap_but_corrupt_pointer_fails_closed(
     tmp_path: Path,
 ) -> None:

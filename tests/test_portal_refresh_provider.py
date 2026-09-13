@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import datetime
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
 
 from qtrade_adapters.deepseek_harness.portal_refresh_provider import (
+    AksharePortalProvider,
     PortalHistoryError,
     PortalPlanError,
     _akshare_network_guard,
@@ -222,6 +224,47 @@ def test_provider_history_is_target_anchored_and_bounded(monkeypatch):
         "adjust": "qfq",
         "timeout": 20,
     }]
+
+
+def test_history_uses_cache_and_fetches_only_recent_gap(tmp_path, monkeypatch):
+    db = tmp_path / "bars.db"
+    target = datetime.date(2026, 8, 28)
+    with sqlite3.connect(db) as connection:
+        connection.execute("CREATE TABLE daily_bar (code TEXT, date TEXT, open REAL, high REAL, low REAL, close REAL, volume REAL, adjust TEXT)")
+        connection.executemany(
+            "INSERT INTO daily_bar VALUES (?,?,?,?,?,?,?,?)",
+            [("600001.SH", (target - datetime.timedelta(days=320 - index)).isoformat(), 10, 11, 9, 10.5, 1000, "qfq") for index in range(320)],
+        )
+        connection.execute(
+            "INSERT INTO daily_bar VALUES (?,?,?,?,?,?,?,?)",
+            ("600001.SH", target.isoformat(), 10, 11, 9, 10.5, None, "qfq"),
+        )
+    provider = AksharePortalProvider({"600001": {"suspended": False}}, history_db=db)
+    calls = []
+
+    def fresh(code, trade_date, start_date, minimum, *, all_rows=False):
+        calls.append((code, trade_date, start_date, minimum, all_rows))
+        return [
+            {"code": code, "date": (target - datetime.timedelta(days=offset)).isoformat(),
+             "open": 10, "high": 11, "low": 9, "close": 10.5, "volume": 1000,
+             "adjust": "qfq"}
+            for offset in (1, 0)
+        ]
+
+    monkeypatch.setattr(provider, "_fetch_rows", fresh)
+    result = provider.fetch_history("600001", target.isoformat())
+    assert len(result["rows"]) == 320
+    assert result["rows"][-1]["date"] == target.isoformat()
+    assert calls == [("600001", target.isoformat(), "20260820", 1, True)]
+
+    def inconsistent(*args, **kwargs):
+        rows = fresh(*args, **kwargs)
+        rows[0]["close"] = 12
+        return rows
+
+    monkeypatch.setattr(provider, "_fetch_rows", inconsistent)
+    with pytest.raises(RuntimeError, match="qfq overlap mismatch"):
+        provider.fetch_history("600001", target.isoformat())
 
 
 def test_tencent_qfq_primary_keeps_share_units_and_does_not_call_sina(monkeypatch):

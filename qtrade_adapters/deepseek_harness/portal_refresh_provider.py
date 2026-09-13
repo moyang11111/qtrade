@@ -13,6 +13,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 import math
+import sqlite3
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 import time
@@ -23,7 +24,7 @@ from .portal_refresh import HISTORY_WINDOW
 from .portal_refresh_worker import PortalRefreshPlan, _plan_universe_token
 
 
-PROVIDER_VERSION = "akshare-em-tx-tdx-qfq-v3"
+PROVIDER_VERSION = "akshare-em-tx-cache-qfq-v4"
 _DATE_FORMAT = "%Y-%m-%d"
 # Keep a generous finite bound so malformed calendar responses fail closed.
 _MAX_CALENDAR_DATES = 20_000
@@ -235,10 +236,32 @@ class AksharePortalProvider:
 
     PROVIDER_VERSION = PROVIDER_VERSION
 
-    def __init__(self, metadata: Mapping[str, Mapping[str, object]]):
+    def __init__(self, metadata: Mapping[str, Mapping[str, object]], history_db: Path | None = None):
         self.metadata = {
             code: dict(record) for code, record in metadata.items()
         }
+        self.history_db = history_db
+
+    def _cached_rows(self, code: str, target_date: str) -> list[dict[str, object]]:
+        if self.history_db is None:
+            return []
+        db = self.history_db.resolve()
+        with sqlite3.connect(db.as_uri() + "?mode=ro", uri=True) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            suffix = ".SH" if code.startswith("6") else ".SZ"
+            values = connection.execute(
+                "SELECT date, open, high, low, close, volume FROM daily_bar "
+                "WHERE code=? AND adjust='qfq' AND date<=? "
+                "AND open>0 AND high>0 AND low>0 AND close>0 AND volume>0 "
+                "AND high>=max(open,close) AND low<=min(open,close) "
+                "ORDER BY date DESC LIMIT ?",
+                (code + suffix, target_date, HISTORY_WINDOW),
+            ).fetchall()
+        return [
+            {"code": code, "date": row[0], "open": row[1], "high": row[2],
+             "low": row[3], "close": row[4], "volume": row[5], "adjust": "qfq"}
+            for row in reversed(values)
+        ]
 
     @staticmethod
     def _ak_symbol(symbol: str) -> str:
@@ -318,7 +341,7 @@ class AksharePortalProvider:
             raise PortalHistoryError("target_date_missing")
         return rows
 
-    def _fetch_rows(self, code: str, target_date: str, start_date: str, minimum: int) -> list[dict[str, object]]:
+    def _fetch_rows(self, code: str, target_date: str, start_date: str, minimum: int, *, all_rows: bool = False) -> list[dict[str, object]]:
         quality_reasons: list[str] = []
         provider_failed = False
         for source in ("tencent", "eastmoney"):
@@ -326,7 +349,7 @@ class AksharePortalProvider:
                 rows = self._source_rows(source, code, target_date, start_date)
                 if len(rows) < minimum:
                     raise PortalHistoryError("insufficient_history")
-                return rows[-minimum:]
+                return rows if all_rows else rows[-minimum:]
             except PortalHistoryError as exc:
                 quality_reasons.append(exc.reason)
             except Exception:
@@ -361,10 +384,50 @@ class AksharePortalProvider:
         code = normalize_code(symbol)
         if code is None or code not in self.metadata:
             raise RuntimeError("provider symbol unavailable")
-        target = _datetime.date.fromisoformat(target_date)
-        start = target - _datetime.timedelta(days=600)
-        rows = self._fetch_rows(code, target_date, start.strftime("%Y%m%d"), HISTORY_WINDOW)
+        if self.history_db is None:
+            target = _datetime.date.fromisoformat(target_date)
+            start = target - _datetime.timedelta(days=600)
+            rows = self._fetch_rows(code, target_date, start.strftime("%Y%m%d"), HISTORY_WINDOW)
+            return {"rows": rows, "metadata": dict(self.metadata[code])}
+        cached = self._cached_rows(code, target_date)
+        if len(cached) < HISTORY_WINDOW:
+            raise PortalHistoryError("insufficient_history")
+        latest = _datetime.date.fromisoformat(str(cached[-1]["date"]))
+        if latest >= _datetime.date.fromisoformat(target_date):
+            rows = cached[-HISTORY_WINDOW:]
+        else:
+            # A short overlap detects stale qfq adjustment factors before merging.
+            start = latest - _datetime.timedelta(days=7)
+            fresh = self._fetch_rows(code, target_date, start.strftime("%Y%m%d"), 1, all_rows=True)
+            old_by_date = {str(row["date"]): row for row in cached}
+            overlaps = [row for row in fresh if row["date"] in old_by_date]
+            if not overlaps:
+                raise RuntimeError("qfq overlap unavailable")
+            for row in overlaps:
+                old = old_by_date[str(row["date"])]
+                for field in ("open", "high", "low", "close"):
+                    if not math.isclose(float(row[field]), float(old[field]), abs_tol=0.011, rel_tol=0):
+                        raise RuntimeError("qfq overlap mismatch")
+            merged = {str(row["date"]): row for row in cached}
+            merged.update({str(row["date"]): row for row in fresh})
+            rows = [merged[day] for day in sorted(merged)][-HISTORY_WINDOW:]
+        if len(rows) != HISTORY_WINDOW or rows[-1]["date"] != target_date:
+            raise PortalHistoryError("target_date_missing")
         return {"rows": rows, "metadata": dict(self.metadata[code])}
+
+
+def _cache_history_counts(path: Path, target_date: str) -> dict[str, int]:
+    """Count read-only qfq rows; missing cache is never interpreted as delisting."""
+    db = path.resolve()
+    with sqlite3.connect(db.as_uri() + "?mode=ro", uri=True) as connection:
+        connection.execute("PRAGMA query_only=ON")
+        rows = connection.execute(
+            "SELECT code, COUNT(*) FROM daily_bar WHERE adjust='qfq' AND date<=? "
+            "AND open>0 AND high>0 AND low>0 AND close>0 AND volume>0 "
+            "AND high>=max(open,close) AND low<=min(open,close) GROUP BY code",
+            (target_date,),
+        ).fetchall()
+    return {str(code).split(".", 1)[0]: int(count) for code, count in rows}
 
 
 def build_trusted_plan(
@@ -399,6 +462,8 @@ def build_trusted_plan(
             raise PortalPlanError("universe_unavailable")
         metadata = {}
         excluded_by_reason: dict[str, int] = {}
+        history_db = Path(base_dir) / "data" / "cache" / "bars.db"
+        counts = _cache_history_counts(history_db, target) if adapter_factory is None else None
         for symbol in scanned_symbols:
             code = normalize_code(symbol)
             if code is None or code in metadata:
@@ -416,6 +481,12 @@ def build_trusted_plan(
             if reason is not None:
                 excluded_by_reason[reason] = excluded_by_reason.get(reason, 0) + 1
                 continue
+            if counts is not None:
+                count = counts.get(code, 0)
+                if count < HISTORY_WINDOW:
+                    reason = "cache_missing" if count == 0 else "cache_insufficient_history"
+                    excluded_by_reason[reason] = excluded_by_reason.get(reason, 0) + 1
+                    continue
             metadata[code] = safe
     except PortalPlanError:
         raise
@@ -427,6 +498,8 @@ def build_trusted_plan(
         target_date=target,
         calendar_dates=dates,
     )
+    if adapter_factory is None:
+        provider.history_db = history_db
     return (
         PortalRefreshPlan(
             plan.symbols, plan.target_date, plan.universe_token,
