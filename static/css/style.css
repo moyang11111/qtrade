@@ -623,6 +623,7 @@ body {
   grid-template-columns: 1fr 1fr;
   gap: 10px;
 }
+.modal .param-row[hidden] { display: none; }
 .modal .btn-row { display: flex; gap: 10px; margin-top: 18px; }
 .modal .btn {
   flex: 1;

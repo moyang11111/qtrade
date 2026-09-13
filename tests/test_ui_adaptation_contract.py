@@ -26,7 +26,7 @@ def test_tokens_are_unique_first_loaded_and_preserve_legacy_aliases():
     tokens = _read(TOKENS)
 
     token_link = '<link rel="stylesheet" href="css/tokens.css?v=2">'
-    style_link = '<link rel="stylesheet" href="css/style.css?v=10">'
+    style_link = '<link rel="stylesheet" href="css/style.css?v=11">'
     assert index.count(token_link) == 1
     assert index.count(style_link) == 1
     assert index.index(token_link) < index.index(style_link)
@@ -120,6 +120,7 @@ def test_secondary_surfaces_share_terminal_theme_and_training_modes_are_keyboard
     for mode in ("guess", "trade", "replay"):
         assert re.search(rf'<button[^>]*class="tr-tab[^\"]*"[^>]*data-mode="{mode}"[^>]*aria-pressed=', index)
     assert "t.setAttribute('aria-pressed', String(active))" in training
+    assert ".modal .param-row[hidden] { display: none; }" in style
 
 
 def test_adapter_css_is_scoped_and_hides_only_verified_duplicates():
