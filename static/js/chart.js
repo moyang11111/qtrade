@@ -28,6 +28,11 @@ const ChartManager = (() => {
 
     // ---- 初始化 ----
     _init() {
+      if (typeof LightweightCharts === 'undefined') {
+        this.container.classList.add('chart-unavailable');
+        this.container.textContent = '图表组件未能加载，行情数据仍可查看。请检查网络连接后重启应用。';
+        return;
+      }
       const css = getComputedStyle(document.documentElement);
       const token = (name) => css.getPropertyValue(name).trim();
       const palette = {
@@ -36,6 +41,7 @@ const ChartManager = (() => {
         brand: token('--qt-color-brand'), warn: token('--qt-color-signal'),
         alt: token('--qt-color-indicator-alt'),
       };
+      this.palette = palette;
       const c = LightweightCharts.createChart(this.container, {
         layout: {
           background: { type: 'solid', color: palette.panel },
@@ -118,7 +124,7 @@ const ChartManager = (() => {
     // ---- 数据 ----
     /** 设置 K 线 + 成交量数据 */
     setKline(data) {
-      if (!data || data.length === 0) return;
+      if (!this.chart || !data || data.length === 0) return;
 
       this.series.candle.setData(data.map(d => ({
         time: d.time, open: d.open, high: d.high, low: d.low, close: d.close,
@@ -127,7 +133,7 @@ const ChartManager = (() => {
       this.series.volume.setData(data.map(d => ({
         time: d.time,
         value: d.volume,
-        color: d.close >= d.open ? 'rgba(235,87,87,0.28)' : 'rgba(39,174,96,0.28)',
+        color: d.close >= d.open ? this.palette.up : this.palette.down,
       })));
 
       this.chart.timeScale().fitContent();
@@ -135,7 +141,7 @@ const ChartManager = (() => {
 
     /** 设置指标数据（MA/MACD/RSI/BOLL） */
     setIndicators(ind) {
-      if (!ind) return;
+      if (!this.chart || !ind) return;
 
       // MA（后端已带 time，直接对齐）
       if (ind.mas) {
@@ -169,7 +175,7 @@ const ChartManager = (() => {
         this.series.macd.histogram.setData(ind.macd.map(d => ({
           time: d.time,
           value: d.histogram,
-          color: d.histogram >= 0 ? 'rgba(235,87,87,0.45)' : 'rgba(39,174,96,0.45)',
+          color: d.histogram >= 0 ? this.palette.up : this.palette.down,
         })));
       }
 
@@ -220,6 +226,7 @@ const ChartManager = (() => {
 
     /** 调整图表尺寸（容器变化时调用） */
     resize() {
+      if (!this.chart) return;
       this.chart.applyOptions({
         width: this.container.clientWidth,
         height: this.container.clientHeight,

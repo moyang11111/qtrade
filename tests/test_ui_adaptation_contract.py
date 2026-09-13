@@ -26,7 +26,7 @@ def test_tokens_are_unique_first_loaded_and_preserve_legacy_aliases():
     tokens = _read(TOKENS)
 
     token_link = '<link rel="stylesheet" href="css/tokens.css?v=2">'
-    style_link = '<link rel="stylesheet" href="css/style.css?v=8">'
+    style_link = '<link rel="stylesheet" href="css/style.css?v=9">'
     assert index.count(token_link) == 1
     assert index.count(style_link) == 1
     assert index.index(token_link) < index.index(style_link)
