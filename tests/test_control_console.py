@@ -64,7 +64,13 @@ def test_control_page_loads_qtrade_assets_and_only_fixed_get_cards():
     assert html.index('href="/css/tokens.css"') < html.index(
         'href="/css/control-console.css"'
     )
-    assert '<script src="/js/control.js" defer></script>' in html
+    assert '<script src="/js/control.js?v=2" defer></script>' in html
+    assert 'data-workspace-tone="dark"' in html
+    assert html.index('id="currentCompleteDate"') < html.index('id="cardPipeline"')
+    assert html.index('id="cardPipeline"') < html.index('id="deepseekChatPanel"')
+    for hook in ("currentCompleteDate", "currentPortalDate", "currentTargetDate"):
+        assert f'id="{hook}"' in html
+        assert f"getElementById('{hook}')" in js
     for endpoint in (
         "/api/health",
         "/api/update/status",

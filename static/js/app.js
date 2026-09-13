@@ -183,6 +183,7 @@
 
   async function selectStock(symbol) {
     state.activeSymbol = symbol;
+    setCompactPanel('watch', false);
 
     // 更新最近浏览
     const idx = recentStocks.indexOf(symbol);
@@ -535,10 +536,18 @@
   }
 
   // ======================== 决策台页面 ========================
+  function setCompactPanel(panel, open) {
+    const button = $(panel === 'nav' ? 'navToggle' : 'watchToggle');
+    const className = panel === 'nav' ? 'nav-open' : 'watch-open';
+    if (!button) return;
+    document.body.classList.toggle(className, open);
+    button.setAttribute('aria-expanded', String(open));
+    if (panel === 'nav') button.setAttribute('aria-label', open ? '收起导航' : '展开导航');
+  }
+
   function setRailActive(page) {
     state.activePage = page;
-    const darkWorkspacePages = new Set(['market', 'training', 'autopaper']);
-    document.body.dataset.workspaceTone = darkWorkspacePages.has(page) ? 'dark' : 'light';
+    document.body.dataset.workspaceTone = 'dark';
     document.querySelectorAll('.deck-item').forEach(b =>
       b.classList.toggle('active', b.dataset.page === page));
   }
@@ -1157,6 +1166,22 @@
 
   // ======================== 事件绑定 ========================
   function bindEvents() {
+    $('navToggle').addEventListener('click', () => setCompactPanel('nav', !document.body.classList.contains('nav-open')));
+    $('navClose').addEventListener('click', () => {
+      setCompactPanel('nav', false);
+      $('navToggle').focus();
+    });
+    $('watchToggle').addEventListener('click', () => setCompactPanel('watch', !document.body.classList.contains('watch-open')));
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        const navWasOpen = document.body.classList.contains('nav-open');
+        const watchWasOpen = document.body.classList.contains('watch-open');
+        setCompactPanel('nav', false);
+        setCompactPanel('watch', false);
+        if (navWasOpen) $('navToggle').focus();
+        else if (watchWasOpen) $('watchToggle').focus();
+      }
+    });
     // 搜索
     els.searchInput.addEventListener('input', renderStockList);
 
@@ -1167,6 +1192,9 @@
     // 决策台侧边导航
     document.querySelectorAll('.deck-item').forEach(btn => {
       btn.addEventListener('click', () => {
+        const navWasOpen = document.body.classList.contains('nav-open');
+        setCompactPanel('nav', false);
+        if (navWasOpen) $('navToggle').focus();
         const page = btn.dataset.page;
         if (switchPage(page)) return;
         if (page === 'control') showEmbedPage('pageControl', 'control');

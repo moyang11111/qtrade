@@ -87,6 +87,9 @@
     manualUpdateProgress: document.getElementById('manualUpdateProgress'),
     manualUpdateQuality: document.getElementById('manualUpdateQuality'),
     manualUpdateOutputs: document.getElementById('manualUpdateOutputs'),
+    currentCompleteDate: document.getElementById('currentCompleteDate'),
+    currentPortalDate: document.getElementById('currentPortalDate'),
+    currentTargetDate: document.getElementById('currentTargetDate'),
     system: document.getElementById('systemBody'),
     pipeline: document.getElementById('pipelineBody'),
     universe: document.getElementById('universeBody'),
@@ -370,16 +373,16 @@
       },
       pipeline_progress: {
         completed: Number.isInteger(payload.pipeline_progress?.completed) && payload.pipeline_progress.completed >= 0
-          ? payload.pipeline_progress.completed : 0,
+          ? payload.pipeline_progress.completed : null,
         total: Number.isInteger(payload.pipeline_progress?.total) && payload.pipeline_progress.total >= 0
-          ? payload.pipeline_progress.total : 4,
+          ? payload.pipeline_progress.total : null,
         current: typeof payload.pipeline_progress?.current === 'string'
           && /^[a-z][a-z0-9_]{0,47}$/.test(payload.pipeline_progress.current)
           ? payload.pipeline_progress.current : null,
       },
       stock_progress: Object.fromEntries(['completed', 'total', 'failed', 'pending'].map((key) => [
         key, Number.isInteger(payload.stock_progress?.[key]) && payload.stock_progress[key] >= 0
-          ? payload.stock_progress[key] : 0,
+          ? payload.stock_progress[key] : null,
       ])),
       data_quality: Object.fromEntries(['history_sufficient', 'insufficient_history', 'suspended', 'fetch_failed', 'unknown', 'excluded', 'risk_warning', 'target_date_missing'].map((key) => [
         key, Number.isInteger(payload.data_quality?.[key]) && payload.data_quality[key] >= 0
@@ -878,6 +881,9 @@
       els.manualUpdate.disabled = true;
       els.manualUpdateStatus.textContent = '手动更新暂不可用，请稍后刷新。';
       els.manualUpdateStatus.dataset.state = 'error';
+      if (els.currentCompleteDate) els.currentCompleteDate.textContent = '未确认';
+      if (els.currentPortalDate) els.currentPortalDate.textContent = '未确认';
+      if (els.currentTargetDate) els.currentTargetDate.textContent = '未确认';
       if (els.manualUpdateProgress) els.manualUpdateProgress.textContent = '进度：未确认';
       if (els.manualUpdateQuality) els.manualUpdateQuality.textContent = '数据质量：未确认';
       if (els.manualUpdateOutputs) {
@@ -894,17 +900,33 @@
     const stateValue = payload.state;
     const active = stateValue === 'accepted' || stateValue === 'running';
     els.manualUpdate.disabled = active;
+    if (els.currentCompleteDate) els.currentCompleteDate.textContent = payload.current_complete_date || '未确认';
+    if (els.currentPortalDate) els.currentPortalDate.textContent = payload.current_portal_date || '未确认';
+    if (els.currentTargetDate) els.currentTargetDate.textContent = payload.trade_date || '未确认';
     els.manualUpdateStatus.textContent = `状态：${manualStateLabel(stateValue)} · 当前完整数据：${payload.current_complete_date || '未确认'} · 门户快照：${payload.current_portal_date || '未确认'} · 本次目标：${payload.trade_date || '解析中'} · ${manualReasonLabel(payload.reason)}`;
     els.manualUpdateStatus.dataset.state = ['success', 'portal_success'].includes(stateValue) ? 'good'
       : ['failure', 'aborted', 'timed_out'].includes(stateValue) ? 'error' : '';
+    if (payload.reason === 'status_unavailable') {
+      if (els.manualUpdateProgress) els.manualUpdateProgress.textContent = '进度：未确认';
+      if (els.manualUpdateQuality) els.manualUpdateQuality.textContent = '数据质量：未确认';
+      if (els.manualUpdateOutputs) {
+        const labels = { portal: '门户', factors: '因子', decision: '决策', sync: '同步' };
+        document.querySelectorAll('[data-update-output]').forEach((node) => {
+          node.textContent = `${labels[node.dataset.updateOutput] || '结果'}：未确认`;
+          node.dataset.state = '';
+        });
+      }
+      return;
+    }
     if (els.manualUpdateProgress) {
       const progress = payload.pipeline_progress || {};
       const stocks = payload.stock_progress || {};
+      const shown = (value) => Number.isInteger(value) ? String(value) : '未确认';
       const current = progress.current ? ` · 当前步骤：${progress.current}` : '';
       const elapsed = Number.isFinite(payload.elapsed_seconds)
         ? ` · 已用 ${Math.floor(payload.elapsed_seconds)} 秒` : '';
       els.manualUpdateProgress.textContent =
-        `流水线：${progress.completed || 0}/${progress.total || 4}${current} · 股票：${stocks.completed || 0}/${stocks.total || 0}，失败 ${stocks.failed || 0}，待处理 ${stocks.pending || 0}${elapsed}`;
+        `流水线：${shown(progress.completed)}/${shown(progress.total)}${current} · 股票：${shown(stocks.completed)}/${shown(stocks.total)}，失败 ${shown(stocks.failed)}，待处理 ${shown(stocks.pending)}${elapsed}`;
     }
     if (els.manualUpdateQuality) {
       const quality = payload.data_quality || {};

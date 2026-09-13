@@ -25,16 +25,16 @@ def test_tokens_are_unique_first_loaded_and_preserve_legacy_aliases():
     style = _read(STYLE)
     tokens = _read(TOKENS)
 
-    token_link = '<link rel="stylesheet" href="css/tokens.css?v=1">'
-    style_link = '<link rel="stylesheet" href="css/style.css?v=7">'
+    token_link = '<link rel="stylesheet" href="css/tokens.css?v=2">'
+    style_link = '<link rel="stylesheet" href="css/style.css?v=11">'
     assert index.count(token_link) == 1
     assert index.count(style_link) == 1
     assert index.index(token_link) < index.index(style_link)
-    assert "--qt-dark-page: #0c1523" in tokens
-    assert "--qt-light-page: #edf1f5" in tokens
-    assert "--qt-color-brand: #55ced1" in tokens
-    assert "--qt-color-up: #ff777d" in tokens
-    assert "--qt-color-down: #59c7a0" in tokens
+    assert "--qt-dark-page: #0b111b" in tokens
+    assert "--qt-dark-panel: #101a27" in tokens
+    assert "--qt-color-brand: #59d6c3" in tokens
+    assert "--qt-color-up: #ff7685" in tokens
+    assert "--qt-color-down: #58c7a1" in tokens
     assert "prefers-reduced-motion: reduce" in tokens
     assert "--bg-primary: var(--qt-bg-primary)" in style
     assert "--up: var(--qt-color-up)" in style
@@ -80,26 +80,63 @@ def test_tokens_and_adapter_preserve_a_share_red_up_green_down_semantics():
     tokens = _read(TOKENS)
     adapter = _read(ADAPTER_CSS)
     style = _read(STYLE)
+    chart = _read(PROJECT_ROOT / "static" / "js" / "chart.js")
 
-    assert "--qt-color-up: #ff777d" in tokens
-    assert "--qt-color-down: #59c7a0" in tokens
+    assert "--qt-color-up: #ff7685" in tokens
+    assert "--qt-color-down: #58c7a1" in tokens
     assert ".d-up" in adapter and "var(--qt-color-up)" in adapter
     assert ".d-down" in adapter and "var(--qt-color-down)" in adapter
     assert "--red: var(--qt-color-up)" in style
     assert "--green: var(--qt-color-down)" in style
+    assert "token('--qt-color-up')" in chart
+    assert "token('--qt-color-down')" in chart
+    assert "'#EB5757'" not in chart and "'#27AE60'" not in chart
 
 
-def test_hybrid_workbench_groups_navigation_and_switches_tone():
+def test_unified_dark_workbench_groups_navigation_and_keeps_compact_entries():
     index = _read(INDEX)
     style = _read(STYLE)
     app = _read(PROJECT_ROOT / "static" / "js" / "app.js")
 
-    for group in ("市场", "研究", "演练", "系统"):
+    for group in ("市场观察", "策略研究", "模拟与风险", "运行管理"):
         assert f'<div class="deck-group-label">{group}</div>' in index
     assert 'aria-label="工作区导航"' in index
-    assert "darkWorkspacePages" in app
-    assert "document.body.dataset.workspaceTone" in app
-    assert 'body[data-workspace-tone="light"]' in style
+    assert "document.body.dataset.workspaceTone = 'dark'" in app
+    assert 'body[data-workspace-tone="light"]' not in style
+    assert 'id="navToggle"' in index and 'id="navClose"' in index and 'id="watchToggle"' in index
+    assert 'aria-controls="deckRail"' in index and 'aria-controls="marketWatch"' in index
+    assert "setCompactPanel('nav'" in app and "setCompactPanel('watch'" in app
+
+
+def test_secondary_surfaces_share_terminal_theme_and_training_modes_are_keyboard_reachable():
+    index = _read(INDEX)
+    style = _read(STYLE)
+    training = _read(PROJECT_ROOT / "static" / "js" / "training.js")
+
+    for surface in (".training-overlay", ".auto-overlay", ".auto-card", ".factor-filter-panel"):
+        assert surface in style
+    assert "background: var(--qt-bg-primary);" in style
+    assert ".auto-table tbody tr:hover { background: var(--qt-bg-elev); }" in style
+    for mode in ("guess", "trade", "replay"):
+        assert re.search(rf'<button[^>]*class="tr-tab[^\"]*"[^>]*data-mode="{mode}"[^>]*aria-pressed=', index)
+    assert "t.setAttribute('aria-pressed', String(active))" in training
+    assert ".modal .param-row[hidden] { display: none; }" in style
+
+
+def test_unavailable_update_status_does_not_present_placeholder_zero_counts():
+    control = _read(PROJECT_ROOT / "static" / "js" / "control.js")
+    assert "if (payload.reason === 'status_unavailable')" in control
+    assert "els.manualUpdateProgress.textContent = '进度：未确认'" in control
+    assert "els.manualUpdateQuality.textContent = '数据质量：未确认'" in control
+
+
+def test_chart_library_is_bundled_for_offline_desktop_use():
+    index = _read(PROJECT_ROOT / "static" / "index.html")
+    vendor = PROJECT_ROOT / "static" / "vendor"
+    assert '<script src="/vendor/lightweight-charts-4.2.1.js"></script>' in index
+    assert "https://unpkg.com/lightweight-charts" not in index
+    assert (vendor / "lightweight-charts-4.2.1.js").is_file()
+    assert (vendor / "lightweight-charts-LICENSE").is_file()
 
 
 def test_adapter_css_is_scoped_and_hides_only_verified_duplicates():

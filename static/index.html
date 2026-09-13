@@ -4,10 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>QTrade — A股量化交易终端</title>
-  <link rel="stylesheet" href="css/tokens.css?v=1">
-  <link rel="stylesheet" href="css/style.css?v=7">
+  <link rel="stylesheet" href="css/tokens.css?v=2">
+  <link rel="stylesheet" href="css/style.css?v=11">
   <!-- TradingView lightweight-charts (支持 panes) -->
-  <script src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="/vendor/lightweight-charts-4.2.1.js"></script>
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
@@ -16,30 +16,32 @@
 
   <!-- ====== 决策台侧边导航 ====== -->
   <nav class="deck-rail" id="deckRail" aria-label="工作区导航">
-    <div class="deck-brand" aria-label="QTrade"><span class="deck-brand-mark">Q</span><span>QTrade</span></div>
-    <div class="deck-group-label">市场</div>
+    <div class="deck-brand" aria-label="QTrade"><span class="deck-brand-mark">Q</span><span>QTrade</span><button class="deck-close" id="navClose" type="button" aria-label="关闭导航">×</button></div>
+    <div class="deck-group-label">市场观察</div>
     <button class="deck-item" data-page="market" title="行情"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><span>行情</span></button>
     <button class="deck-item" data-page="portal" title="门户"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg><span>门户</span></button>
     <button class="deck-item" data-page="pitch" title="决策"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg><span>决策</span></button>
-    <div class="deck-group-label">研究</div>
+    <div class="deck-group-label">策略研究</div>
     <button class="deck-item" data-page="factors" title="因子库"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v6L4.5 18a2 2 0 0 0 1.8 3h11.4a2 2 0 0 0 1.8-3L14 8V2"/><path d="M8 2h8"/><path d="M7 14h10"/></svg><span>因子库</span></button>
     <button class="deck-item" data-page="factorboard" title="因子仪表盘"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg><span>因子仪表</span></button>
     <button class="deck-item" data-page="backtest" title="回测"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg><span>回测</span></button>
-    <div class="deck-group-label">演练</div>
+    <div class="deck-group-label">模拟与风险</div>
     <button class="deck-item" data-page="training" title="训练营"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10L12 5 2 10l10 5 10-5z"/><path d="M6 12v5c0 1.7 2.7 3 6 3s6-1.3 6-3v-5"/></svg><span>训练</span></button>
     <button class="deck-item" data-page="autopaper" title="自动模拟盘"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>模拟盘</span></button>
     <button class="deck-item" data-page="risk" title="风控/复盘"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z"/></svg><span>风控</span></button>
-    <div class="deck-group-label">系统</div>
+    <div class="deck-group-label">运行管理</div>
     <button class="deck-item" data-page="control" title="数据与运行"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg><span>数据与运行</span></button>
   </nav>
 
   <!-- ====== 工具栏 ====== -->
   <header class="toolbar">
+    <button class="btn toolbar-toggle" id="navToggle" type="button" aria-controls="deckRail" aria-expanded="false" aria-label="展开导航">菜单</button>
     <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Q<span>Trade</span></div>
     <input type="text" id="searchInput" aria-label="搜索股票" placeholder="搜索代码或名称">
     <button class="btn" id="btnRefresh">刷新</button>
     <span class="live-badge" id="liveBadge" hidden>实时</span>
     <span class="update-status" id="updateStatus" role="status" aria-live="polite" hidden></span>
+    <button class="btn toolbar-toggle" id="watchToggle" type="button" aria-controls="marketWatch" aria-expanded="false">股票列表</button>
     <div class="spacer"></div>
     <div class="clock" id="clock">--</div>
   </header>
@@ -48,7 +50,7 @@
   <div class="main">
 
     <!-- 左栏：股票列表 -->
-    <aside class="sidebar-left">
+    <aside class="sidebar-left" id="marketWatch">
       <div class="section-title">自选股 <span id="watchlistCount">(0)</span></div>
       <div id="watchlistStocks"></div>
       <div class="section-title">最近浏览</div>
@@ -79,7 +81,7 @@
     <!-- 右栏：行情详情 -->
     <aside class="sidebar-right">
       <div class="card">
-        <h3>📋 行情报价</h3>
+        <h3>行情报价</h3>
         <div class="quote-row"><span class="label">名称</span><span class="value" id="qName">——</span></div>
         <div class="quote-row"><span class="label">今开</span><span class="value" id="qOpen">——</span></div>
         <div class="quote-row"><span class="label">最高</span><span class="value" id="qHigh">——</span></div>
@@ -91,12 +93,12 @@
         <div class="quote-row"><span class="label">行情时间</span><span class="value" id="qTime">——</span></div>
       </div>
       <div class="card">
-        <h3>📡 策略信号</h3>
+        <h3>策略信号</h3>
         <div id="signalLines">
           <div class="signal-line muted">请选择股票</div>
         </div>
       </div>
-      <button class="btn accent wide" id="btnQuickBacktest">🚀 快速回测当前股票</button>
+      <button class="btn accent wide" id="btnQuickBacktest">快速回测当前股票</button>
     </aside>
   </div>
 
@@ -159,10 +161,10 @@
   <div class="training-overlay" id="trainingOverlay" hidden>
     <div class="training-header">
       <div class="training-title">🎯 K线训练营</div>
-      <div class="training-tabs" id="trainingTabs">
-        <div class="tr-tab active" data-mode="guess">📊 猜涨跌</div>
-        <div class="tr-tab" data-mode="trade">🎯 买卖点</div>
-        <div class="tr-tab" data-mode="replay">🔄 逐根复盘</div>
+      <div class="training-tabs" id="trainingTabs" aria-label="训练模式">
+        <button type="button" class="tr-tab active" data-mode="guess" aria-pressed="true">猜涨跌</button>
+        <button type="button" class="tr-tab" data-mode="trade" aria-pressed="false">买卖点</button>
+        <button type="button" class="tr-tab" data-mode="replay" aria-pressed="false">逐根复盘</button>
       </div>
       <div class="training-stats">
         <span class="stat">得分 <b id="trScore">0</b></span>
@@ -426,8 +428,8 @@
   </div>
 
   <script src="js/api.js"></script>
-  <script src="js/chart.js"></script>
-  <script src="js/training.js"></script>
+  <script src="js/chart.js?v=2"></script>
+  <script src="js/training.js?v=2"></script>
   <script src="js/auto_paper.js"></script>
   <script src="js/app.js"></script>
 </body>

@@ -7,13 +7,42 @@ const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { test } = require('node:test');
+const vm = require('node:vm');
 
 const runtime = require('../runtime');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 
+test('market remains usable when the chart CDN is unavailable', () => {
+  const source = fs.readFileSync(path.join(PROJECT_ROOT, 'static', 'js', 'chart.js'), 'utf8');
+  const context = vm.createContext({});
+  vm.runInContext(`${source}\n globalThis.TestChartManager = ChartManager.ChartManager;`, context);
+  const container = {
+    classList: { add(name) { this.value = name; } },
+    textContent: '', clientWidth: 400, clientHeight: 300,
+  };
+  const chart = new context.TestChartManager(container);
+  chart.setKline([{ time: '2026-09-11', open: 1, close: 2 }]);
+  chart.setIndicators({ mas: {} });
+  chart.toggle('ma', false);
+  chart.resize();
+  chart.destroy();
+  assert.equal(container.classList.value, 'chart-unavailable');
+  assert.match(container.textContent, /图表组件未能加载/);
+});
+
 test('desktop startup allows a bounded full-cache initialization window', () => {
   assert.equal(runtime.DEFAULT_STARTUP_TIMEOUT_MS, 60_000);
+});
+
+test('desktop window allows the collapsible research layout', () => {
+  const main = fs.readFileSync(path.join(PROJECT_ROOT, 'electron', 'main.js'), 'utf8');
+  assert.match(main, /minWidth:\s*760/);
+  assert.match(main, /backgroundColor:\s*'#0B111B'/);
+  assert.match(main, /contextIsolation:\s*true/);
+  assert.match(main, /sandbox:\s*true/);
+  assert.match(main, /QTRADE_ELECTRON_PROFILE_DIR/);
+  assert.match(main, /app\.setPath\('userData', isolatedProfile\)/);
 });
 
 function preflightOutput({

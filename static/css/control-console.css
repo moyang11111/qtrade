@@ -411,39 +411,74 @@ h2 {
   .control-button { transition: none; }
 }
 
-/* Light operations workspace: flat, auditable and deliberately calm. */
+/* Unified dark operations workspace: current usable data precedes task state. */
 body {
-  background: var(--qt-light-page);
-  color: var(--qt-light-text);
+  background: var(--qt-bg-primary);
+  color: var(--qt-text);
 }
-.control-shell { width: min(1240px, 100%); padding: clamp(20px, 2.5vw, 32px); }
+.control-shell { width: min(1440px, 100%); padding: clamp(18px, 2.5vw, 30px); }
 .control-hero,
 .control-navigation,
 .deepseek-chat-panel,
 .control-card {
-  background: var(--qt-light-panel);
-  border-color: var(--qt-light-line);
-  border-radius: 8px;
-  box-shadow: 0 1px 2px rgba(28, 45, 67, .06);
-}
-.control-hero { padding: 24px 26px; }
-.control-eyebrow, .control-card-kicker { color: var(--qt-color-brand); }
-h1 { color: var(--qt-light-text); font-size: clamp(24px, 3vw, 30px); }
-.control-safety { color: var(--qt-color-signal); }
-.control-button {
-  background: var(--qt-light-panel);
-  border-color: var(--qt-light-line);
-  color: var(--qt-light-text);
+  background: var(--qt-bg-card);
+  border-color: var(--qt-border);
+  border-radius: 7px;
   box-shadow: none;
 }
-.control-button:hover { background: var(--qt-light-panel-muted); border-color: var(--qt-color-brand); }
-.control-button-primary { background: var(--qt-color-brand); border-color: var(--qt-color-brand); color: #fff; }
-.control-button-primary:hover { background: var(--qt-color-brand-strong); color: #fff; }
-.control-state { background: var(--qt-light-panel-muted); }
-.control-card-mark { color: var(--qt-color-brand); }
-.control-row { padding-block: 2px; }
-.deepseek-chat-label textarea { background: var(--qt-light-input); color: var(--qt-light-text); }
+.control-hero { padding: 0 0 18px; border: 0; border-bottom: 1px solid var(--qt-border); border-radius: 0; background: transparent; }
+.control-eyebrow, .control-card-kicker { color: var(--qt-text-dim); }
+h1 { color: var(--qt-text); font-size: clamp(22px, 3vw, 28px); }
+.control-safety { color: var(--qt-color-signal); }
+.control-button {
+  background: var(--qt-bg-elev);
+  border-color: var(--qt-border);
+  color: var(--qt-text);
+  box-shadow: none;
+}
+.control-button:hover { background: #223347; border-color: var(--qt-color-brand); }
+.control-button-primary { background: var(--qt-color-brand); border-color: var(--qt-color-brand); color: #092820; }
+.control-button-primary:hover { background: #7be0d0; color: #092820; }
+.control-state { background: var(--qt-bg-elev); }
+.control-card-mark { color: var(--qt-text-secondary); }
+.control-row { padding-block: 3px; }
+.control-value { font-variant-numeric: tabular-nums; }
+.deepseek-chat-label textarea { background: var(--qt-bg-primary); color: var(--qt-text); }
+.control-availability {
+  display: grid;
+  grid-template-columns: minmax(250px, 1.7fr) minmax(170px, 1fr) minmax(170px, 1fr);
+  gap: 0;
+  margin: 18px 0;
+  border: 1px solid #2c5149;
+  border-radius: 7px;
+  background: #12231f;
+}
+.control-availability > div { display: flex; flex-direction: column; gap: 5px; padding: 19px 23px; min-width: 0; }
+.control-availability > div + div { border-left: 1px solid #305044; }
+.control-availability span { color: var(--qt-text-secondary); font-size: 12px; }
+.control-availability strong { color: var(--qt-text); font-size: 19px; font-weight: 550; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.control-availability-primary strong { color: #c5eee2; font-size: 29px; }
+.control-availability small { color: var(--qt-text-secondary); font-size: 11px; }
+.control-grid { grid-template-columns: minmax(0, 1.7fr) minmax(260px, 1fr); gap: 16px; margin: 0 0 17px; }
+#cardPipeline { grid-row: span 2; }
+.control-card { padding: 20px; }
+.control-update-actions { border-top: 1px solid var(--qt-border); margin-top: 16px; padding-top: 17px; }
+.control-update-progress, .control-update-status { overflow-wrap: anywhere; }
+.deepseek-chat-panel { margin: 0 0 17px; }
+.deepseek-chat-message[data-role="assistant"] { border-color: #346457; background: #132923; }
+.control-button:focus-visible { outline-color: var(--qt-color-brand); }
 
 @media (max-width: 980px) {
   .control-grid { grid-template-columns: minmax(0, 1fr); }
+  #cardPipeline { grid-row: auto; }
+}
+@media (max-width: 700px) {
+  .control-availability { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .control-availability-primary { grid-column: 1 / -1; border-bottom: 1px solid #305044; }
+  .control-availability > div:nth-child(2) { border-left: 0; }
+}
+@media (max-width: 480px) {
+  .control-availability { grid-template-columns: minmax(0, 1fr); }
+  .control-availability-primary { grid-column: 1; }
+  .control-availability > div + div { border-left: 0; border-top: 1px solid #305044; }
 }
