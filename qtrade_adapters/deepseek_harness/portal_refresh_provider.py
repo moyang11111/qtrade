@@ -1,8 +1,9 @@
 """Trusted production inputs for the portal refresh worker.
 
-This module is intentionally small and server-owned.  It builds a plan from
-the read-only mainboard adapter and uses one fixed AkShare function; callers
-cannot provide symbols, dates, URLs, commands, or provider options.
+This module is intentionally small and server-owned. It builds a plan from
+the read-only mainboard adapter and uses fixed Tencent and Eastmoney AkShare
+interfaces, with TDX as an unadjusted diagnostic. Callers cannot provide
+symbols, dates, URLs, commands, or provider options.
 """
 
 from __future__ import annotations
@@ -22,10 +23,9 @@ from .portal_refresh import HISTORY_WINDOW
 from .portal_refresh_worker import PortalRefreshPlan, _plan_universe_token
 
 
-PROVIDER_VERSION = "akshare-sina-daily-qfq-v2"
+PROVIDER_VERSION = "akshare-em-tx-tdx-qfq-v3"
 _DATE_FORMAT = "%Y-%m-%d"
-# Sina currently returns the complete exchange history (already above 8,000
-# rows). Keep a generous finite bound so malformed responses still fail closed.
+# Keep a generous finite bound so malformed calendar responses fail closed.
 _MAX_CALENDAR_DATES = 20_000
 _NETWORK_CONNECT_TIMEOUT = 10.0
 _NETWORK_READ_TIMEOUT = 20.0
@@ -159,7 +159,7 @@ def _calendar_token(target: str, dates: Iterable[str]) -> str:
     if not canonical or len(canonical) > _MAX_CALENDAR_DATES:
         raise PortalPlanError("calendar_unavailable")
     body = json.dumps(
-        {"provider": "sina-trade-calendar-v1", "dates": canonical},
+        {"provider": "tx-em-index-calendar-v1", "dates": canonical},
         ensure_ascii=True,
         separators=(",", ":"),
     ).encode("ascii")
@@ -167,21 +167,35 @@ def _calendar_token(target: str, dates: Iterable[str]) -> str:
 
 
 def _load_trade_dates() -> list[str]:
-    """Read the official AkShare trade calendar through its fixed API."""
+    """Read recent exchange sessions from fixed Tencent/Eastmoney index histories."""
 
     try:
         import akshare as ak
 
-        with _akshare_network_guard():
-            frame = ak.tool_trade_date_hist_sina()
-        column = "trade_date" if "trade_date" in frame.columns else "date"
-        if column not in frame.columns:
-            raise PortalPlanError("calendar_unavailable")
-        return [_date_text(value) for value in frame[column].tolist()]
-    except PortalPlanError:
-        raise
+        end_date = _datetime.date.today().strftime("%Y%m%d")
+        # A fixed lower bound keeps checkpoint calendar tokens stable across
+        # weekends; only a genuinely new exchange session changes the token.
+        start_date = f"{_datetime.date.today().year - 2}0101"
+        for source in ("tencent", "eastmoney"):
+            try:
+                with _akshare_network_guard():
+                    frame = (
+                        ak.stock_zh_index_daily_em(
+                            symbol="sh000001", start_date=start_date, end_date=end_date
+                        )
+                        if source == "eastmoney"
+                        else ak.stock_zh_index_daily_tx(
+                            symbol="sh000001", start_date=start_date, end_date=end_date
+                        )
+                    )
+                dates = [_date_text(value) for value in frame["date"].tolist()]
+                if dates and len(dates) <= _MAX_CALENDAR_DATES:
+                    return dates
+            except Exception:
+                continue
     except Exception as exc:
         raise PortalPlanError("calendar_unavailable") from exc
+    raise PortalPlanError("calendar_unavailable")
 
 
 def _safe_metadata(record: Mapping[str, object], target: str) -> dict[str, object]:
@@ -217,7 +231,7 @@ def _safe_metadata(record: Mapping[str, object], target: str) -> dict[str, objec
 
 
 class AksharePortalProvider:
-    """Fetch one target-day qfq bar through a fixed AkShare call."""
+    """Fetch qfq bars from Tencent, then Eastmoney; TDX checks raw availability."""
 
     PROVIDER_VERSION = PROVIDER_VERSION
 
@@ -233,45 +247,106 @@ class AksharePortalProvider:
             raise PortalPlanError("universe_schema")
         return ("sh" if code.startswith("60") else "sz") + code
 
+    @staticmethod
+    def _tdx_target_present(code: str, target_date: str) -> bool | None:
+        """Use TDX's raw daily bar only as a diagnostic, never as qfq data."""
+
+        try:
+            from pytdx.hq import TdxHq_API
+            for host, port in (("119.147.212.81", 7709), ("112.74.214.43", 7727), ("221.231.141.60", 7709)):
+                api = TdxHq_API()
+                try:
+                    if not api.connect(host, port, time_out=2):
+                        continue
+                    rows = api.get_security_bars(4, 1 if code.startswith("6") else 0, code, 0, 800)
+                    if rows:
+                        return any(str(row.get("datetime", ""))[:10] == target_date for row in rows)
+                except Exception:
+                    continue
+                finally:
+                    api.disconnect()
+        except Exception:
+            pass
+        return None
+
+    def _source_rows(self, source: str, code: str, target_date: str, start_date: str) -> list[dict[str, object]]:
+        import akshare as ak
+
+        with _akshare_network_guard():
+            if source == "eastmoney":
+                frame = ak.stock_zh_a_hist(
+                    symbol=code, period="daily", start_date=start_date,
+                    end_date=target_date.replace("-", ""), adjust="qfq", timeout=20,
+                )
+            else:
+                frame = ak.stock_zh_a_hist_tx(
+                    symbol=self._ak_symbol(code), start_date=start_date,
+                    end_date=target_date.replace("-", ""), adjust="qfq", timeout=20,
+                )
+        if frame is None or frame.empty:
+            # Empty history is ambiguous (source outage versus new listing).
+            # Never exclude a symbol from a publishable universe on that basis.
+            raise RuntimeError("provider returned empty history")
+        by_date: dict[str, dict[str, object]] = {}
+        try:
+            candidates = frame.to_dict(orient="records")
+            for candidate in candidates:
+                date = _date_text(candidate.get("日期" if source == "eastmoney" else "date"))
+                if date > target_date:
+                    continue
+                values = {
+                    "code": code,
+                    "date": date,
+                    "open": float(candidate["开盘" if source == "eastmoney" else "open"]),
+                    "high": float(candidate["最高" if source == "eastmoney" else "high"]),
+                    "low": float(candidate["最低" if source == "eastmoney" else "low"]),
+                    "close": float(candidate["收盘" if source == "eastmoney" else "close"]),
+                    # Eastmoney reports lots (100 shares); Tencent reports shares.
+                    "volume": float(candidate["成交量" if source == "eastmoney" else "volume"])
+                    * (100 if source == "eastmoney" else 1),
+                    "adjust": "qfq",
+                }
+                if any(not math.isfinite(values[key]) or values[key] <= 0 for key in ("open", "high", "low", "close", "volume")):
+                    raise ValueError("non-positive history")
+                if values["high"] < max(values["open"], values["close"]) or values["low"] > min(values["open"], values["close"]):
+                    raise ValueError("invalid history bar")
+                by_date[date] = values
+        except (KeyError, TypeError, ValueError, AttributeError, PortalPlanError) as exc:
+            raise RuntimeError("provider schema invalid") from exc
+        rows = [by_date[key] for key in sorted(by_date)]
+        if not rows or rows[-1]["date"] != target_date:
+            raise PortalHistoryError("target_date_missing")
+        return rows
+
+    def _fetch_rows(self, code: str, target_date: str, start_date: str, minimum: int) -> list[dict[str, object]]:
+        quality_reasons: list[str] = []
+        provider_failed = False
+        for source in ("tencent", "eastmoney"):
+            try:
+                rows = self._source_rows(source, code, target_date, start_date)
+                if len(rows) < minimum:
+                    raise PortalHistoryError("insufficient_history")
+                return rows[-minimum:]
+            except PortalHistoryError as exc:
+                quality_reasons.append(exc.reason)
+            except Exception:
+                provider_failed = True
+        # TDX is intentionally not a qfq fallback. It can corroborate whether
+        # a target-day raw bar exists, preventing a false 'suspended' exclusion.
+        tdx_present = self._tdx_target_present(code, target_date)
+        if provider_failed or (tdx_present is True and "target_date_missing" in quality_reasons):
+            raise RuntimeError("all qfq providers failed")
+        reason = "target_date_missing" if "target_date_missing" in quality_reasons else "insufficient_history"
+        if self.metadata[code].get("suspended") is True:
+            reason = "suspended"
+        raise PortalHistoryError(reason)
+
     def fetch(self, symbol: str, target_date: str) -> dict[str, object]:
         code = normalize_code(symbol)
         if code is None or code not in self.metadata:
             raise RuntimeError("provider symbol unavailable")
-        try:
-            import akshare as ak
-
-            with _akshare_network_guard():
-                frame = ak.stock_zh_a_daily(
-                    symbol=self._ak_symbol(code),
-                    start_date=target_date.replace("-", ""),
-                    end_date=target_date.replace("-", ""),
-                    adjust="qfq",
-                )
-        except Exception as exc:
-            raise RuntimeError("provider request failed") from exc
-        if frame is None or frame.empty:
-            raise RuntimeError("provider returned no target bar")
-        row = None
-        for candidate in frame.to_dict(orient="records"):
-            if _date_text(candidate.get("date")) == target_date:
-                row = candidate
-                break
-        if row is None:
-            raise RuntimeError("provider returned stale bar")
-        try:
-            values = {
-                "code": code,
-                "date": target_date,
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": float(row["volume"]),
-                "adjust": "qfq",
-            }
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError("provider schema invalid") from exc
-        return {"rows": [values], "metadata": dict(self.metadata[code])}
+        rows = self._fetch_rows(code, target_date, target_date.replace("-", ""), 1)
+        return {"rows": rows, "metadata": dict(self.metadata[code])}
 
     def fetch_history(
         self,
@@ -286,61 +361,9 @@ class AksharePortalProvider:
         code = normalize_code(symbol)
         if code is None or code not in self.metadata:
             raise RuntimeError("provider symbol unavailable")
-        try:
-            target = _datetime.date.fromisoformat(target_date)
-            import akshare as ak
-
-            # The range is server-owned and intentionally wider than the
-            # returned window so the final 320 trading rows are available.
-            start = target - _datetime.timedelta(days=600)
-            with _akshare_network_guard():
-                frame = ak.stock_zh_a_daily(
-                    symbol=self._ak_symbol(code),
-                    start_date=start.strftime("%Y%m%d"),
-                    end_date=target.strftime("%Y%m%d"),
-                    adjust="qfq",
-                )
-        except Exception as exc:
-            raise RuntimeError("provider request failed") from exc
-        if frame is None or frame.empty:
-            reason = "suspended" if self.metadata[code].get("suspended") is True else "insufficient_history"
-            raise PortalHistoryError(reason)
-        by_date: dict[str, dict[str, object]] = {}
-        try:
-            candidates = frame.to_dict(orient="records")
-        except Exception as exc:
-            raise RuntimeError("provider schema invalid") from exc
-        for candidate in candidates:
-            try:
-                date = _date_text(candidate.get("date"))
-                if date > target_date:
-                    continue
-                values = {
-                    "code": code,
-                    "date": date,
-                    "open": float(candidate["open"]),
-                    "high": float(candidate["high"]),
-                    "low": float(candidate["low"]),
-                    "close": float(candidate["close"]),
-                    "volume": float(candidate["volume"]),
-                    "adjust": "qfq",
-                }
-                if any(value <= 0 or not math.isfinite(value) for value in (values["open"], values["high"], values["low"], values["close"], values["volume"])):
-                    raise ValueError("non-positive history")
-                if values["high"] < max(values["open"], values["close"]) or values["low"] > min(values["open"], values["close"]):
-                    raise ValueError("invalid history bar")
-            except (KeyError, TypeError, ValueError, AttributeError, PortalPlanError) as exc:
-                raise RuntimeError("provider schema invalid") from exc
-            by_date[date] = values
-        rows = [by_date[key] for key in sorted(by_date)]
-        if not rows or rows[-1]["date"] != target_date:
-            reason = "suspended" if self.metadata[code].get("suspended") is True else "target_date_missing"
-            raise PortalHistoryError(reason)
-        if len(rows) < HISTORY_WINDOW:
-            raise PortalHistoryError("insufficient_history")
-        rows = rows[-HISTORY_WINDOW:]
-        if len(rows) != HISTORY_WINDOW or rows[-1]["date"] != target_date:
-            raise RuntimeError("provider returned stale history")
+        target = _datetime.date.fromisoformat(target_date)
+        start = target - _datetime.timedelta(days=600)
+        rows = self._fetch_rows(code, target_date, start.strftime("%Y%m%d"), HISTORY_WINDOW)
         return {"rows": rows, "metadata": dict(self.metadata[code])}
 
 

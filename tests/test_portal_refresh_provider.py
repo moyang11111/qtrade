@@ -9,6 +9,7 @@ from qtrade_adapters.deepseek_harness.portal_refresh_provider import (
     PortalHistoryError,
     PortalPlanError,
     _akshare_network_guard,
+    _load_trade_dates,
     build_trusted_plan,
 )
 
@@ -138,7 +139,7 @@ def test_plan_rejects_unbounded_or_duplicate_universe():
             _plan(adapter_factory=factory)
 
 
-def test_akshare_provider_uses_fixed_qfq_daily_call(monkeypatch):
+def test_provider_uses_eastmoney_qfq_fallback_and_converts_lots(monkeypatch):
     calls = []
 
     class Frame:
@@ -147,12 +148,12 @@ def test_akshare_provider_uses_fixed_qfq_daily_call(monkeypatch):
         def to_dict(self, orient):
             assert orient == "records"
             return [{
-                "date": TARGET,
-                "open": 10,
-                "high": 11,
-                "low": 9,
-                "close": 10.5,
-                "volume": 1000,
+                "日期": TARGET,
+                "开盘": 10,
+                "最高": 11,
+                "最低": 9,
+                "收盘": 10.5,
+                "成交量": 10,
             }]
 
     def fixed_daily(**kwargs):
@@ -162,21 +163,25 @@ def test_akshare_provider_uses_fixed_qfq_daily_call(monkeypatch):
     monkeypatch.setitem(
         __import__("sys").modules,
         "akshare",
-        SimpleNamespace(stock_zh_a_daily=fixed_daily),
+        SimpleNamespace(stock_zh_a_hist=fixed_daily,
+                        stock_zh_a_hist_tx=lambda **_: (_ for _ in ()).throw(ConnectionError("offline"))),
     )
     _, provider = _plan()
     result = provider.fetch("600001", TARGET)
 
     assert result["rows"][0]["code"] == "600001"
+    assert result["rows"][0]["volume"] == 1000
     assert calls == [{
-        "symbol": "sh600001",
+        "symbol": "600001",
+        "period": "daily",
         "start_date": "20260828",
         "end_date": "20260828",
         "adjust": "qfq",
+        "timeout": 20,
     }]
 
 
-def test_akshare_provider_history_is_target_anchored_and_bounded(monkeypatch):
+def test_provider_history_is_target_anchored_and_bounded(monkeypatch):
     calls = []
 
     class Frame:
@@ -186,12 +191,12 @@ def test_akshare_provider_history_is_target_anchored_and_bounded(monkeypatch):
             assert orient == "records"
             target = datetime.date.fromisoformat(TARGET)
             return [{
-                "date": target - datetime.timedelta(days=319 - offset),
-                "open": 10 + offset,
-                "high": 11 + offset,
-                "low": 9 + offset,
-                "close": 10.5 + offset,
-                "volume": 1000 + offset,
+                "日期": target - datetime.timedelta(days=319 - offset),
+                "开盘": 10 + offset,
+                "最高": 11 + offset,
+                "最低": 9 + offset,
+                "收盘": 10.5 + offset,
+                "成交量": 10 + offset,
             } for offset in range(320)]
 
     def fixed_daily(**kwargs):
@@ -201,7 +206,8 @@ def test_akshare_provider_history_is_target_anchored_and_bounded(monkeypatch):
     monkeypatch.setitem(
         __import__("sys").modules,
         "akshare",
-        SimpleNamespace(stock_zh_a_daily=fixed_daily),
+        SimpleNamespace(stock_zh_a_hist=fixed_daily,
+                        stock_zh_a_hist_tx=lambda **_: (_ for _ in ()).throw(ConnectionError("offline"))),
     )
     _, provider = _plan()
     result = provider.fetch_history("600001", TARGET)
@@ -209,20 +215,92 @@ def test_akshare_provider_history_is_target_anchored_and_bounded(monkeypatch):
     assert len(result["rows"]) == 320
     assert result["rows"][-1]["date"] == TARGET
     assert calls == [{
-        "symbol": "sh600001",
+        "symbol": "600001",
+        "period": "daily",
         "start_date": "20250105",
         "end_date": "20260828",
         "adjust": "qfq",
+        "timeout": 20,
     }]
+
+
+def test_tencent_qfq_primary_keeps_share_units_and_does_not_call_sina(monkeypatch):
+    calls = []
+
+    class Frame:
+        empty = False
+
+        def to_dict(self, orient):
+            assert orient == "records"
+            return [{
+                "date": TARGET, "open": 10, "high": 11, "low": 9,
+                "close": 10.5, "volume": 1234,
+            }]
+
+    def eastmoney(**kwargs):
+        pytest.fail("Eastmoney should not be called after Tencent succeeds")
+
+    def tencent(**kwargs):
+        calls.append(("tencent", kwargs))
+        return Frame()
+
+    monkeypatch.setitem(__import__("sys").modules, "akshare", SimpleNamespace(
+        stock_zh_a_hist=eastmoney, stock_zh_a_hist_tx=tencent,
+        stock_zh_a_daily=lambda **_: pytest.fail("Sina must not be called"),
+    ))
+    _, provider = _plan()
+    result = provider.fetch("600001", TARGET)
+    assert result["rows"][0]["volume"] == 1234
+    assert [source for source, _ in calls] == ["tencent"]
+    assert calls[0][1] == {
+        "symbol": "sh600001", "start_date": "20260828",
+        "end_date": "20260828", "adjust": "qfq", "timeout": 20,
+    }
+
+
+def test_tdx_cannot_turn_raw_bar_into_qfq_snapshot(monkeypatch):
+    class Empty:
+        empty = True
+
+    monkeypatch.setitem(__import__("sys").modules, "akshare", SimpleNamespace(
+        stock_zh_a_hist=lambda **_: Empty(), stock_zh_a_hist_tx=lambda **_: Empty(),
+    ))
+    _, provider = _plan()
+    monkeypatch.setattr(provider, "_tdx_target_present", lambda *_: True)
+    with pytest.raises(RuntimeError, match="all qfq providers failed"):
+        provider.fetch_history("600001", TARGET)
+
+
+def test_calendar_uses_tencent_then_eastmoney_without_sina(monkeypatch):
+    calls = []
+
+    class Frame:
+        def __getitem__(self, key):
+            assert key == "date"
+            return SimpleNamespace(tolist=lambda: ["2026-08-27", TARGET])
+
+    def tencent(**kwargs):
+        calls.append("tencent")
+        raise ConnectionError("offline")
+
+    def eastmoney(**kwargs):
+        calls.append("eastmoney")
+        return Frame()
+
+    monkeypatch.setitem(__import__("sys").modules, "akshare", SimpleNamespace(
+        stock_zh_index_daily_em=eastmoney, stock_zh_index_daily_tx=tencent,
+        tool_trade_date_hist_sina=lambda: pytest.fail("Sina must not be called"),
+    ))
+    assert _load_trade_dates() == ["2026-08-27", TARGET]
+    assert calls == ["tencent", "eastmoney"]
 
 
 @pytest.mark.parametrize(
     ("rows", "suspended", "reason"),
     [
-        ([], False, "insufficient_history"),
         ([TARGET], False, "insufficient_history"),
         (["2026-08-27"] * 320, False, "target_date_missing"),
-        ([], True, "suspended"),
+        ([TARGET], True, "suspended"),
     ],
 )
 def test_history_validation_exposes_only_stable_quality_classification(monkeypatch, rows, suspended, reason):
@@ -232,20 +310,29 @@ def test_history_validation_exposes_only_stable_quality_classification(monkeypat
         def to_dict(self, orient):
             assert orient == "records"
             return [{
-                "date": value,
-                "open": 10,
-                "high": 11,
-                "low": 9,
-                "close": 10.5,
-                "volume": 1000,
+                "日期": value,
+                "开盘": 10,
+                "最高": 11,
+                "最低": 9,
+                "收盘": 10.5,
+                "成交量": 10,
+            } for value in rows]
+
+    class TencentFrame(Frame):
+        def to_dict(self, orient):
+            return [{
+                "date": value, "open": 10, "high": 11, "low": 9,
+                "close": 10.5, "volume": 1000,
             } for value in rows]
 
     monkeypatch.setitem(
         __import__("sys").modules,
         "akshare",
-        SimpleNamespace(stock_zh_a_daily=lambda **_: Frame()),
+        SimpleNamespace(stock_zh_a_hist=lambda **_: Frame(),
+                        stock_zh_a_hist_tx=lambda **_: TencentFrame()),
     )
     _, provider = _plan()
+    monkeypatch.setattr(provider, "_tdx_target_present", lambda *_: None)
     provider.metadata["600001"]["suspended"] = suspended
     with pytest.raises(PortalHistoryError, match=reason):
         provider.fetch_history("600001", TARGET)

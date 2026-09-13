@@ -929,11 +929,19 @@ def resolve_latest_completed_trade_date(now, calendar_dates):
         })
     except (TypeError, ValueError, AttributeError) as exc:
         raise ValueError("calendar_unavailable") from exc
-    if not normalized or len(normalized) > MAX_TRADE_CALENDAR_DATES or normalized[-1] < local.date():
+    if not normalized or len(normalized) > MAX_TRADE_CALENDAR_DATES:
         raise ValueError("calendar_unavailable")
     boundary = local.date()
     if local.time().replace(tzinfo=None) < DAILY_UPDATE_TIME:
         boundary -= datetime.timedelta(days=1)
+    # An index-derived calendar contains completed sessions, not future dates.
+    # On weekends and before the weekday cutoff, the latest required session
+    # is the preceding weekday. A missing weekday still fails closed.
+    required = boundary
+    while required.weekday() >= 5:
+        required -= datetime.timedelta(days=1)
+    if normalized[-1] < required:
+        raise ValueError("calendar_unavailable")
     candidates = [value for value in normalized if value <= boundary]
     if not candidates:
         raise ValueError("calendar_unavailable")
