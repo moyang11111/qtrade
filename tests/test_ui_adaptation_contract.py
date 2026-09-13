@@ -123,6 +123,22 @@ def test_secondary_surfaces_share_terminal_theme_and_training_modes_are_keyboard
     assert ".modal .param-row[hidden] { display: none; }" in style
 
 
+def test_unavailable_update_status_does_not_present_placeholder_zero_counts():
+    control = _read(PROJECT_ROOT / "static" / "js" / "control.js")
+    assert "if (payload.reason === 'status_unavailable')" in control
+    assert "els.manualUpdateProgress.textContent = '进度：未确认'" in control
+    assert "els.manualUpdateQuality.textContent = '数据质量：未确认'" in control
+
+
+def test_chart_library_is_bundled_for_offline_desktop_use():
+    index = _read(PROJECT_ROOT / "static" / "index.html")
+    vendor = PROJECT_ROOT / "static" / "vendor"
+    assert '<script src="/vendor/lightweight-charts-4.2.1.js"></script>' in index
+    assert "https://unpkg.com/lightweight-charts" not in index
+    assert (vendor / "lightweight-charts-4.2.1.js").is_file()
+    assert (vendor / "lightweight-charts-LICENSE").is_file()
+
+
 def test_adapter_css_is_scoped_and_hides_only_verified_duplicates():
     adapter = _read(ADAPTER_CSS)
 

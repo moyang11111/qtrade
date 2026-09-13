@@ -906,6 +906,18 @@
     els.manualUpdateStatus.textContent = `状态：${manualStateLabel(stateValue)} · 当前完整数据：${payload.current_complete_date || '未确认'} · 门户快照：${payload.current_portal_date || '未确认'} · 本次目标：${payload.trade_date || '解析中'} · ${manualReasonLabel(payload.reason)}`;
     els.manualUpdateStatus.dataset.state = ['success', 'portal_success'].includes(stateValue) ? 'good'
       : ['failure', 'aborted', 'timed_out'].includes(stateValue) ? 'error' : '';
+    if (payload.reason === 'status_unavailable') {
+      if (els.manualUpdateProgress) els.manualUpdateProgress.textContent = '进度：未确认';
+      if (els.manualUpdateQuality) els.manualUpdateQuality.textContent = '数据质量：未确认';
+      if (els.manualUpdateOutputs) {
+        const labels = { portal: '门户', factors: '因子', decision: '决策', sync: '同步' };
+        document.querySelectorAll('[data-update-output]').forEach((node) => {
+          node.textContent = `${labels[node.dataset.updateOutput] || '结果'}：未确认`;
+          node.dataset.state = '';
+        });
+      }
+      return;
+    }
     if (els.manualUpdateProgress) {
       const progress = payload.pipeline_progress || {};
       const stocks = payload.stock_progress || {};

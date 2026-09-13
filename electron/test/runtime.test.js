@@ -41,6 +41,8 @@ test('desktop window allows the collapsible research layout', () => {
   assert.match(main, /backgroundColor:\s*'#0B111B'/);
   assert.match(main, /contextIsolation:\s*true/);
   assert.match(main, /sandbox:\s*true/);
+  assert.match(main, /QTRADE_ELECTRON_PROFILE_DIR/);
+  assert.match(main, /app\.setPath\('userData', isolatedProfile\)/);
 });
 
 function preflightOutput({

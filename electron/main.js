@@ -18,6 +18,16 @@ let backendStartupPromise = null;
 let shutdownPromise = null;
 let quitting = false;
 
+// Optional isolated profile for side-by-side desktop validation. Normal launches are unchanged.
+const isolatedProfile = process.env.QTRADE_ELECTRON_PROFILE_DIR;
+if (isolatedProfile) {
+  if (!path.isAbsolute(isolatedProfile)) {
+    throw new Error('QTRADE_ELECTRON_PROFILE_DIR must be an absolute path.');
+  }
+  fs.mkdirSync(isolatedProfile, { recursive: true });
+  app.setPath('userData', isolatedProfile);
+}
+
 function requestedPort(env) {
   const raw = typeof env.QTRADE_ELECTRON_PORT === 'string'
     ? env.QTRADE_ELECTRON_PORT.trim()
