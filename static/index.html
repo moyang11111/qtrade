@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>QTrade — A股量化交易终端</title>
   <link rel="stylesheet" href="css/tokens.css?v=2">
-  <link rel="stylesheet" href="css/style.css?v=9">
+  <link rel="stylesheet" href="css/style.css?v=10">
   <!-- TradingView lightweight-charts (支持 panes) -->
   <script src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
@@ -161,10 +161,10 @@
   <div class="training-overlay" id="trainingOverlay" hidden>
     <div class="training-header">
       <div class="training-title">🎯 K线训练营</div>
-      <div class="training-tabs" id="trainingTabs">
-        <div class="tr-tab active" data-mode="guess">📊 猜涨跌</div>
-        <div class="tr-tab" data-mode="trade">🎯 买卖点</div>
-        <div class="tr-tab" data-mode="replay">🔄 逐根复盘</div>
+      <div class="training-tabs" id="trainingTabs" aria-label="训练模式">
+        <button type="button" class="tr-tab active" data-mode="guess" aria-pressed="true">猜涨跌</button>
+        <button type="button" class="tr-tab" data-mode="trade" aria-pressed="false">买卖点</button>
+        <button type="button" class="tr-tab" data-mode="replay" aria-pressed="false">逐根复盘</button>
       </div>
       <div class="training-stats">
         <span class="stat">得分 <b id="trScore">0</b></span>
@@ -429,7 +429,7 @@
 
   <script src="js/api.js"></script>
   <script src="js/chart.js?v=2"></script>
-  <script src="js/training.js"></script>
+  <script src="js/training.js?v=2"></script>
   <script src="js/auto_paper.js"></script>
   <script src="js/app.js"></script>
 </body>

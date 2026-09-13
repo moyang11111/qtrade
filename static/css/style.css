@@ -1496,3 +1496,63 @@ body { background: var(--qt-bg-primary); }
   .sidebar-right .card + .card { border-left: 0; }
   .chart-header .indicator-toggles { margin-left: 0; }
 }
+
+/* Research, training and simulation share the same restrained terminal surface. */
+.training-overlay, .auto-overlay {
+  background: var(--qt-bg-primary);
+  background-attachment: scroll;
+  padding: 16px 18px;
+}
+.training-header, .auto-header { border-color: var(--qt-border); padding-bottom: 14px; }
+.training-title, .auto-title { color: var(--qt-text); font-size: 20px; letter-spacing: 0; }
+.training-title::before, .auto-title::before, .auto-card-title::before {
+  background: var(--qt-color-brand);
+}
+.auto-status { border-color: var(--qt-border); background: var(--qt-bg-elev); color: var(--qt-text-secondary); }
+.auto-status.running { color: var(--qt-color-success); border-color: var(--qt-color-success); background: var(--qt-bg-elev); }
+.auto-status.running::before { background: var(--qt-color-success); animation: none; }
+.auto-error { color: var(--qt-color-error); border-color: var(--qt-color-error); background: var(--qt-bg-card); }
+.tr-tab { border-radius: var(--qt-radius-md); background: var(--qt-bg-elev); border-color: var(--qt-border); font-family: inherit; }
+.tr-tab.active { background: var(--qt-color-brand); color: #092820; border-color: var(--qt-color-brand); }
+.tr-tab:focus-visible { outline: 2px solid var(--qt-color-brand); outline-offset: 2px; }
+.training-chart, .auto-card, .auto-metric, .factor-filter-panel, .factor-plan-card {
+  border: 1px solid var(--qt-border);
+  border-radius: var(--qt-radius-md);
+  background: var(--qt-bg-card);
+  box-shadow: none;
+}
+.auto-card::after, .auto-metric::after { display: none; }
+.auto-card:hover, .auto-metric:hover { border-color: var(--qt-border); box-shadow: none; }
+.auto-card-title { color: var(--qt-text); font-size: 14px; }
+.auto-metric-value { color: var(--qt-text); text-shadow: none; }
+.auto-metric-value.up, .auto-metric-value.down { text-shadow: none; }
+.auto-table-wrap, .auto-equity-wrap { border-color: var(--qt-border); background: var(--qt-bg-card); }
+.auto-table th { color: var(--qt-text-secondary); background: var(--qt-bg-elev); border-color: var(--qt-border); }
+.auto-table td { color: var(--qt-text); border-color: var(--qt-line); }
+.auto-table tbody tr:nth-child(even) { background: transparent; }
+.auto-table tbody tr:hover { background: var(--qt-bg-elev); }
+.factor-filter-toggle { background: var(--qt-bg-elev); border-color: var(--qt-border); }
+.factor-chip { border-color: var(--qt-border); background: var(--qt-bg-elev); color: var(--qt-text); }
+.factor-chip.condition-chip { border-color: var(--qt-color-brand-strong); background: var(--qt-bg-elev); }
+.btn.tr-big.up, .btn.tr-big.down, .btn.tr-big.primary {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  text-shadow: none;
+  box-shadow: none;
+  background: var(--qt-bg-elev);
+}
+.btn.tr-big.up { color: var(--qt-color-up); border-color: var(--qt-color-up); }
+.btn.tr-big.down { color: var(--qt-color-down); border-color: var(--qt-color-down); }
+.btn.tr-big.primary { color: #092820; border-color: var(--qt-color-brand); background: var(--qt-color-brand); }
+.btn.tr-big.up:hover, .btn.tr-big.down:hover, .btn.tr-big.primary:hover {
+  transform: none;
+  box-shadow: none;
+}
+.btn.tr-big.up:hover, .btn.tr-big.down:hover { background: var(--qt-bg-elev); }
+.btn.tr-big.primary:hover { background: var(--qt-color-brand-strong); }
+.training-result.ok { color: var(--qt-color-success); background: var(--qt-bg-elev); }
+.training-result.no { color: var(--qt-color-error); background: var(--qt-bg-elev); }
+@media (max-width: 600px) {
+  .training-overlay, .auto-overlay { padding: 12px; }
+  .auto-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

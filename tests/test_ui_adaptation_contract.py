@@ -26,7 +26,7 @@ def test_tokens_are_unique_first_loaded_and_preserve_legacy_aliases():
     tokens = _read(TOKENS)
 
     token_link = '<link rel="stylesheet" href="css/tokens.css?v=2">'
-    style_link = '<link rel="stylesheet" href="css/style.css?v=9">'
+    style_link = '<link rel="stylesheet" href="css/style.css?v=10">'
     assert index.count(token_link) == 1
     assert index.count(style_link) == 1
     assert index.index(token_link) < index.index(style_link)
@@ -106,6 +106,20 @@ def test_unified_dark_workbench_groups_navigation_and_keeps_compact_entries():
     assert 'id="navToggle"' in index and 'id="navClose"' in index and 'id="watchToggle"' in index
     assert 'aria-controls="deckRail"' in index and 'aria-controls="marketWatch"' in index
     assert "setCompactPanel('nav'" in app and "setCompactPanel('watch'" in app
+
+
+def test_secondary_surfaces_share_terminal_theme_and_training_modes_are_keyboard_reachable():
+    index = _read(INDEX)
+    style = _read(STYLE)
+    training = _read(PROJECT_ROOT / "static" / "js" / "training.js")
+
+    for surface in (".training-overlay", ".auto-overlay", ".auto-card", ".factor-filter-panel"):
+        assert surface in style
+    assert "background: var(--qt-bg-primary);" in style
+    assert ".auto-table tbody tr:hover { background: var(--qt-bg-elev); }" in style
+    for mode in ("guess", "trade", "replay"):
+        assert re.search(rf'<button[^>]*class="tr-tab[^\"]*"[^>]*data-mode="{mode}"[^>]*aria-pressed=', index)
+    assert "t.setAttribute('aria-pressed', String(active))" in training
 
 
 def test_adapter_css_is_scoped_and_hides_only_verified_duplicates():

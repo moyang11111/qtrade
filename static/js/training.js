@@ -88,8 +88,11 @@
   function switchMode(m) {
     mode = m;
     // tabs 高亮
-    els.tabs.querySelectorAll('.tr-tab').forEach(t =>
-      t.classList.toggle('active', t.dataset.mode === m));
+    els.tabs.querySelectorAll('.tr-tab').forEach(t => {
+      const active = t.dataset.mode === m;
+      t.classList.toggle('active', active);
+      t.setAttribute('aria-pressed', String(active));
+    });
     // 预测天数选择：仅 guess 模式显示
     els.horizonWrap.style.display = m === 'guess' ? '' : 'none';
     // 按钮区
