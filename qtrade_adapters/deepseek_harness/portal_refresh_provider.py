@@ -24,7 +24,7 @@ from .portal_refresh import HISTORY_WINDOW
 from .portal_refresh_worker import PortalRefreshPlan, _plan_universe_token
 
 
-PROVIDER_VERSION = "akshare-em-tx-cache-qfq-v4"
+PROVIDER_VERSION = "akshare-em-tx-cache-qfq-v5"
 _DATE_FORMAT = "%Y-%m-%d"
 # Keep a generous finite bound so malformed calendar responses fail closed.
 _MAX_CALENDAR_DATES = 20_000
@@ -324,9 +324,10 @@ class AksharePortalProvider:
                     "high": float(candidate["最高" if source == "eastmoney" else "high"]),
                     "low": float(candidate["最低" if source == "eastmoney" else "low"]),
                     "close": float(candidate["收盘" if source == "eastmoney" else "close"]),
-                    # Eastmoney reports lots (100 shares); Tencent reports shares.
+                    # Eastmoney reports lots. AKShare Tencent normally converts
+                    # to shares, but treats sz000* as an index and leaves lots.
                     "volume": float(candidate["成交量" if source == "eastmoney" else "volume"])
-                    * (100 if source == "eastmoney" else 1),
+                    * (100 if source == "eastmoney" or code.startswith("000") else 1),
                     "adjust": "qfq",
                 }
                 if any(not math.isfinite(values[key]) or values[key] <= 0 for key in ("open", "high", "low", "close", "volume")):

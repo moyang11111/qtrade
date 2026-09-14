@@ -267,7 +267,11 @@ def test_history_uses_cache_and_fetches_only_recent_gap(tmp_path, monkeypatch):
         provider.fetch_history("600001", target.isoformat())
 
 
-def test_tencent_qfq_primary_keeps_share_units_and_does_not_call_sina(monkeypatch):
+@pytest.mark.parametrize(
+    ("code", "symbol", "expected_volume"),
+    [("600001", "sh600001", 1234), ("000001", "sz000001", 123400)],
+)
+def test_tencent_qfq_primary_normalizes_share_units_and_does_not_call_sina(monkeypatch, code, symbol, expected_volume):
     calls = []
 
     class Frame:
@@ -292,11 +296,11 @@ def test_tencent_qfq_primary_keeps_share_units_and_does_not_call_sina(monkeypatc
         stock_zh_a_daily=lambda **_: pytest.fail("Sina must not be called"),
     ))
     _, provider = _plan()
-    result = provider.fetch("600001", TARGET)
-    assert result["rows"][0]["volume"] == 1234
+    result = provider.fetch(code, TARGET)
+    assert result["rows"][0]["volume"] == expected_volume
     assert [source for source, _ in calls] == ["tencent"]
     assert calls[0][1] == {
-        "symbol": "sh600001", "start_date": "20260828",
+        "symbol": symbol, "start_date": "20260828",
         "end_date": "20260828", "adjust": "qfq", "timeout": 20,
     }
 
