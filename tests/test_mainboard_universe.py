@@ -5,6 +5,7 @@ import inspect
 import os
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -12,6 +13,40 @@ import pytest
 import qtrade_base_bridge
 from qtrade_adapters.deepseek_harness.market_data import MainboardMarketDataAdapter
 import server
+
+
+def test_data_service_restores_only_buy_candidates_from_pipeline():
+    pipeline = SimpleNamespace(decision={"records": [
+        {"symbol": "000001", "action": "buy"},
+        {"symbol": "000002", "action": "hold"},
+        {"symbol": "600519", "action": "sell"},
+        {"symbol": "000333", "action": "buy"},
+    ]})
+
+    assert server.DataService._pipeline_candidate_symbols(pipeline) == {"000001", "000333"}
+    assert server.DataService._pipeline_candidate_symbols(None) == set()
+
+
+def test_engine_paper_reset_keeps_engine_paused():
+    trader = server.EngineAutoPaperTrader.__new__(server.EngineAutoPaperTrader)
+    reset_calls = []
+    trader.engine = SimpleNamespace(reset_account=lambda account, cash: reset_calls.append((account, cash)))
+    trader.state = {"signal_mode": "sequoia_oneil"}
+    trader._load_meta = lambda: None
+    trader._default_meta = lambda: {"running": True, "signal_mode": "sequoia_oneil"}
+    trader._save_meta = lambda: None
+    trader.status = lambda service=None: dict(trader.state)
+
+    result = trader.reset()
+
+    assert reset_calls == [("default", 100000.0)]
+    assert result["running"] is False
+
+
+def test_engine_paper_default_state_is_paused():
+    trader = server.EngineAutoPaperTrader.__new__(server.EngineAutoPaperTrader)
+
+    assert trader._default_meta()["running"] is False
 
 
 def _write_stock_basic(path: Path) -> None:

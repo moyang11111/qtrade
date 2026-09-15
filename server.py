@@ -273,6 +273,16 @@ def _portal_read(method):
 class DataService:
     """股票数据服务：实时（腾讯）优先，CSV 回退；全部仅内存缓存。"""
 
+    @staticmethod
+    def _pipeline_candidate_symbols(pipeline) -> set[str]:
+        if pipeline is None or not isinstance(getattr(pipeline, "decision", None), dict):
+            return set()
+        return {
+            str(item["symbol"])
+            for item in pipeline.decision.get("records", ())
+            if isinstance(item, dict) and item.get("action") == "buy" and item.get("symbol")
+        }
+
     def __init__(
         self,
         data_dir: str,
@@ -315,7 +325,7 @@ class DataService:
             overlay_metadata=list(portal_snapshot.metadata) if portal_snapshot is not None else None,
         )
         self._portal_reload_lock = threading.RLock()
-        self._candidate_symbols: set[str] = set()
+        self._candidate_symbols: set[str] = self._pipeline_candidate_symbols(self.active_pipeline)
 
     def reload_portal_snapshot(self, expected: dict | None = None) -> bool:
         """Atomically switch this service to a newly published portal mirror."""
@@ -389,6 +399,7 @@ class DataService:
                 return False
             self.mainboard_adapter = adapter
             self.active_pipeline = pipeline
+            self._candidate_symbols = self._pipeline_candidate_symbols(pipeline)
             self.portal_mirror_active = True
             self.live = False
             self.live_src = None
@@ -2372,7 +2383,7 @@ class AutoPaperTrader:
         with self.lock:
             signal_mode = self._load().get("signal_mode", "learned_v2")
             self.state = {"cash": self.INIT_CASH, "positions": {}, "trades": [],
-                          "equity_hist": [], "running": True, "last_run": None,
+                          "equity_hist": [], "running": False, "last_run": None,
                           "last_error": None, "_sig_date": {}, "signal_mode": signal_mode}
             self._save()
             return self.status(service)
@@ -2420,7 +2431,7 @@ class EngineAutoPaperTrader:
     def _default_meta(self) -> dict:
         return {
             "cash": self.INIT_CASH,
-            "running": True,
+            "running": False,
             "signal_mode": "sequoia_oneil",
             "last_run": None,
             "last_error": None,
@@ -2645,6 +2656,7 @@ class EngineAutoPaperTrader:
         self.engine.reset_account(self.ACCOUNT_ID, self.INIT_CASH)
         self.state = self._default_meta()
         self.state["signal_mode"] = mode
+        self.state["running"] = False
         self._save_meta()
         return self.status(service)
 
@@ -3332,6 +3344,7 @@ def _commit_snapshot_pipeline(pipeline) -> bool:
                 )
                 SERVICE.mainboard_adapter = adapter
                 SERVICE.active_pipeline = pipeline
+                SERVICE._candidate_symbols = SERVICE._pipeline_candidate_symbols(pipeline)
                 SERVICE.portal_mirror_active = True
                 SERVICE.live = False
                 SERVICE.live_src = None
