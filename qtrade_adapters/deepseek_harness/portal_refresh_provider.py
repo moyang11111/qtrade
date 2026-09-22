@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 
 from .market_data import MainboardMarketDataAdapter, normalize_code
 from .portal_refresh import HISTORY_WINDOW
-from .portal_refresh_worker import PortalRefreshPlan, _plan_universe_token
+from .portal_refresh_worker import PortalRefreshPlan, PortalWorkerError, _plan_universe_token
 
 
 PROVIDER_VERSION = "akshare-em-tx-cache-qfq-v5"
@@ -359,7 +359,9 @@ class AksharePortalProvider:
         # a target-day raw bar exists, preventing a false 'suspended' exclusion.
         tdx_present = self._tdx_target_present(code, target_date)
         if provider_failed or (tdx_present is True and "target_date_missing" in quality_reasons):
-            raise RuntimeError("all qfq providers failed")
+            # Both external qfq endpoints can fail briefly even when the
+            # target-day bar exists. Let the bounded worker retry this item.
+            raise PortalWorkerError("provider_failed", transient=True)
         reason = "target_date_missing" if "target_date_missing" in quality_reasons else "insufficient_history"
         if self.metadata[code].get("suspended") is True:
             reason = "suspended"

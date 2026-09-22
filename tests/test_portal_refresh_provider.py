@@ -314,8 +314,9 @@ def test_tdx_cannot_turn_raw_bar_into_qfq_snapshot(monkeypatch):
     ))
     _, provider = _plan()
     monkeypatch.setattr(provider, "_tdx_target_present", lambda *_: True)
-    with pytest.raises(RuntimeError, match="all qfq providers failed"):
+    with pytest.raises(RuntimeError, match="provider_failed") as error:
         provider.fetch_history("600001", TARGET)
+    assert error.value.transient is True
 
 
 def test_calendar_uses_tencent_then_eastmoney_without_sina(monkeypatch):
