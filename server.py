@@ -142,7 +142,7 @@ class TencentLiveSource:
 
         klines = self._parse_kline_response(data, sym)
         if not klines:
-            raise RuntimeError(f"腾讯接口无 {symbol} 数据")
+            raise RuntimeError(f"腾讯接口无 {symbol} 前复权日 K 数据")
 
         # 腾讯列序: [日期, 开, 收, 高, 低, 量]；个别行可能多带字段，只取前 6 列
         klines = [row[:6] for row in klines]
@@ -152,6 +152,15 @@ class TencentLiveSource:
         df["date"] = pd.to_datetime(df["date"])
         df.set_index("date", inplace=True)
         df = df.sort_index()
+        if df.empty or df[["open", "close", "high", "low", "volume"]].isna().any().any():
+            raise RuntimeError(f"腾讯接口 {symbol} 日 K 数据不完整")
+        if (df[["open", "close", "high", "low", "volume"]] <= 0).any().any():
+            raise RuntimeError(f"腾讯接口 {symbol} 日 K 数据无效")
+        if ((df["high"] < df[["open", "close"]].max(axis=1)) |
+                (df["low"] > df[["open", "close"]].min(axis=1))).any():
+            raise RuntimeError(f"腾讯接口 {symbol} 日 K 价格不一致")
+        if symbol.startswith("000"):
+            df["volume"] *= 100  # 腾讯将 sz000* 的成交量作为手返回
 
         self._kline_cache[symbol] = (now, df)
         self.last_error = None
@@ -160,7 +169,7 @@ class TencentLiveSource:
     @staticmethod
     def _parse_kline_response(data: dict, sym: str) -> list:
         node = data.get("data", {}).get(sym, {})
-        return node.get("qfqday") or node.get("day") or []
+        return node.get("qfqday") or []
 
     # ---------- 实时快照 ----------
 
@@ -316,6 +325,8 @@ class DataService:
         self.portal_mirror_active = portal_snapshot is not None
         self.live = bool(live and not self.portal_mirror_active)
         self.live_src = TencentLiveSource() if self.live else None
+        # Display-only feed: never enters the verified research/paper cache.
+        self.market_src = TencentLiveSource() if live else None
         self.mainboard_adapter = MainboardMarketDataAdapter(
             base_dir=qtrade_base_bridge.base_dir(),
             csv_dir=self.data_dir,
@@ -638,6 +649,81 @@ class DataService:
         return out
 
     @_portal_read
+    def _market_df(self, symbol: str) -> tuple[pd.DataFrame | None, str]:
+        """Return display data without mutating the published research view."""
+
+        published = self._resolve_df(symbol)
+        if self.market_src is not None:
+            try:
+                live = self.market_src.fetch_kline(symbol, 400)
+                if not live.empty and (published is None or live.index[-1] >= published.index[-1]):
+                    return live, "tencent_qfq"
+            except Exception:
+                pass
+        return published, "published_snapshot" if self.portal_mirror_active else "local_fallback"
+
+    @_portal_read
+    def get_market_kline(self, symbol: str, limit: int = 300) -> list[dict]:
+        df, _ = self._market_df(symbol)
+        if df is None:
+            return []
+        return [
+            {
+                "time": _ts(df.index, i),
+                "open": round(float(df.iloc[i]["open"]), 2),
+                "high": round(float(df.iloc[i]["high"]), 2),
+                "low": round(float(df.iloc[i]["low"]), 2),
+                "close": round(float(df.iloc[i]["close"]), 2),
+                "volume": int(df.iloc[i]["volume"]),
+            }
+            for i in range(max(0, len(df) - limit), len(df))
+        ]
+
+    @_portal_read
+    def get_market_info(self, symbol: str) -> dict:
+        info = dict(self.get_info(symbol))
+        df, source = self._market_df(symbol)
+        info["kline_source"] = source
+        info["quote_source"] = "published_snapshot" if self.portal_mirror_active else "local_fallback"
+        if df is not None and not df.empty:
+            close, high, low, volume = (df[name] for name in ("close", "high", "low", "volume"))
+            info.update({
+                "kline_date": str(df.index[-1].date()),
+                "high_60d": round(float(high.tail(60).max()), 2),
+                "low_60d": round(float(low.tail(60).min()), 2),
+                "vol_avg_20d": int(volume.tail(20).mean()),
+            })
+            if source == "tencent_qfq":
+                latest = float(close.iloc[-1])
+                previous = float(close.iloc[-2]) if len(close) > 1 else latest
+                info.update({
+                    "latest": round(latest, 2),
+                    "open": round(float(df["open"].iloc[-1]), 2),
+                    "high": round(float(high.iloc[-1]), 2),
+                    "low": round(float(low.iloc[-1]), 2),
+                    "change": round(latest - previous, 2),
+                    "change_pct": round((latest / previous - 1) * 100, 2) if previous else 0.0,
+                    "quote_source": "tencent_qfq_close",
+                })
+        if self.market_src is not None:
+            try:
+                quote = self.market_src.fetch_quote(symbol)
+                quote_day = str(quote.get("time") or "")[:8]
+                published_day = str(info.get("date") or "").replace("-", "")
+                if quote_day and quote_day >= published_day and quote.get("price", 0) > 0:
+                    info.update({
+                        "name": quote["name"], "latest": quote["price"],
+                        "open": quote["open"], "high": quote["high"],
+                        "low": quote["low"], "change": quote["change"],
+                        "change_pct": quote["change_pct"], "volume": quote["volume"],
+                        "turnover": quote["turnover"], "pe": quote["pe"],
+                        "time": quote["time"], "quote_source": "tencent",
+                    })
+            except Exception:
+                pass
+        return info
+
+    @_portal_read
     def get_info(self, symbol: str) -> dict:
         """行情概要：实时快照 + K线派生指标。"""
         quote = None
@@ -699,6 +785,21 @@ class DataService:
         df = self._resolve_df(symbol)
         if df is None:
             return {}
+        result = self._indicators_from_frame(df)
+        self._ind_cache[symbol] = result
+        return result
+
+    @_portal_read
+    def get_market_indicators(self, symbol: str) -> dict:
+        df, source = self._market_df(symbol)
+        if df is None:
+            return {}
+        if source != "tencent_qfq":
+            return self.get_indicators(symbol)
+        return self._indicators_from_frame(df)
+
+    @staticmethod
+    def _indicators_from_frame(df: pd.DataFrame) -> dict:
         close = df["close"]
         n = len(df)
         tail_n = 300
@@ -745,9 +846,7 @@ class DataService:
                 "lower": _round_or_none(lower.iloc[i]),
             })
 
-        result = {"mas": mas, "macd": macd_data, "rsi": rsi_data, "boll": boll_data}
-        self._ind_cache[symbol] = result
-        return result
+        return {"mas": mas, "macd": macd_data, "rsi": rsi_data, "boll": boll_data}
 
     @_portal_read
     def get_factors(self, symbol: str) -> dict:
@@ -4392,11 +4491,11 @@ class APIHandler(SimpleHTTPRequestHandler):
     def _symbol_query(self, kind: str, symbol: str, query):
         if kind == "kline":
             limit = int(query.get("limit", ["300"])[0])
-            data = SERVICE.get_kline(symbol, limit)
+            data = SERVICE.get_market_kline(symbol, limit)
         elif kind == "info":
-            data = SERVICE.get_info(symbol)
+            data = SERVICE.get_market_info(symbol)
         elif kind == "indicators":
-            data = SERVICE.get_indicators(symbol)
+            data = SERVICE.get_market_indicators(symbol)
         elif kind == "factors":
             data = SERVICE.get_factors(symbol)
         else:

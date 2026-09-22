@@ -135,7 +135,7 @@ def _worker(tmp_path: Path, provider=None, **kwargs) -> PortalRefreshWorker:
     return PortalRefreshWorker(
         user_data_dir=user_data,
         provider=provider or FakeProvider(),
-        batch_size=2,
+        batch_size=kwargs.pop("batch_size", 2),
         item_timeout_seconds=kwargs.pop("item_timeout_seconds", 2),
         batch_timeout_seconds=kwargs.pop("batch_timeout_seconds", 10),
         job_timeout_seconds=kwargs.pop("job_timeout_seconds", 30),
@@ -209,6 +209,34 @@ def test_history_worker_publishes_v2_target_anchored_snapshot(tmp_path: Path) ->
     )
     assert rows is not None
     assert all(len(value) == portal_refresh.HISTORY_WINDOW for value in rows.values())
+
+
+def test_history_worker_parallel_fetch_preserves_verified_checkpoint(tmp_path: Path) -> None:
+    provider = FakeHistoryProvider()
+    worker = _worker(
+        tmp_path,
+        provider=provider,
+        history_window=portal_refresh.HISTORY_WINDOW,
+        batch_size=5,
+        parallelism=3,
+        item_timeout_seconds=10,
+        batch_timeout_seconds=30,
+        job_timeout_seconds=90,
+    )
+
+    result = worker.run(_plan(provider))
+
+    assert result["state"] == "success"
+    assert result["completed"] == len(SYMBOLS)
+    checkpoint = json.loads(worker._paths().checkpoint.read_text(encoding="utf-8"))
+    assert checkpoint["state"] == "success"
+    assert checkpoint["completed"] == len(SYMBOLS)
+    assert len(checkpoint["batches"]) == 1
+    snapshot = read_current_snapshot(
+        tmp_path / "user-data" / "state", user_data_dir=tmp_path / "user-data",
+    )
+    assert snapshot is not None
+    assert snapshot.manifest["symbols"] == list(SYMBOLS)
 
 
 def test_history_worker_excludes_missing_target_without_forging_bars(tmp_path: Path) -> None:

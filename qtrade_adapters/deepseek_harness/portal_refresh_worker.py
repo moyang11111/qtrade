@@ -17,6 +17,7 @@ without network access or third-party writes.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import datetime as _datetime
 import hashlib
@@ -1125,6 +1126,7 @@ class PortalRefreshWorker:
         staged_publish_process_factory=None,
         history_window: int = 0,
         status_callback=None,
+        parallelism: int = 1,
     ):
         if not MIN_BATCH_SIZE <= int(batch_size) <= MAX_BATCH_SIZE:
             raise ValueError("invalid batch size")
@@ -1138,6 +1140,8 @@ class PortalRefreshWorker:
             raise ValueError("invalid attempt count")
         if history_window not in (0, portal_refresh.HISTORY_WINDOW):
             raise ValueError("invalid history window")
+        if not 1 <= int(parallelism) <= 8:
+            raise ValueError("invalid parallelism")
         self.user_data_dir = Path(user_data_dir)
         self.state_dir = Path(state_dir) if state_dir is not None else self.user_data_dir / "state"
         self.provider = provider
@@ -1148,6 +1152,7 @@ class PortalRefreshWorker:
         self.max_attempts = int(max_attempts)
         self.retry_delay = float(retry_delay_seconds)
         self.history_window = int(history_window)
+        self.parallelism = int(parallelism)
         self.status_callback = status_callback
         self.process_factory = process_factory or _default_process_factory
         self.publish_current = bool(publish_current)
@@ -1709,6 +1714,20 @@ class PortalRefreshWorker:
             excluded = {str(item["symbol"]): str(item["reason"]) for item in payload["excluded"]}
             if payload["state"] == "complete":
                 return "complete", payload
+        prefetched: dict[str, _ItemResult] = {}
+        if self.history_window and self.parallelism > 1:
+            remaining = [symbol for symbol in batch_symbols if symbol not in items and symbol not in excluded]
+            # Each task still uses its own deadline-bound child process.  Only
+            # the coordinator thread writes checkpoints, preserving ordering.
+            with ThreadPoolExecutor(max_workers=self.parallelism) as executor:
+                futures = {
+                    symbol: executor.submit(
+                        self._run_item, self.provider_for_job, symbol, target, batch_deadline,
+                    )
+                    for symbol in remaining
+                }
+                for symbol, future in futures.items():
+                    prefetched[symbol] = future.result()
         for symbol in batch_symbols:
             if symbol in items or symbol in excluded:
                 continue
@@ -1721,7 +1740,11 @@ class PortalRefreshWorker:
                 checkpoint["reason"] = "running"
                 self._heartbeat(checkpoint, lease, started)
                 self._write_checkpoint(paths, checkpoint)
-                outcome = self._run_item(provider=self.provider_for_job, symbol=symbol, target=target, deadline=batch_deadline)
+                outcome = (
+                    prefetched.pop(symbol)
+                    if attempt == 1 and symbol in prefetched
+                    else self._run_item(provider=self.provider_for_job, symbol=symbol, target=target, deadline=batch_deadline)
+                )
                 if outcome.ok and outcome.item is not None:
                     items[symbol] = outcome.item
                 elif outcome.reason in _EXCLUSION_REASONS and self.history_window:

@@ -24,6 +24,7 @@
 
   let chartManager = null;
   let updateMonitor = null;
+  let marketRefreshInFlight = false;
   const EMBED_IFRAME_IDS = Object.freeze({
     portal: 'iframePortal',
     pitch: 'iframePitch',
@@ -242,7 +243,16 @@
     els.qL60.textContent = info.low_60d ?? '——';
     els.qVol.textContent = info.vol_avg_20d ? (info.vol_avg_20d / 1e6).toFixed(1) + 'M' : '——';
     els.qTurnover.textContent = info.turnover != null ? info.turnover + '%' : '——';
-    els.qTime.textContent = formatQuoteTime(info.time);
+    const quoteLabel = info.quote_source === 'tencent'
+      ? `腾讯 ${formatQuoteTime(info.time)}`
+      : info.quote_source === 'tencent_qfq_close'
+        ? `腾讯前复权日 K 收盘 ${info.kline_date || '日期未确认'}`
+      : `已发布快照 ${info.date || '日期未确认'}`;
+    const klineLabel = info.kline_source === 'tencent_qfq'
+      ? `前复权日 K 至 ${info.kline_date || '日期未确认'}`
+      : `日 K 回退至 ${info.kline_date || info.date || '日期未确认'}`;
+    els.qTime.textContent = `${quoteLabel} · ${klineLabel}`;
+    $('liveBadge').hidden = info.quote_source !== 'tencent';
   }
 
   /** 格式化腾讯时间戳 20260804161455 → 2026-08-04 16:14 */
@@ -1286,6 +1296,27 @@
     log('🔄 已刷新');
   }
 
+  async function refreshMarketDisplay() {
+    const symbol = state.activeSymbol;
+    if (!symbol || state.activePage !== 'market' || marketRefreshInFlight) return;
+    marketRefreshInFlight = true;
+    try {
+      const [info, kline, ind] = await Promise.all([
+        API.getInfo(symbol), API.getKline(symbol, 400), API.getIndicators(symbol),
+      ]);
+      if (state.activeSymbol !== symbol || state.activePage !== 'market') return;
+      chartManager.setKline(kline);
+      chartManager.setIndicators(ind);
+      chartIndicatorCache = ind;
+      updateQuote(info);
+      updateSignals(info);
+    } catch (error) {
+      log(`⚠️ 行情刷新失败: ${error.message}`);
+    } finally {
+      marketRefreshInFlight = false;
+    }
+  }
+
   function startUpdateMonitor() {
     if (!window.QTradeUpdate) return;
     updateMonitor = window.QTradeUpdate.createMonitor({
@@ -1310,6 +1341,7 @@
     renderWatchlist();
     updateClock();
     setInterval(updateClock, 1000);
+    setInterval(refreshMarketDisplay, 30000);
     renderTab('trades');
 
     // 获取后端模式（实时/CSV），显示徽标

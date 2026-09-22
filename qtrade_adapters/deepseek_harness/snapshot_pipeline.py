@@ -1288,6 +1288,7 @@ def run_snapshot_pipeline(
             "history_window": portal_refresh.HISTORY_WINDOW,
         }
         if worker_type is PortalRefreshWorker:
+            worker_kwargs["parallelism"] = 6
             def publish_worker_progress(worker_status):
                 total = worker_status.get("total", len(plan.symbols))
                 completed = worker_status.get("completed", 0)
