@@ -1596,7 +1596,9 @@ class PortalRefreshWorker:
         except (OSError, EOFError, ValueError, TypeError, PortalWorkerError):
             if self._stop_event.is_set():
                 return _ItemResult(False, reason="aborted")
-            return _ItemResult(False, reason="provider_failed")
+            # A child launch or pipe failure can be intermittent under a
+            # parallel batch. Retry within the existing per-item limit.
+            return _ItemResult(False, reason="provider_failed", transient=True)
         finally:
             try:
                 parent.close()
