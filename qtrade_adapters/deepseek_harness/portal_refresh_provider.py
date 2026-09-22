@@ -404,16 +404,22 @@ class AksharePortalProvider:
             fresh = self._fetch_rows(code, target_date, start.strftime("%Y%m%d"), 1, all_rows=True)
             old_by_date = {str(row["date"]): row for row in cached}
             overlaps = [row for row in fresh if row["date"] in old_by_date]
-            if not overlaps:
-                raise RuntimeError("qfq overlap unavailable")
+            rebase = not overlaps
             for row in overlaps:
                 old = old_by_date[str(row["date"])]
                 for field in ("open", "high", "low", "close"):
                     if not math.isclose(float(row[field]), float(old[field]), abs_tol=0.011, rel_tol=0):
-                        raise RuntimeError("qfq overlap mismatch")
-            merged = {str(row["date"]): row for row in cached}
-            merged.update({str(row["date"]): row for row in fresh})
-            rows = [merged[day] for day in sorted(merged)][-HISTORY_WINDOW:]
+                        rebase = True
+            if rebase:
+                # A corporate action can change every historical qfq price.
+                # Replace the entire window from a verified qfq source rather
+                # than combining incompatible adjustment bases.
+                start = _datetime.date.fromisoformat(target_date) - _datetime.timedelta(days=600)
+                rows = self._fetch_rows(code, target_date, start.strftime("%Y%m%d"), HISTORY_WINDOW)
+            else:
+                merged = {str(row["date"]): row for row in cached}
+                merged.update({str(row["date"]): row for row in fresh})
+                rows = [merged[day] for day in sorted(merged)][-HISTORY_WINDOW:]
         if len(rows) != HISTORY_WINDOW or rows[-1]["date"] != target_date:
             raise PortalHistoryError("target_date_missing")
         return {"rows": rows, "metadata": dict(self.metadata[code])}

@@ -258,13 +258,23 @@ def test_history_uses_cache_and_fetches_only_recent_gap(tmp_path, monkeypatch):
     assert calls == [("600001", target.isoformat(), "20260820", 1, True)]
 
     def inconsistent(*args, **kwargs):
+        if args[3] == 320:
+            calls.append(args + (kwargs.get("all_rows", False),))
+            return [
+                {"code": "600001", "date": (target - datetime.timedelta(days=319 - index)).isoformat(),
+                 "open": 9, "high": 12, "low": 8, "close": 11, "volume": 1000,
+                 "adjust": "qfq"}
+                for index in range(320)
+            ]
         rows = fresh(*args, **kwargs)
         rows[0]["close"] = 12
         return rows
 
     monkeypatch.setattr(provider, "_fetch_rows", inconsistent)
-    with pytest.raises(RuntimeError, match="qfq overlap mismatch"):
-        provider.fetch_history("600001", target.isoformat())
+    rebased = provider.fetch_history("600001", target.isoformat())
+    assert len(rebased["rows"]) == 320
+    assert all(row["close"] == 11 for row in rebased["rows"])
+    assert calls[-1] == ("600001", target.isoformat(), "20250105", 320, False)
 
 
 @pytest.mark.parametrize(
