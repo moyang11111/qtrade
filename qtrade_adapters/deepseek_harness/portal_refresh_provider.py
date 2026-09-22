@@ -24,7 +24,8 @@ from .portal_refresh import HISTORY_WINDOW
 from .portal_refresh_worker import PortalRefreshPlan, PortalWorkerError, _plan_universe_token
 
 
-PROVIDER_VERSION = "akshare-em-tx-cache-qfq-v5"
+PROVIDER_VERSION = "tx-direct-em-cache-qfq-v6"
+_TENCENT_QFQ_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 _DATE_FORMAT = "%Y-%m-%d"
 # Keep a generous finite bound so malformed calendar responses fail closed.
 _MAX_CALENDAR_DATES = 20_000
@@ -293,29 +294,52 @@ class AksharePortalProvider:
         return None
 
     def _source_rows(self, source: str, code: str, target_date: str, start_date: str) -> list[dict[str, object]]:
-        import akshare as ak
+        if source == "tencent":
+            import requests
 
-        with _akshare_network_guard():
-            if source == "eastmoney":
+            symbol = self._ak_symbol(code)
+            with _akshare_network_guard():
+                response = requests.get(
+                    _TENCENT_QFQ_URL,
+                    params={"param": f"{symbol},day,,,400,qfq"},
+                )
+                response.raise_for_status()
+                payload = response.json()
+            if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+                raise RuntimeError("provider schema invalid")
+            node = payload["data"].get(symbol, {})
+            raw = node.get("qfqday") if isinstance(node, dict) else None
+            if payload.get("code") != 0 or not isinstance(raw, list) or not 0 < len(raw) <= 1000:
+                raise RuntimeError("provider returned invalid qfq history")
+            try:
+                candidates = [
+                    {"date": row[0], "open": row[1], "close": row[2],
+                     "high": row[3], "low": row[4], "volume": row[5]}
+                    for row in raw
+                    if isinstance(row, list) and len(row) >= 6
+                ]
+            except (IndexError, TypeError) as exc:
+                raise RuntimeError("provider schema invalid") from exc
+            if len(candidates) != len(raw):
+                raise RuntimeError("provider schema invalid")
+        else:
+            import akshare as ak
+
+            with _akshare_network_guard():
                 frame = ak.stock_zh_a_hist(
                     symbol=code, period="daily", start_date=start_date,
                     end_date=target_date.replace("-", ""), adjust="qfq", timeout=20,
                 )
-            else:
-                frame = ak.stock_zh_a_hist_tx(
-                    symbol=self._ak_symbol(code), start_date=start_date,
-                    end_date=target_date.replace("-", ""), adjust="qfq", timeout=20,
-                )
-        if frame is None or frame.empty:
-            # Empty history is ambiguous (source outage versus new listing).
-            # Never exclude a symbol from a publishable universe on that basis.
-            raise RuntimeError("provider returned empty history")
+            if frame is None or frame.empty:
+                # Empty history is ambiguous (source outage versus new listing).
+                # Never exclude a symbol from a publishable universe on that basis.
+                raise RuntimeError("provider returned empty history")
+            candidates = frame.to_dict(orient="records")
         by_date: dict[str, dict[str, object]] = {}
         try:
-            candidates = frame.to_dict(orient="records")
             for candidate in candidates:
                 date = _date_text(candidate.get("日期" if source == "eastmoney" else "date"))
-                if date > target_date:
+                if date > target_date or date.replace("-", "") < start_date:
                     continue
                 values = {
                     "code": code,
@@ -324,10 +348,10 @@ class AksharePortalProvider:
                     "high": float(candidate["最高" if source == "eastmoney" else "high"]),
                     "low": float(candidate["最低" if source == "eastmoney" else "low"]),
                     "close": float(candidate["收盘" if source == "eastmoney" else "close"]),
-                    # Eastmoney reports lots. AKShare Tencent normally converts
-                    # to shares, but treats sz000* as an index and leaves lots.
+                    # Both fixed raw endpoints report lots; normalize every
+                    # mainboard stock to shares before factor calculations.
                     "volume": float(candidate["成交量" if source == "eastmoney" else "volume"])
-                    * (100 if source == "eastmoney" or code.startswith("000") else 1),
+                    * 100,
                     "adjust": "qfq",
                 }
                 if any(not math.isfinite(values[key]) or values[key] <= 0 for key in ("open", "high", "low", "close", "volume")):

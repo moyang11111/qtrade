@@ -142,7 +142,9 @@ def test_plan_rejects_unbounded_or_duplicate_universe():
 
 
 def test_provider_uses_eastmoney_qfq_fallback_and_converts_lots(monkeypatch):
+    import requests
     calls = []
+    monkeypatch.setattr(requests, "get", lambda *_, **__: (_ for _ in ()).throw(ConnectionError("offline")))
 
     class Frame:
         empty = False
@@ -184,7 +186,9 @@ def test_provider_uses_eastmoney_qfq_fallback_and_converts_lots(monkeypatch):
 
 
 def test_provider_history_is_target_anchored_and_bounded(monkeypatch):
+    import requests
     calls = []
+    monkeypatch.setattr(requests, "get", lambda *_, **__: (_ for _ in ()).throw(ConnectionError("offline")))
 
     class Frame:
         empty = False
@@ -279,46 +283,62 @@ def test_history_uses_cache_and_fetches_only_recent_gap(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     ("code", "symbol", "expected_volume"),
-    [("600001", "sh600001", 1234), ("000001", "sz000001", 123400)],
+    [("600001", "sh600001", 123400), ("000001", "sz000001", 123400)],
 )
 def test_tencent_qfq_primary_normalizes_share_units_and_does_not_call_sina(monkeypatch, code, symbol, expected_volume):
+    import requests
     calls = []
 
-    class Frame:
-        empty = False
+    class Response:
+        def raise_for_status(self):
+            pass
 
-        def to_dict(self, orient):
-            assert orient == "records"
-            return [{
-                "date": TARGET, "open": 10, "high": 11, "low": 9,
-                "close": 10.5, "volume": 1234,
-            }]
+        def json(self):
+            return {"code": 0, "data": {symbol: {"qfqday": [[TARGET, "10", "10.5", "11", "9", "1234"]]}}}
 
     def eastmoney(**kwargs):
         pytest.fail("Eastmoney should not be called after Tencent succeeds")
 
-    def tencent(**kwargs):
-        calls.append(("tencent", kwargs))
-        return Frame()
+    def tencent(url, **kwargs):
+        calls.append((url, kwargs))
+        return Response()
 
+    monkeypatch.setattr(requests, "get", tencent)
     monkeypatch.setitem(__import__("sys").modules, "akshare", SimpleNamespace(
-        stock_zh_a_hist=eastmoney, stock_zh_a_hist_tx=tencent,
+        stock_zh_a_hist=eastmoney,
         stock_zh_a_daily=lambda **_: pytest.fail("Sina must not be called"),
     ))
     _, provider = _plan()
     result = provider.fetch(code, TARGET)
     assert result["rows"][0]["volume"] == expected_volume
-    assert [source for source, _ in calls] == ["tencent"]
-    assert calls[0][1] == {
-        "symbol": symbol, "start_date": "20260828",
-        "end_date": "20260828", "adjust": "qfq", "timeout": 20,
-    }
+    assert calls == [("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
+                      {"params": {"param": f"{symbol},day,,,400,qfq"}})]
+
+
+def test_tencent_raw_day_is_not_accepted_as_qfq(monkeypatch):
+    import requests
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"code": 0, "data": {"sh600001": {
+                "day": [[TARGET, "10", "10.5", "11", "9", "1000"]],
+            }}}
+
+    monkeypatch.setattr(requests, "get", lambda *_, **__: Response())
+    _, provider = _plan()
+    with pytest.raises(RuntimeError, match="qfq"):
+        provider._source_rows("tencent", "600001", TARGET, "20260828")
 
 
 def test_tdx_cannot_turn_raw_bar_into_qfq_snapshot(monkeypatch):
+    import requests
     class Empty:
         empty = True
 
+    monkeypatch.setattr(requests, "get", lambda *_, **__: (_ for _ in ()).throw(ConnectionError("offline")))
     monkeypatch.setitem(__import__("sys").modules, "akshare", SimpleNamespace(
         stock_zh_a_hist=lambda **_: Empty(), stock_zh_a_hist_tx=lambda **_: Empty(),
     ))
@@ -362,6 +382,17 @@ def test_calendar_uses_tencent_then_eastmoney_without_sina(monkeypatch):
     ],
 )
 def test_history_validation_exposes_only_stable_quality_classification(monkeypatch, rows, suspended, reason):
+    import requests
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"code": 0, "data": {"sh600001": {"qfqday": [
+                [day, "10", "10.5", "11", "9", "1000"] for day in rows
+            ]}}}
+
+    monkeypatch.setattr(requests, "get", lambda *_, **__: Response())
     class Frame:
         empty = not rows
 
