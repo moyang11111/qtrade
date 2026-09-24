@@ -521,8 +521,8 @@ def test_stale_recovery_never_reclaims_legacy_source_tree_lock(tmp_path, monkeyp
 def test_scheduler_waits_until_cutoff_then_runs_once_after_failure():
     calls = []
     scheduler = runtime.DailyUpdateScheduler(lambda date: calls.append(date) or 1)
-    before = dt.datetime(2026, 8, 25, 18, 29, 59)
-    due = dt.datetime(2026, 8, 25, 18, 30)
+    before = dt.datetime(2026, 8, 25, 15, 29, 59)
+    due = dt.datetime(2026, 8, 25, 15, 30)
 
     assert scheduler.run_pending(before) is None
     assert scheduler.seconds_until_next_check(before) == 1
@@ -531,7 +531,7 @@ def test_scheduler_waits_until_cutoff_then_runs_once_after_failure():
     assert scheduler.run_pending(due + dt.timedelta(minutes=1)) is None
     assert calls == [dt.date(2026, 8, 25)]
     assert scheduler.seconds_until_next_check(due) == pytest.approx(24 * 3600)
-    assert scheduler.run_pending(dt.datetime(2026, 8, 26, 18, 30)) == 1
+    assert scheduler.run_pending(dt.datetime(2026, 8, 26, 15, 30)) == 1
     assert calls == [dt.date(2026, 8, 25), dt.date(2026, 8, 26)]
 
 
@@ -548,8 +548,8 @@ def test_scheduler_fake_clock_and_subprocess_trigger_once(tmp_path):
             )
         )
     )
-    before = dt.datetime(2026, 8, 25, 18, 29)
-    due = dt.datetime(2026, 8, 25, 18, 30)
+    before = dt.datetime(2026, 8, 25, 15, 29)
+    due = dt.datetime(2026, 8, 25, 15, 30)
 
     assert scheduler.run_pending(before) is None
     assert scheduler.run_pending(due) == 0
@@ -635,14 +635,14 @@ def test_maybe_auto_update_is_singleton_and_can_stop(tmp_path):
             env={},
             subprocess_module=processes,
             project_root=tmp_path,
-            clock=lambda: dt.datetime(2026, 8, 28, 18, 29),
+            clock=lambda: dt.datetime(2026, 8, 28, 15, 29),
         )
         second = runtime.maybe_auto_update(
             base_dir_fn=lambda: tmp_path,
             env={},
             subprocess_module=processes,
             project_root=tmp_path,
-            clock=lambda: dt.datetime(2026, 8, 28, 18, 29),
+            clock=lambda: dt.datetime(2026, 8, 28, 15, 29),
         )
         assert first is second
         assert first is not None
@@ -655,8 +655,8 @@ def test_auto_scheduler_uses_user_state_root_and_stops_owned_child(tmp_path):
     runtime.stop_auto_update()
     processes = BlockingAutoProcesses()
     state_root = tmp_path / "user-data" / "qtrade-state"
-    before = dt.datetime(2026, 8, 28, 18, 29)
-    due = dt.datetime(2026, 8, 28, 18, 30)
+    before = dt.datetime(2026, 8, 28, 15, 29)
+    due = dt.datetime(2026, 8, 28, 15, 30)
     scheduler = runtime.maybe_auto_update(
         base_dir_fn=lambda: tmp_path / "deck",
         env={"QTRADE_UPDATE_STATE_DIR": str(state_root)},
@@ -707,11 +707,11 @@ def test_auto_scheduler_skips_portal_only_success_without_starting_full_pipeline
         env={"QTRADE_UPDATE_STATE_DIR": str(state_root)},
         subprocess_module=processes,
         project_root=tmp_path / "qtrade",
-        clock=lambda: dt.datetime(2026, 8, 28, 18, 29),
+        clock=lambda: dt.datetime(2026, 8, 28, 15, 29),
     )
     assert scheduler is not None
     try:
-        assert scheduler.run_pending(dt.datetime(2026, 8, 28, 18, 30)) == 0
+        assert scheduler.run_pending(dt.datetime(2026, 8, 28, 15, 30)) == 0
         assert processes.calls == []
         assert json.loads(status.read_text(encoding="utf-8"))["state"] == "portal_success"
     finally:
@@ -745,7 +745,7 @@ def test_manual_and_auto_share_single_flight_lease(tmp_path):
         env={"QTRADE_UPDATE_STATE_DIR": str(state_root)},
         subprocess_module=BlockingAutoProcesses(),
         project_root=tmp_path / "qtrade",
-        clock=lambda: dt.datetime(2026, 8, 28, 18, 29),
+        clock=lambda: dt.datetime(2026, 8, 28, 15, 29),
     )
     assert scheduler is not None
     try:

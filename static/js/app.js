@@ -1113,6 +1113,14 @@
     switchPage(message.page);
   }
 
+  function handlePortalUpdateMessage(event) {
+    if (event.origin !== window.location.origin) return;
+    const portalFrame = $('iframePortal');
+    if (!portalFrame || event.source !== portalFrame.contentWindow) return;
+    if (!event.data || event.data.type !== 'qtrade:portal-open-control') return;
+    showEmbedPage('pageControl', 'control');
+  }
+
   async function openFactorPage() {
     hideAllOverlays();
     els.pageFactors.hidden = false;
@@ -1214,6 +1222,7 @@
       });
     });
     window.addEventListener('message', handleControlNavigationMessage);
+    window.addEventListener('message', handlePortalUpdateMessage);
     const fClose = $('btnFactorClose'); if (fClose) fClose.addEventListener('click', showMarketPage);
     const rClose = $('btnRiskClose'); if (rClose) rClose.addEventListener('click', showMarketPage);
     const pClose = $('btnPortalClose'); if (pClose) pClose.addEventListener('click', showMarketPage);

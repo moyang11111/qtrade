@@ -43,6 +43,16 @@ _PAGE_TITLES = {
     "control.html": "QTrade — 控制台",
     "factors.html": "QTrade — 因子仪表盘",
 }
+_PORTAL_RUNTIME_RE = re.compile(
+    r"<script>\s*\(function \(\) \{\s*LW\.sidebar\.render\('sidebar', \{active: 'portal'\}\);"
+    r"(?:(?!</script>).)*</script>",
+    re.DOTALL,
+)
+
+
+def _use_qtrade_portal_runtime(html: str) -> str:
+    """Keep the original portal layout, replacing only its stale data renderer."""
+    return _PORTAL_RUNTIME_RE.sub('<script src="/js/portal-dashboard.js"></script>', html, count=1)
 
 
 def _proxy_failure(error: Exception) -> tuple[int, str, str]:
@@ -113,6 +123,8 @@ def _replace_page_title(html: str, page: str) -> str:
 def adapt_page_html(html: str, page: str) -> str:
     """Apply the idempotent QTrade container contract to one upstream page."""
     page_slug = re.sub(r"[^a-z0-9]+", "-", Path(page).stem.lower()).strip("-") or "page"
+    if page == "portal.html":
+        html = _use_qtrade_portal_runtime(html)
     html = _replace_page_title(html, page)
     html = _add_class_to_first_tag(html, "html", "qtrade-adapted")
     html = _add_class_to_first_tag(html, "html", f"qtrade-page-{page_slug}")

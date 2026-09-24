@@ -39,7 +39,7 @@
       <article class="control-card" id="cardPipeline">
         <div class="control-card-heading">
           <div>
-            <p class="control-card-kicker">18:30 PIPELINE</p>
+            <p class="control-card-kicker">15:30 PIPELINE</p>
             <h2>每日数据流水线</h2>
           </div>
           <span class="control-card-mark" aria-hidden="true">◷</span>
@@ -48,6 +48,13 @@
         <div class="control-update-actions" aria-label="手动更新研究数据">
           <button class="control-button control-button-primary" id="manualUpdateButton" type="button" disabled
                   aria-describedby="manualUpdateHint">立即更新门户、因子和决策</button>
+          <div class="control-update-fetch" aria-label="股票数据获取进度">
+            <div class="control-update-fetch-label">
+              <span>股票数据获取进度</span>
+              <span id="manualUpdateFetchProgressText" role="status" aria-live="polite">未确认</span>
+            </div>
+            <progress id="manualUpdateFetchProgressBar" max="100" value="0" aria-label="股票数据获取进度" hidden></progress>
+          </div>
           <p class="control-update-hint" id="manualUpdateHint">仅更新研究数据，不会交易或执行系统命令。</p>
           <p class="control-update-status" id="manualUpdateStatus" role="status" aria-live="polite">正在检查手动更新状态…</p>
           <p class="control-update-progress" id="manualUpdateProgress" role="status" aria-live="polite">进度：未确认</p>

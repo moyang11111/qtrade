@@ -3248,6 +3248,10 @@ def read_update_status(path: Path | None = None) -> dict:
         "started_at": None,
         "finished_at": None,
         "outputs": {key: False for key in _UPDATE_STATUS_OUTPUTS},
+        "heartbeat_at": None,
+        "pipeline_progress": {"completed": 0, "total": 4, "current": None},
+        "stock_progress": {"completed": 0, "total": 0, "failed": 0, "pending": 0},
+        "data_quality": {},
     }
     try:
         payload = json.loads(Path(path or UPDATE_STATUS_PATH).read_text(encoding="utf-8"))
@@ -3337,6 +3341,14 @@ def read_update_status(path: Path | None = None) -> dict:
             safe_retry["next_attempt_at"] = next_attempt
         if safe_retry:
             result["retry"] = safe_retry
+    heartbeat = payload.get("heartbeat_at")
+    if isinstance(heartbeat, str) and _UPDATE_STATUS_TIMESTAMP.fullmatch(heartbeat[:32]):
+        result["heartbeat_at"] = heartbeat[:32]
+    pipeline_progress = payload.get("pipeline_progress", payload.get("progress"))
+    if isinstance(pipeline_progress, dict):
+        result["pipeline_progress"] = update_runtime._safe_manual_progress(pipeline_progress)
+    result["stock_progress"] = update_runtime._safe_stock_progress(payload.get("stock_progress"))
+    result["data_quality"] = update_runtime._safe_data_quality(payload.get("data_quality"))
     return result
 
 
@@ -3768,6 +3780,54 @@ def get_deepseek_chat_service() -> DeepSeekChatService:
     if DEEPSEEK_CHAT_SERVICE is None:
         DEEPSEEK_CHAT_SERVICE = DeepSeekChatService(context_provider=_build_deepseek_context)
     return DEEPSEEK_CHAT_SERVICE
+
+
+def build_research_snapshot_payload(pipeline, view: str, symbol: str = "") -> dict:
+    """A small, date-bound view of the verified QTrade research generation."""
+    if view == "portal":
+        actions = {"buy": 0, "hold": 0, "sell": 0}
+        for item in pipeline.decision.get("records", ()):
+            action = item.get("action")
+            if action in actions:
+                actions[action] += 1
+        names = {str(item.get("code")): str(item.get("name") or "") for item in pipeline.portal.metadata}
+        leaders = sorted(
+            (item for item in pipeline.factors.get("records", ()) if item.get("score") is not None),
+            key=lambda item: item["score"],
+            reverse=True,
+        )[:10]
+        return {
+            "view": view,
+            "target_date": pipeline.manifest["target_date"],
+            "generation": pipeline.manifest["generation"],
+            "total": pipeline.manifest["total"],
+            "tradable_count": sum(item.get("tradable") is True for item in pipeline.portal.metadata),
+            "computable_count": pipeline.factors.get("computable", 0),
+            "valid_count": pipeline.factors.get("valid_count", 0),
+            "actions": actions,
+            "leaders": [{"symbol": item["symbol"], "name": names.get(item["symbol"], ""), "score": item["score"]} for item in leaders],
+        }
+    source = pipeline.factors if view == "factors" else pipeline.decision
+    names = {str(item.get("code")): str(item.get("name") or "") for item in pipeline.portal.metadata}
+    records = source.get("records", ())
+    if symbol:
+        selected = [item for item in records if item.get("symbol") == symbol]
+    else:
+        selected = sorted(
+            records,
+            key=lambda item: (item.get("score") is not None, item.get("score") or 0),
+            reverse=True,
+        )[:100]
+    rows = [{**item, "name": names.get(str(item.get("symbol")), "")} for item in selected]
+    return {
+        "view": view,
+        "target_date": pipeline.manifest["target_date"],
+        "generation": pipeline.manifest["generation"],
+        "total": pipeline.manifest["total"],
+        "valid_count": pipeline.factors.get("valid_count", 0),
+        "candidate_count": pipeline.decision.get("candidate", 0),
+        "records": rows,
+    }
 
 
 class APIHandler(SimpleHTTPRequestHandler):
@@ -4357,6 +4417,11 @@ class APIHandler(SimpleHTTPRequestHandler):
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+        if path == "/api/manual_update":
+            return self._json(
+                {"error": "legacy_update_retired", "update_path": UPDATE_RUN_PATH},
+                status=410, cors=False, no_store=True,
+            )
         if path == UPDATE_RUN_PATH:
             if parsed.query:
                 return self._manual_json(
@@ -4416,6 +4481,13 @@ class APIHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path, query = parsed.path, urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        if path == "/api/update_status":
+            return self._json(
+                {"error": "legacy_update_retired", "status_path": UPDATE_RUN_STATUS_PATH},
+                status=410, cors=False, no_store=True,
+            )
+        if path == "/api/research/snapshot":
+            return self._research_snapshot(query)
         if path == UPDATE_RUN_PATH:
             return self._manual_method_not_allowed("POST is required for update run")
         if path == UPDATE_RUN_STOP_PATH:
@@ -4484,6 +4556,22 @@ class APIHandler(SimpleHTTPRequestHandler):
 
     def _update_status(self, query):
         self._json(read_update_status())
+
+    def _research_snapshot(self, query):
+        view = query.get("view", ["factors"])
+        symbol = query.get("symbol", [""])
+        if len(view) != 1 or view[0] not in {"portal", "factors", "decisions"}:
+            return self._json({"error": "invalid_view"}, 400, cors=False, no_store=True)
+        if len(symbol) != 1 or (symbol[0] and not re.fullmatch(r"\d{6}", symbol[0])):
+            return self._json({"error": "invalid_symbol"}, 400, cors=False, no_store=True)
+        if view[0] == "portal" and symbol[0]:
+            return self._json({"error": "invalid_symbol"}, 400, cors=False, no_store=True)
+        with SERVICE._portal_reload_lock:
+            pipeline = SERVICE.active_pipeline
+        if pipeline is None:
+            return self._json({"error": "snapshot_unavailable"}, 503, cors=False, no_store=True)
+        payload = build_research_snapshot_payload(pipeline, view[0], symbol[0])
+        self._json(payload, cors=False, no_store=True)
 
     def _symbols(self, query):
         self._json(SERVICE.scan())

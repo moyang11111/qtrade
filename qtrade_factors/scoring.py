@@ -106,7 +106,19 @@ def composite_score(df: pd.DataFrame, lookback: int = 120,
     - factors=None 使用内置因子集合
     - 自定义时 factors 为因子名列表，weights 为 dict{因子:权重} 或与 factors 对齐的 list
     """
-    f = factor_frame(df)
+    return _composite_score_from_frame(factor_frame(df), df.index, lookback, factors, weights)
+
+
+def _composite_score_from_frame(
+    f: pd.DataFrame,
+    index: pd.Index,
+    lookback: int,
+    factors: list | None,
+    weights: dict | list | None,
+    *,
+    latest_only: bool = False,
+) -> pd.Series:
+    """Score an existing factor frame; the update pipeline needs only its last row."""
     if factors is None:
         cols = ["std20", "downside_vol", "reversal20", "mom20", "o2c",
                 "amihud", "max_ret20", "amp20", "volume_ratio",
@@ -162,13 +174,25 @@ def composite_score(df: pd.DataFrame, lookback: int = 120,
                 w = float(weights[i]) if i < len(weights) else 1.0
                 signs[c] = w
 
+    if latest_only:
+        window = f[cols].iloc[-lookback:]
+        latest = 0.0
+        for c, w in signs.items():
+            values = window[c]
+            if values.count() < 30:
+                continue
+            z = (values.iloc[-1] - values.mean()) / (values.std() + EPS)
+            if pd.notna(z):
+                latest += z * w
+        return pd.Series([latest], index=index[-1:])
+
     def _z(s):
         m = s.mean()
         sd = s.std()
         return (s - m) / (sd + EPS)
 
     z = f[cols].rolling(lookback, min_periods=30).apply(lambda x: _z(pd.Series(x)).iloc[-1], raw=False)
-    score = pd.Series(0.0, index=df.index)
+    score = pd.Series(0.0, index=index)
     for c, w in signs.items():
         score += z[c].fillna(0.0) * w
     return score
@@ -184,7 +208,7 @@ def latest_factors(df: pd.DataFrame) -> dict:
     for k in f.columns:
         v = last[k]
         out[k] = None if (v is None or (isinstance(v, float) and (np.isnan(v) or np.isinf(v)))) else round(float(v), 6)
-    sc = composite_score(df)
+    sc = _composite_score_from_frame(f, df.index, 120, None, None, latest_only=True)
     out["composite_score"] = None if (len(sc) == 0 or pd.isna(sc.iloc[-1])) else round(float(sc.iloc[-1]), 4)
     return out
 

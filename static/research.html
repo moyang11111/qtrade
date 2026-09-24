@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QTrade 研究快照</title>
+  <link rel="stylesheet" href="/css/research.css">
+  <script src="/js/research.js" defer></script>
+</head>
+<body>
+  <main>
+    <header class="top">
+      <div>
+        <span class="eyebrow">QTRADE · 已验证收盘快照</span>
+        <h1 id="title">研究快照</h1>
+        <p id="description"></p>
+      </div>
+      <div class="date-card"><span>数据交易日</span><strong id="date">读取中…</strong><small id="generation"></small></div>
+    </header>
+    <section class="stats" aria-label="快照统计">
+      <div><span>覆盖股票</span><strong id="total">—</strong></div>
+      <div><span>有效因子</span><strong id="valid">—</strong></div>
+      <div><span>评分偏强</span><strong id="candidates">—</strong></div>
+    </section>
+    <section class="results">
+      <div class="results-head">
+        <div><h2 id="list-title">结果</h2><p id="note">默认展示评分最高的 100 只股票</p></div>
+        <form id="search-form"><label for="symbol">查询股票代码</label><input id="symbol" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="例如 600519"><button type="submit">查询</button><button type="button" id="clear">显示前 100</button></form>
+      </div>
+      <div id="message" role="status" aria-live="polite"></div>
+      <div class="table-wrap"><table><thead id="columns"></thead><tbody id="rows"></tbody></table></div>
+    </section>
+    <footer><span id="footer-note"></span></footer>
+  </main>
+</body>
+</html>

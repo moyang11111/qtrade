@@ -105,7 +105,7 @@ def test_manual_controller_enforces_cutoff_calendar_result_and_idempotency(tmp_p
     before, status, lock = _controller(
         tmp_path / "before",
         fake_run,
-        dt.datetime(2026, 8, 28, 18, 29),
+        dt.datetime(2026, 8, 28, 15, 29),
     )
     result = before.start()
     assert result["state"] == "skip"
@@ -144,7 +144,7 @@ def test_manual_controller_enforces_cutoff_calendar_result_and_idempotency(tmp_p
     [
         (dt.datetime(2026, 9, 6, 9, 0), "weekend"),
         (dt.datetime(2026, 9, 6, 18, 31), "weekend"),
-        (dt.datetime(2026, 9, 4, 18, 29), "before_cutoff"),
+        (dt.datetime(2026, 9, 4, 15, 29), "before_cutoff"),
     ],
 )
 def test_manual_controller_rejects_weekend_before_cutoff_without_touching_pipeline(
@@ -184,7 +184,7 @@ def test_manual_controller_runs_at_exact_weekday_cutoff(tmp_path):
     controller, _, lock = _controller(
         tmp_path,
         fake_run,
-        dt.datetime(2026, 9, 4, 18, 30),
+        dt.datetime(2026, 9, 4, 15, 30),
     )
 
     accepted = controller.start()
@@ -196,6 +196,19 @@ def test_manual_controller_runs_at_exact_weekday_cutoff(tmp_path):
     assert calls == [(tmp_path / "deck", target)]
     assert controller.status()["state"] == "success"
     assert not lock.exists()
+
+
+def test_latest_completed_trade_date_switches_at_1530():
+    previous = dt.date(2026, 9, 22)
+    today = dt.date(2026, 9, 23)
+    calendar = {previous, today}
+
+    assert update_runtime.resolve_latest_completed_trade_date(
+        dt.datetime(2026, 9, 23, 15, 29, 59), calendar
+    ) == previous
+    assert update_runtime.resolve_latest_completed_trade_date(
+        dt.datetime(2026, 9, 23, 15, 30), calendar
+    ) == today
 
 
 def test_manual_controller_single_flight_and_safe_failure(tmp_path):
@@ -722,6 +735,7 @@ def test_manual_update_dom_flow_uses_fixed_payload_and_safe_states():
         const ids = [
           'controlState', 'controlNotice', 'controlRefresh', 'controlCopy',
           'manualUpdateButton', 'manualUpdateHint', 'manualUpdateStatus', 'manualUpdateProgress',
+          'manualUpdateFetchProgressText', 'manualUpdateFetchProgressBar',
           'manualUpdateOutputs', 'currentCompleteDate', 'currentPortalDate', 'currentTargetDate',
           'systemBody', 'pipelineBody', 'universeBody', 'opportunityBody',
           'factorBody', 'harnessBody', 'deepseekChatPanel', 'deepseekChatBody',
@@ -772,9 +786,12 @@ def test_manual_update_dom_flow_uses_fixed_payload_and_safe_states():
         const manualStatuses = [
           { state: 'idle', trade_date: '2026-08-28', reason: 'before_cutoff', outputs: {} },
           { state: 'accepted', trade_date: '2026-08-28', reason: 'accepted', outputs: {} },
-          { state: 'running', trade_date: '2026-08-28', reason: 'running', outputs: { portal: true },
+          { state: 'running', trade_date: '2026-08-28', reason: 'pipeline_running', heartbeat_at: new Date().toISOString(), outputs: {},
             current_complete_date: '2026-08-27', current_portal_date: '2026-08-27',
-            pipeline_progress: { completed: 1, total: 4 },
+            pipeline_progress: { completed: 0, total: 4, current: 'portal' },
+            stock_progress: { completed: 1200, total: 3617, failed: 0, pending: 2417 } },
+          { state: 'running', trade_date: '2026-08-28', reason: 'running', heartbeat_at: '2026-08-28T18:32:00', outputs: { portal: true },
+            pipeline_progress: { completed: 1, total: 4, current: 'factors' },
             stock_progress: { completed: 1200, total: 3617, failed: 0, pending: 2417 } },
           { state: 'success', trade_date: '2026-08-28', reason: 'completed',
             finished_at: '2026-08-28T18:31:00',
@@ -824,7 +841,7 @@ def test_manual_update_dom_flow_uses_fixed_payload_and_safe_states():
         (async () => {
           await flush();
           assert.equal(elements.manualUpdateButton.disabled, false);
-          assert.match(elements.manualUpdateStatus.textContent, /18:30/);
+          assert.match(elements.manualUpdateStatus.textContent, /15:30/);
           assert.match(elements.manualUpdateProgress.textContent, /未确认/);
           elements.manualUpdateButton.click();
           await flush();
@@ -836,8 +853,16 @@ def test_manual_update_dom_flow_uses_fixed_payload_and_safe_states():
           assert.equal(elements.currentPortalDate.textContent, '2026-08-27');
           assert.equal(elements.currentTargetDate.textContent, '2026-08-28');
           assert.match(elements.manualUpdateProgress.textContent, /1200\/3617/);
+          assert.equal(elements.manualUpdateFetchProgressBar.hidden, false);
+          assert.equal(elements.manualUpdateFetchProgressBar.value, Math.floor(1200 / 3617 * 100));
+          assert.match(elements.manualUpdateFetchProgressText.textContent, /正在获取股票数据.*1200\/3617.*33%/);
+          await runTimer();
+          assert.equal(elements.manualUpdateFetchProgressBar.value, Math.floor(1200 / 3617 * 100));
+          assert.match(elements.manualUpdateFetchProgressText.textContent, /数据获取阶段完成.*1200\/3617.*33%.*计算因子/);
+          assert.match(elements.manualUpdateFetchProgressText.textContent, /超过 2 分钟未更新/);
           await runTimer();
           assert.match(elements.manualUpdateStatus.textContent, /已成功/);
+          assert.match(elements.manualUpdateFetchProgressText.textContent, /全部更新成功/);
           assert.equal(elements.manualUpdateButton.disabled, false);
           assert.equal(outputNodes.every(node => node.textContent.includes('已完成')), true);
           const manualCalls = calls.filter(call => call.url.startsWith('/api/update/run'));

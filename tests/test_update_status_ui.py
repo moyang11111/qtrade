@@ -33,6 +33,10 @@ def _fallback_status() -> dict:
         "started_at": None,
         "finished_at": None,
         "outputs": {"portal": False, "decision": False, "factors": False},
+        "heartbeat_at": None,
+        "pipeline_progress": {"completed": 0, "total": 4, "current": None},
+        "stock_progress": {"completed": 0, "total": 0, "failed": 0, "pending": 0},
+        "data_quality": {},
     }
 
 
@@ -95,6 +99,10 @@ def test_update_status_filters_fields_and_preserves_safe_success(monkeypatch, tm
         "started_at": "2026-08-25T18:30:00",
         "finished_at": "2026-08-25T18:35:00",
         "outputs": {"portal": True, "decision": True, "factors": False},
+        "heartbeat_at": None,
+        "pipeline_progress": {"completed": 0, "total": 4, "current": None},
+        "stock_progress": {"completed": 0, "total": 0, "failed": 0, "pending": 0},
+        "data_quality": {},
     }
 
 
@@ -116,6 +124,10 @@ def test_update_status_handler_is_read_only_and_uses_safe_payload(monkeypatch, t
             "started_at": None,
             "finished_at": None,
             "outputs": {"portal": False, "decision": False, "factors": False},
+            "heartbeat_at": None,
+            "pipeline_progress": {"completed": 0, "total": 4, "current": None},
+            "stock_progress": {"completed": 0, "total": 0, "failed": 0, "pending": 0},
+            "data_quality": {},
         }
     ]
 
@@ -153,11 +165,10 @@ def _get_json(opener, port: int, path: str) -> dict:
 
 def test_update_status_http_smoke_handles_missing_success_and_corrupt(tmp_path):
     data_dir = tmp_path / "data"
+    state_dir = tmp_path / "state"
     _write_smoke_csv(data_dir)
     port = _available_port()
-    status_path = server.UPDATE_STATUS_PATH
-    had_status = status_path.exists()
-    old_status = status_path.read_bytes() if had_status else None
+    status_path = state_dir / "daily_update_1830.status.json"
     env = os.environ.copy()
     env.update(
         {
@@ -173,6 +184,8 @@ def test_update_status_http_smoke_handles_missing_success_and_corrupt(tmp_path):
         str(data_dir),
         "--port",
         str(port),
+        "--state-dir",
+        str(state_dir),
         "--csv-only",
         "--no-browser",
         "--single-instance",
@@ -237,9 +250,7 @@ def test_update_status_http_smoke_handles_missing_success_and_corrupt(tmp_path):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
-        if had_status:
-            status_path.write_bytes(old_status)
-        elif status_path.exists():
+        if status_path.exists():
             status_path.unlink()
 
 

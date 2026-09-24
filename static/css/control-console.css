@@ -152,6 +152,59 @@ h2 {
 
 .control-update-actions .control-button { justify-self: start; }
 
+.control-update-fetch {
+  display: grid;
+  gap: 6px;
+  max-width: 560px;
+  width: 100%;
+}
+
+.control-update-fetch-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--qt-text-secondary);
+  font-size: 12px;
+}
+
+.control-update-fetch-label [role="status"] {
+  color: var(--qt-text-dim);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.control-update-fetch-label [data-state="error"],
+.control-update-fetch-label [data-state="stale"] { color: var(--qt-color-signal); }
+.control-update-fetch-label [data-state="good"] { color: var(--qt-color-down); }
+
+.control-update-fetch progress {
+  appearance: none;
+  width: 100%;
+  height: 9px;
+  overflow: hidden;
+  border: 1px solid var(--qt-border);
+  border-radius: 999px;
+  background: var(--qt-bg-elev);
+  color: var(--qt-color-accent);
+}
+
+.control-update-fetch progress::-webkit-progress-bar {
+  border-radius: 999px;
+  background: var(--qt-bg-elev);
+}
+
+.control-update-fetch progress::-webkit-progress-value,
+.control-update-fetch progress::-moz-progress-bar {
+  border-radius: 999px;
+  background: var(--qt-color-accent);
+  transition: width .2s ease;
+}
+
+.control-update-fetch progress[data-state="error"]::-webkit-progress-value,
+.control-update-fetch progress[data-state="error"]::-moz-progress-bar {
+  background: var(--qt-color-signal);
+}
+
 .control-update-hint,
 .control-update-status {
   margin: 0;

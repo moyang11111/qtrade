@@ -12,6 +12,7 @@
   const MANUAL_UPDATE_PATH = '/api/update/run';
   const MANUAL_UPDATE_STATUS_PATH = '/api/update/run/status';
   const MANUAL_UPDATE_POLL_MS = 1000;
+  const MANUAL_UPDATE_STALE_MS = 120000;
   // The service may retry three runs of five bounded 7200-second commands,
   // with two five-minute retry gaps. Keep polling slightly longer so a live
   // job is never shown as failed merely because the client deadline elapsed.
@@ -20,7 +21,7 @@
     'idle', 'accepted', 'running', 'success', 'portal_success', 'skip', 'failure', 'aborted', 'timed_out',
   ]);
   const MANUAL_UPDATE_REASONS = new Set([
-    'accepted', 'running', 'before_cutoff', 'already_running', 'already_success',
+    'accepted', 'running', 'pipeline_running', 'before_cutoff', 'already_running', 'already_success',
     'lock_busy', 'calendar_unavailable', 'calendar_cache', 'calendar_cache_closed',
     'calendar_api', 'calendar_api_closed', 'weekend', 'deck_missing', 'step_failed',
     'update_failed', 'status_unavailable', 'completed', 'aborted', 'application_shutdown',
@@ -85,6 +86,8 @@
     manualUpdateHint: document.getElementById('manualUpdateHint'),
     manualUpdateStatus: document.getElementById('manualUpdateStatus'),
     manualUpdateProgress: document.getElementById('manualUpdateProgress'),
+    manualUpdateFetchProgressText: document.getElementById('manualUpdateFetchProgressText'),
+    manualUpdateFetchProgressBar: document.getElementById('manualUpdateFetchProgressBar'),
     manualUpdateQuality: document.getElementById('manualUpdateQuality'),
     manualUpdateOutputs: document.getElementById('manualUpdateOutputs'),
     currentCompleteDate: document.getElementById('currentCompleteDate'),
@@ -267,6 +270,7 @@
     return {
       accepted: '已接收，正在准备完整研究数据更新。',
       running: '正在运行门户、因子和决策流水线。',
+      pipeline_running: '正在运行门户、因子和决策流水线。',
       portal_completed: '门户数据已刷新；完整流水线仍待确认。',
       factor_history_unavailable: '历史数据不足，未继续后续步骤。',
       pipeline_binding_invalid: '研究数据绑定校验失败，旧数据保持不变。',
@@ -277,7 +281,7 @@
       target_date_missing: '部分股票缺少目标日数据，旧数据保持不变。',
       suspended: '部分股票停牌，旧数据保持不变。',
       calendar_closed: '交易日历显示今日休市。',
-      before_cutoff: '18:30 后可运行。',
+      before_cutoff: '15:30 后可运行。',
       already_running: '已有更新正在运行，请稍候。',
       already_success: '当天已成功更新，无需重复运行。',
       lock_busy: '更新锁被占用，请稍候重试。',
@@ -314,7 +318,7 @@
 
   function manualErrorMessage(error) {
     const code = error && error.code;
-    if (code === 'before_cutoff') return '18:30 后可运行。';
+    if (code === 'before_cutoff') return '15:30 后可运行。';
     if (code === 'already_running' || code === 'lock_busy') return '已有更新正在运行，请稍候。';
     if (code === 'timeout' || code === 'process_timeout') return '更新超时，后续步骤已停止。';
     if (code === 'request_too_large' || code === 'unknown_field' || code === 'invalid_request') {
@@ -322,6 +326,85 @@
     }
     if (error && error.status === 415) return '当前服务不支持手动更新请求。';
     return '手动更新暂不可用，请稍后重试。';
+  }
+
+  function renderManualFetchProgress(payload) {
+    const text = els.manualUpdateFetchProgressText;
+    const bar = els.manualUpdateFetchProgressBar;
+    if (!text || !bar) return;
+
+    const setText = (value, stateValue = '') => {
+      if (text.textContent !== value) text.textContent = value;
+      text.dataset.state = stateValue;
+    };
+    const hideBar = () => {
+      bar.hidden = true;
+      bar.dataset.state = '';
+    };
+    if (!payload || payload.reason === 'status_unavailable') {
+      hideBar();
+      setText('进度暂不可用，请稍后刷新。', 'error');
+      return;
+    }
+
+    const stateValue = payload.state;
+    const stocks = payload.stock_progress || {};
+    const completed = Number.isInteger(stocks.completed) ? stocks.completed : null;
+    const total = Number.isInteger(stocks.total) ? stocks.total : null;
+    const failed = Number.isInteger(stocks.failed) ? stocks.failed : null;
+    const pending = Number.isInteger(stocks.pending) ? stocks.pending : null;
+    const quality = payload.data_quality || {};
+    const outputs = payload.outputs || {};
+    const pipeline = payload.pipeline_progress || {};
+    const steps = { portal: '获取门户数据', factors: '计算因子', decision: '生成决策', sync: '同步验证' };
+    const stage = steps[pipeline.current] || null;
+    const acquisitionComplete = outputs.portal === true || stateValue === 'portal_success'
+      || stateValue === 'success';
+    const lastUpdate = payload.heartbeat_at ? Date.parse(payload.heartbeat_at) : NaN;
+    const stale = stateValue === 'running' && (Number.isFinite(lastUpdate)
+      ? Date.now() - lastUpdate > MANUAL_UPDATE_STALE_MS
+      : total !== null && total > 0);
+    const staleText = stale
+      ? ` · 进度超过 2 分钟未更新${Number.isFinite(lastUpdate) ? `（最近 ${new Date(lastUpdate).toLocaleTimeString()}）` : ''}`
+      : '';
+
+    if (stateValue === 'idle' || stateValue === 'skip' || total === null || total <= 0 || completed === null) {
+      hideBar();
+      if (stateValue === 'success') setText('全部更新成功。', 'good');
+      else if (stateValue === 'portal_success') setText('门户刷新完成；完整流水线待确认。', '');
+      else if (stateValue === 'skip') setText('本次未启动数据获取。', '');
+      else if (stateValue === 'accepted') setText('任务已接收，正在准备获取范围。', '');
+      else if (['failure', 'timed_out', 'aborted'].includes(stateValue)) {
+        setText('数据获取未完成，请查看任务状态。', 'error');
+      } else setText('等待数据获取进度。', '');
+      return;
+    }
+
+    const percent = Math.max(0, Math.min(100, Math.floor((completed / total) * 100)));
+    bar.hidden = false;
+    bar.max = 100;
+    bar.value = percent;
+    const errorState = ['failure', 'aborted', 'timed_out'].includes(stateValue);
+    const viewState = errorState ? 'error' : stale ? 'stale' : stateValue === 'success' ? 'good' : '';
+    bar.dataset.state = viewState;
+    const countText = `${completed}/${total}（${percent}%）`;
+    const detail = [
+      failed > 0 ? `失败 ${failed}` : null,
+      pending > 0 ? `待处理 ${pending}` : null,
+      Number.isInteger(quality.excluded) && quality.excluded > 0 ? `排除 ${quality.excluded}` : null,
+    ].filter(Boolean).join(' · ');
+    let label;
+    if (stateValue === 'success') {
+      label = `全部更新成功 · 数据获取 ${countText}`;
+    } else if (acquisitionComplete) {
+      label = `数据获取阶段完成 · 可用 ${countText}${stage ? ` · 当前阶段：${stage}` : ''}`;
+    } else if (errorState) {
+      label = `数据获取中断 · ${countText}`;
+    } else {
+      label = `正在获取股票数据 · ${countText}`;
+    }
+    if (detail) label += ` · ${detail}`;
+    setText(`${label}${staleText}`, viewState);
   }
 
   function safeManualPayload(value) {
@@ -340,6 +423,9 @@
       finished_at: typeof payload.finished_at === 'string'
         && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(payload.finished_at)
         ? payload.finished_at.slice(0, 32) : null,
+      heartbeat_at: typeof payload.heartbeat_at === 'string'
+        && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(payload.heartbeat_at)
+        ? payload.heartbeat_at.slice(0, 32) : null,
       reason: safeManualReason(payload.reason),
       mode: payload.mode === 'portal_only' ? 'portal_only' : 'full_pipeline',
       outputs: Object.fromEntries(MANUAL_UPDATE_OUTPUTS.map((key) => [key, outputs[key] === true])),
@@ -874,6 +960,15 @@
     return asObject(payload) || {};
   }
 
+  function liveUpdateStatus() {
+    // Reuse the update status the console already refreshes on every poll
+    // instead of issuing an extra request.
+    const entry = state.data ? asObject(state.data.update) : null;
+    if (!entry || entry.ok !== true) return null;
+    const value = asObject(entry.value);
+    return value && value.state === 'running' ? value : null;
+  }
+
   function renderManualUpdate(result) {
     if (!els.manualUpdateStatus || !els.manualUpdate) return;
     if (!result || !result.ok) {
@@ -886,6 +981,7 @@
       if (els.currentTargetDate) els.currentTargetDate.textContent = '未确认';
       if (els.manualUpdateProgress) els.manualUpdateProgress.textContent = '进度：未确认';
       if (els.manualUpdateQuality) els.manualUpdateQuality.textContent = '数据质量：未确认';
+      renderManualFetchProgress(null);
       if (els.manualUpdateOutputs) {
         const labels = { portal: '门户', factors: '因子', decision: '决策', sync: '同步' };
         document.querySelectorAll('[data-update-output]').forEach((node) => {
@@ -897,13 +993,23 @@
     }
     const payload = safeManualPayload(result.value);
     state.manual.value = payload;
+    // A manual run is refused while another update already owns the lease (a
+    // scheduled or earlier long run).  Surface that live update's real
+    // progress, otherwise the progress area claims nothing was started.
+    const leaseBusy = payload.reason === 'lock_busy' || payload.reason === 'already_running';
+    const live = leaseBusy ? liveUpdateStatus() : null;
+    const progressPayload = live || payload;
+    renderManualFetchProgress(progressPayload);
     const stateValue = payload.state;
     const active = stateValue === 'accepted' || stateValue === 'running';
     els.manualUpdate.disabled = active;
     if (els.currentCompleteDate) els.currentCompleteDate.textContent = payload.current_complete_date || '未确认';
     if (els.currentPortalDate) els.currentPortalDate.textContent = payload.current_portal_date || '未确认';
     if (els.currentTargetDate) els.currentTargetDate.textContent = payload.trade_date || '未确认';
-    els.manualUpdateStatus.textContent = `状态：${manualStateLabel(stateValue)} · 当前完整数据：${payload.current_complete_date || '未确认'} · 门户快照：${payload.current_portal_date || '未确认'} · 本次目标：${payload.trade_date || '解析中'} · ${manualReasonLabel(payload.reason)}`;
+    const manualReasonText = live
+      ? `已有一轮更新在运行（目标日 ${live.trade_date || '待确认'}），上方进度区显示的是它的实时进度。`
+      : manualReasonLabel(payload.reason);
+    els.manualUpdateStatus.textContent = `状态：${manualStateLabel(stateValue)} · 当前完整数据：${payload.current_complete_date || '未确认'} · 门户快照：${payload.current_portal_date || '未确认'} · 本次目标：${payload.trade_date || '解析中'} · ${manualReasonText}`;
     els.manualUpdateStatus.dataset.state = ['success', 'portal_success'].includes(stateValue) ? 'good'
       : ['failure', 'aborted', 'timed_out'].includes(stateValue) ? 'error' : '';
     if (payload.reason === 'status_unavailable') {
@@ -919,21 +1025,21 @@
       return;
     }
     if (els.manualUpdateProgress) {
-      const progress = payload.pipeline_progress || {};
-      const stocks = payload.stock_progress || {};
+      const progress = progressPayload.pipeline_progress || {};
+      const stocks = progressPayload.stock_progress || {};
       const shown = (value) => Number.isInteger(value) ? String(value) : '未确认';
       const current = progress.current ? ` · 当前步骤：${progress.current}` : '';
-      const elapsed = Number.isFinite(payload.elapsed_seconds)
-        ? ` · 已用 ${Math.floor(payload.elapsed_seconds)} 秒` : '';
+      const elapsed = Number.isFinite(progressPayload.elapsed_seconds)
+        ? ` · 已用 ${Math.floor(progressPayload.elapsed_seconds)} 秒` : '';
       els.manualUpdateProgress.textContent =
         `流水线：${shown(progress.completed)}/${shown(progress.total)}${current} · 股票：${shown(stocks.completed)}/${shown(stocks.total)}，失败 ${shown(stocks.failed)}，待处理 ${shown(stocks.pending)}${elapsed}`;
     }
     if (els.manualUpdateQuality) {
-      const quality = payload.data_quality || {};
+      const quality = progressPayload.data_quality || {};
       const shown = (value) => Number.isInteger(value) ? String(value) : '未确认';
       els.manualUpdateQuality.textContent = `数据质量：历史满足 ${shown(quality.history_sufficient)} · 排除 ${shown(quality.excluded)}（本地无历史 ${shown(quality.cache_missing)}、本地历史不足 ${shown(quality.cache_insufficient_history)}、风险警示 ${shown(quality.risk_warning)}、目标日缺失 ${shown(quality.target_date_missing)}）· 停牌 ${shown(quality.suspended)} · 抓取失败 ${shown(quality.fetch_failed)} · 未知 ${shown(quality.unknown)}`;
     }
-    const outputs = asObject(payload.outputs) || {};
+    const outputs = asObject(progressPayload.outputs) || {};
     const labels = { portal: '门户', factors: '因子', decision: '决策', sync: '同步' };
     if (els.manualUpdateOutputs) {
       document.querySelectorAll('[data-update-output]').forEach((node) => {

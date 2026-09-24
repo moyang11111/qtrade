@@ -168,8 +168,8 @@ const QTradeUpdate = (() => {
   const POLL_INTERVAL_MS = 30000;
   const REFRESH_ROUTES = Object.freeze({
     portal: '/portal',
-    pitch: '/pitch',
-    factorboard: '/factors',
+    pitch: '/research.html?view=decisions',
+    factorboard: '/research.html?view=factors',
   });
 
   function successToken(status) {
@@ -183,7 +183,7 @@ const QTradeUpdate = (() => {
     const route = REFRESH_ROUTES[page];
     if (!route) return null;
     if (!token) return route;
-    return `${route}?qtrade_update=${encodeURIComponent(String(token))}`;
+    return `${route}${route.includes('?') ? '&' : '?'}qtrade_update=${encodeURIComponent(String(token))}`;
   }
 
   function updateTargets(status) {

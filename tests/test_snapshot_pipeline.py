@@ -238,16 +238,26 @@ def test_manifest_artifact_path_must_bind_to_generation(tmp_path: Path) -> None:
     assert snapshot_pipeline.read_current_pipeline(state, user_data_dir=user_data) is None
 
 
-def test_full_runner_orders_portal_factors_decision_sync_without_external_pipeline(tmp_path: Path) -> None:
+def test_full_runner_orders_portal_factors_decision_sync_without_external_pipeline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     user_data, state, portal = _fixture(tmp_path)
     _ACTIVATE_EVENTS.clear()
     events: list[str] = []
+    worker_status_snapshots: list[dict[str, object]] = []
 
     class FakeWorker:
         def __init__(self, **kwargs):
             events.append("portal")
+            self.status_callback = kwargs["status_callback"]
 
         def run(self, plan, **kwargs):
+            self.status_callback({
+                "state": "running", "total": 10, "completed": 3,
+                "failed": 0, "excluded": 0, "heartbeat_at": "2026-08-28T18:30:02",
+            })
+            worker_status_snapshots.append(json.loads(status_path.read_text(encoding="utf-8")))
             return {
                 "state": "success",
                 "published_generation": portal.manifest["generation"],
@@ -255,6 +265,7 @@ def test_full_runner_orders_portal_factors_decision_sync_without_external_pipeli
             }
 
     status_path = state / "daily_update_1830.status.json"
+    monkeypatch.setattr(snapshot_pipeline, "PortalRefreshWorker", FakeWorker)
     result = snapshot_pipeline.run_snapshot_pipeline(
         tmp_path / "external",
         TARGET,
@@ -262,11 +273,14 @@ def test_full_runner_orders_portal_factors_decision_sync_without_external_pipeli
         state_dir=state,
         status_file=status_path,
         plan_builder=_fixture_plan_builder,
-        worker_factory=FakeWorker,
         commit_fn=_accept_activation,
     )
     assert result == 0
     assert events == ["portal"]
+    assert worker_status_snapshots[0]["state"] == "running"
+    assert worker_status_snapshots[0]["stock_progress"] == {
+        "completed": 3, "total": 10, "failed": 0, "pending": 7,
+    }
     assert _ACTIVATE_EVENTS == ["activate"]
     status = json.loads(status_path.read_text(encoding="utf-8"))
     assert status["state"] == "success"

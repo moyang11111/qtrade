@@ -312,7 +312,30 @@ def test_tencent_qfq_primary_normalizes_share_units_and_does_not_call_sina(monke
     result = provider.fetch(code, TARGET)
     assert result["rows"][0]["volume"] == expected_volume
     assert calls == [("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
-                      {"params": {"param": f"{symbol},day,,,400,qfq"}})]
+                      {"params": {"param": f"{symbol},day,,,20,qfq"}})]
+
+
+def test_tencent_incremental_request_is_bounded_by_recent_gap(monkeypatch):
+    import requests
+
+    calls = []
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"code": 0, "data": {"sh600001": {"qfqday": [
+                [TARGET, "10", "10.5", "11", "9", "1234"]
+            ]}}}
+
+    monkeypatch.setattr(requests, "get", lambda _url, **kwargs: (calls.append(kwargs), Response())[1])
+    provider = AksharePortalProvider({"600001": {"suspended": False}})
+    provider._source_rows("tencent", "600001", TARGET, "20260820")
+    provider._source_rows("tencent", "600001", TARGET, "20250105")
+    assert [call["params"]["param"] for call in calls] == [
+        "sh600001,day,,,26,qfq", "sh600001,day,,,400,qfq",
+    ]
 
 
 def test_tencent_raw_day_is_not_accepted_as_qfq(monkeypatch):
@@ -427,7 +450,7 @@ def test_history_validation_exposes_only_stable_quality_classification(monkeypat
         provider.fetch_history("600001", TARGET)
 
 
-def test_akshare_transport_forces_no_proxy_redirect_and_bounded_body(monkeypatch):
+def test_akshare_transport_honors_system_proxy_and_bounds_body(monkeypatch):
     import requests
 
     observed = {}
@@ -458,8 +481,8 @@ def test_akshare_transport_forces_no_proxy_redirect_and_bounded_body(monkeypatch
         response = requests.get("https://data.example/fixed")
 
     assert response._content == b"safe response"
-    assert observed["trust_env"] is False
-    assert observed["kwargs"]["proxies"] == {}
+    assert observed["trust_env"] is True
+    assert observed["kwargs"]["proxies"]["https"] == "https://invalid.example/proxy"
     assert observed["kwargs"]["allow_redirects"] is False
     assert observed["kwargs"]["timeout"] == (10.0, 20.0)
     assert observed["kwargs"]["stream"] is True

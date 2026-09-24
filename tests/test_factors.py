@@ -57,6 +57,18 @@ def test_latest_factors():
     assert "lowvol_60" in r and "near_high_250" in r
 
 
+def test_latest_score_matches_full_rolling_score():
+    df = _make_df(280)
+    rng = np.random.default_rng(42)
+    df["close"] += rng.normal(0, 0.05, len(df))
+    df["open"] = df["close"] - 0.1
+    df["high"] = df["close"] + 0.3
+    df["low"] = df["close"] - 0.3
+    for sample in (df, df.assign(close=df["close"].mask(np.arange(len(df)) % 29 == 0))):
+        expected = round(float(factors.composite_score(sample).iloc[-1]), 4)
+        assert factors.latest_factors(sample)["composite_score"] == expected
+
+
 def test_rps_percentile():
     assert factors.rps_percentile(0.10, [0.01, 0.05, 0.10, 0.20]) == 75.0
     assert factors.rps_percentile(None, [0.01, 0.05]) is None

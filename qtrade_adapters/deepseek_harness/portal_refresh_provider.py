@@ -100,8 +100,8 @@ def _akshare_network_guard():
     """Constrain requests used by the fixed AkShare calls in this child.
 
     The coordinator's owned child supplies the total deadline.  This local
-    seam supplies connect/read deadlines, disables environment proxies, turns
-    off redirects, and bounds every response body before AkShare sees it.
+    seam supplies connect/read deadlines, honors the configured system proxy,
+    turns off redirects, and bounds every response body before AkShare sees it.
     """
 
     try:
@@ -117,8 +117,6 @@ def _akshare_network_guard():
         parsed = urlsplit(str(url))
         if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
             raise RuntimeError("provider URL rejected")
-        session.trust_env = False
-        kwargs["proxies"] = {}
         kwargs["allow_redirects"] = False
         kwargs["timeout"] = (_NETWORK_CONNECT_TIMEOUT, _NETWORK_READ_TIMEOUT)
         kwargs["stream"] = True
@@ -128,7 +126,6 @@ def _akshare_network_guard():
         parsed = urlsplit(str(getattr(request, "url", "")))
         if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
             raise RuntimeError("provider URL rejected")
-        session.trust_env = False
         kwargs["allow_redirects"] = False
         kwargs["timeout"] = (_NETWORK_CONNECT_TIMEOUT, _NETWORK_READ_TIMEOUT)
         kwargs["stream"] = True
@@ -298,10 +295,18 @@ class AksharePortalProvider:
             import requests
 
             symbol = self._ak_symbol(code)
+            # The published qfq history is already in the local database.
+            # Request only enough bars to cover the missing days and the
+            # adjustment-overlap check; a full rebase still asks for 400.
+            calendar_days = (
+                _datetime.date.fromisoformat(target_date)
+                - _datetime.datetime.strptime(start_date, "%Y%m%d").date()
+            ).days
+            count = min(400, max(20, calendar_days * 2 + 10))
             with _akshare_network_guard():
                 response = requests.get(
                     _TENCENT_QFQ_URL,
-                    params={"param": f"{symbol},day,,,400,qfq"},
+                    params={"param": f"{symbol},day,,,{count},qfq"},
                 )
                 response.raise_for_status()
                 payload = response.json()

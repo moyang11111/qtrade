@@ -340,10 +340,15 @@ def load_current_bound_plan_inputs(
 
     del base_dir
     target = _date(target_date)
-    snapshot = portal_refresh.read_current_snapshot(
-        state_dir,
-        user_data_dir=user_data_dir,
-    )
+    # The committed pipeline pointer is authoritative; the legacy portal
+    # pointer is only a fallback for state written before it existed.
+    pipeline = read_current_pipeline(state_dir, user_data_dir=user_data_dir)
+    snapshot = pipeline.portal if pipeline is not None else None
+    if snapshot is None:
+        snapshot = portal_refresh.read_current_snapshot(
+            state_dir,
+            user_data_dir=user_data_dir,
+        )
     if snapshot is None:
         raise PortalPlanError("universe_unavailable")
     manifest = snapshot.manifest
@@ -1092,6 +1097,65 @@ def _restore_pointer(
         return False
 
 
+def _restore_portal_pointer(path, previous_pointer: bytes | None) -> bool:
+    """Restore only the portal pointer that this run replaced."""
+
+    if path is None:
+        return False
+    try:
+        if previous_pointer is None:
+            path.unlink(missing_ok=True)
+        else:
+            portal_refresh._atomic_bytes(
+                path,
+                previous_pointer,
+                ignore_post_fsync_error=True,
+            )
+        return True
+    except OSError:
+        return False
+
+
+def _write_portal_pointer(root: Path, snapshot: PortalSnapshot) -> None:
+    """Advance the portal pointer to the generation this run just committed.
+
+    The portal worker publishes its generation without touching the pointer
+    (``publish_current=False``), so nothing else promotes it and the pointer
+    would otherwise stay frozen at whatever the legacy path last wrote.
+    """
+
+    manifest = dict(snapshot.manifest)
+    generation = str(manifest["generation"])
+    generations = portal_refresh._contained(root, root / "generations")
+    pointer = {
+        "schema_version": portal_refresh.HISTORY_SCHEMA_VERSION,
+        "generation": generation,
+        "target_date": manifest["target_date"],
+        "token": generation,
+        "total": manifest["total"],
+        "universe_token": manifest["universe_token"],
+        "generation_nonce": manifest["generation_nonce"],
+        "content_sha256": manifest["content_sha256"],
+        "history_window": manifest["history_window"],
+        "history_rows": manifest["history_rows"],
+        "history_schema": manifest["history_schema"],
+        "db_path": manifest["db_path"],
+        "db_size": manifest["db_size"],
+        "db_sha256": manifest["db_sha256"],
+        "manifest_sha256": portal_refresh._hash_file(
+            portal_refresh._contained(generations, generations / generation) / "manifest.json"
+        ),
+        "metadata_path": manifest["metadata_path"],
+        "metadata_size": manifest["metadata_size"],
+        "metadata_sha256": manifest["metadata_sha256"],
+    }
+    portal_refresh._atomic_json(
+        portal_refresh._contained(root, root / "current.json"),
+        pointer,
+        ignore_post_fsync_error=True,
+    )
+
+
 def run_snapshot_pipeline(
     base_dir: str | Path,
     target_date: str | date,
@@ -1136,6 +1200,9 @@ def run_snapshot_pipeline(
     activation_rolled_back = False
     pipeline_root = None
     previous_pointer = None
+    portal_pointer_published = False
+    portal_pointer_path = None
+    previous_portal_pointer = None
     previous_pipeline = None
     pipeline_lease = None
     current_complete_date = None
@@ -1173,7 +1240,11 @@ def run_snapshot_pipeline(
         existing_pipeline = read_current_pipeline(state_dir, user_data_dir=user_data_dir)
         if existing_pipeline is not None:
             current_complete_date = _date(existing_pipeline.manifest.get("target_date"))
-        existing_portal = portal_refresh.read_current_snapshot(state_dir, user_data_dir=user_data_dir)
+        existing_portal = (
+            existing_pipeline.portal
+            if existing_pipeline is not None
+            else portal_refresh.read_current_snapshot(state_dir, user_data_dir=user_data_dir)
+        )
         if existing_portal is not None:
             current_portal_date = _date(existing_portal.manifest.get("target_date"))
         status_path = portal_refresh._contained(paths.state, Path(status_file) if status_file else paths.state / "daily_update_1830.status.json")
@@ -1327,13 +1398,24 @@ def run_snapshot_pipeline(
             "pending": max(0, stock_total - stock_completed - stock_failed - stock_excluded),
         }
         worker_reason = result.get("reason")
-        classified_fetch_failure = stock_failed if worker_reason in {"provider_failed", "provider_unreachable", "item_timeout"} else 0
+        fetch_failure_reasons = {"provider_failed", "provider_unreachable", "item_timeout"}
+        classified_fetch_failure = stock_failed if worker_reason in fetch_failure_reasons else 0
         classified_history_failure = stock_failed if worker_reason == "insufficient_history" else 0
         classified_suspended = stock_failed if worker_reason == "suspended" else 0
+        # Symbols whose fetch gave up after the retry budget are recorded as
+        # explicit exclusions; count them in the same counter so the quality
+        # report keeps naming them instead of hiding them behind ``excluded``.
+        degraded_fetch_failure = sum(
+            int(excluded_by_reason.get(reason, 0)) for reason in fetch_failure_reasons
+        )
         data_quality = {
             "history_sufficient": max(0, stock_completed),
             "insufficient_history": classified_history_failure + excluded_by_reason.get("insufficient_history", 0) + planned_excluded.get("cache_insufficient_history", 0),
-            "fetch_failed": classified_fetch_failure if worker_reason in {"provider_failed", "provider_unreachable", "item_timeout"} else None,
+            "fetch_failed": (
+                classified_fetch_failure + degraded_fetch_failure
+                if worker_reason in fetch_failure_reasons or degraded_fetch_failure
+                else None
+            ),
             "suspended": classified_suspended + planned_excluded.get("suspended", 0) + excluded_by_reason.get("suspended", 0),
             "unknown": max(0, stock_total - stock_completed - stock_excluded - classified_fetch_failure - classified_history_failure - classified_suspended),
             "excluded": sum(planned_excluded.values()) + stock_excluded,
@@ -1396,6 +1478,16 @@ def run_snapshot_pipeline(
         )
         pointer_published = True
         check_deadline()
+        # Promote the portal generation this run committed.  The portal worker
+        # only stages its generation, so without this the portal pointer stays
+        # frozen and later runs keep planning against a stale universe.
+        portal_paths = portal_refresh.portal_refresh_paths(state_dir, user_data_dir=user_data_dir)
+        portal_pointer_path = portal_refresh._contained(portal_paths.root, portal_paths.current)
+        if portal_pointer_path.exists():
+            previous_portal_pointer = portal_pointer_path.read_bytes()
+        _write_portal_pointer(portal_paths.root, portal)
+        portal_pointer_published = True
+        check_deadline()
         freshness["sync"] = {"verified": True, "as_of": target, "source": "qtrade_mirror", "reason": "verified"}
         output_meta = {"pipeline": {"generation": pipeline.manifest["generation"], "portal_generation": pipeline.manifest["portal_generation"], "content_sha256": pipeline.manifest["portal_content_sha256"], "universe_token": pipeline.manifest["universe_token"], "target_date": target, "total": pipeline.manifest["total"]}}
         final_status = _status_payload("success", "completed", target, started_at, step="sync", outputs={"portal": True, "factors": True, "decision": True, "sync": True}, freshness=freshness, output_meta=output_meta, progress={"completed": 4, "total": 4, "current": None}, stock_progress=stock_progress, data_quality=data_quality, current_complete_date=target, current_portal_date=target, finished_at=datetime.now().isoformat(timespec="seconds"), job_id=identifier)
@@ -1424,6 +1516,8 @@ def run_snapshot_pipeline(
         try:
             if pointer_published:
                 _restore_pointer(pipeline_root, previous_pointer)
+            if portal_pointer_published:
+                _restore_portal_pointer(portal_pointer_path, previous_portal_pointer)
             if activation_attempted and not activation_rolled_back and commit_fn is not None:
                 try:
                     commit_fn(previous_pipeline)

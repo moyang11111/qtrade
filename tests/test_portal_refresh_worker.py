@@ -179,6 +179,29 @@ def test_worker_publishes_complete_generation_and_safe_progress(tmp_path: Path) 
     assert worker.status()["state"] == "success"
 
 
+def test_worker_reports_durable_batch_progress_to_status_callback(tmp_path: Path) -> None:
+    reports: list[dict[str, object]] = []
+    user_data = tmp_path / "user-data"
+    user_data.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = user_data / "state" / "portal_refresh_worker" / "checkpoint.json"
+
+    def report(status: dict[str, object]) -> None:
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        assert status["completed"] == checkpoint["completed"]
+        assert status["state"] == checkpoint["state"]
+        reports.append(dict(status))
+
+    worker = _worker(tmp_path, batch_size=2, status_callback=report)
+
+    result = worker.run(_plan())
+
+    assert result["state"] == "success"
+    completed = [report["completed"] for report in reports]
+    assert completed == sorted(completed)
+    assert 2 in completed and 4 in completed
+    assert completed[-1] == len(SYMBOLS)
+
+
 def test_history_worker_publishes_v2_target_anchored_snapshot(tmp_path: Path) -> None:
     provider = FakeHistoryProvider()
     worker = _worker(

@@ -47,8 +47,8 @@ def test_main_page_has_qtrade_brand_and_preserves_embed_hooks():
     assert not re.search(r"deepseek|harness", index, re.IGNORECASE)
     expected_frames = {
         "iframePortal": ("/portal", "QTrade 门户"),
-        "iframePitch": ("/pitch", "QTrade 决策台"),
-        "iframeFactorBoard": ("/factors", "QTrade 因子仪表盘"),
+        "iframePitch": ("/research.html?view=decisions", "QTrade 决策台"),
+        "iframeFactorBoard": ("/research.html?view=factors", "QTrade 因子仪表盘"),
         "iframeControl": ("/control", "QTrade 控制台"),
     }
     for frame_id, (src, title) in expected_frames.items():

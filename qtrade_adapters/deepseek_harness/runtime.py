@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 from . import config
 
 
-DAILY_UPDATE_TIME = datetime.time(18, 30)
+DAILY_UPDATE_TIME = datetime.time(15, 30)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 DAILY_UPDATE_TIMEOUT_SECONDS = 7200
 MANUAL_UPDATE_PROCESS_POLL_SECONDS = 0.1
@@ -2185,7 +2185,7 @@ def maybe_auto_update(
         _AUTO_UPDATE_SCHEDULER = scheduler
         _AUTO_UPDATE_THREAD = thread
         thread.start()
-    print("[auto-update] 已启动交易日 18:30 生命周期调度器")
+    print("[auto-update] 已启动交易日 15:30 生命周期调度器")
     return scheduler
 
 

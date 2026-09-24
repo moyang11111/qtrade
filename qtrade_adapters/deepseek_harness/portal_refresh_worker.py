@@ -56,7 +56,7 @@ DEFAULT_RETRY_DELAY_SECONDS = 5.0
 STALE_LEASE_SECONDS = 15 * 60
 MAX_CHECKPOINT_BYTES = 4 * 1024 * 1024
 MAX_BATCH_BYTES = 16 * 1024 * 1024
-MAX_PUBLISH_PAYLOAD_BYTES = 32 * 1024 * 1024
+MAX_PUBLISH_PAYLOAD_BYTES = 128 * 1024 * 1024
 MAX_STAGED_BYTES = 128 * 1024 * 1024
 MAX_CHILD_MESSAGE_BYTES = 2 * 1024
 MAX_ITEM_BYTES = 1536
@@ -115,6 +115,13 @@ _BATCH_KEYS = frozenset({
 })
 _ITEM_KEYS = frozenset({"symbol", "rows", "metadata"})
 _EXCLUSION_REASONS = frozenset({"target_date_missing", "suspended", "insufficient_history"})
+# Provider-side fetch failures are still retried first.  Only once the retry
+# budget is spent do they degrade into an explicit per-symbol exclusion, so a
+# single flaky symbol no longer discards an otherwise verified run.  The
+# coverage ceiling in ``_run_job`` keeps failing closed when too much of the
+# universe is missing.
+_DEGRADABLE_REASONS = frozenset({"provider_failed", "provider_unreachable", "item_timeout"})
+_TRACKED_EXCLUSION_REASONS = _EXCLUSION_REASONS | _DEGRADABLE_REASONS
 _EXCLUSION_KEYS = frozenset({"symbol", "reason"})
 
 
@@ -611,7 +618,7 @@ def _safe_batch_payload(
             raise PortalWorkerError("checkpoint_corrupt")
         symbol = normalize_code(raw.get("symbol"))
         reason = raw.get("reason")
-        if symbol is None or symbol not in symbols or symbol in by_symbol or symbol in excluded or reason not in _EXCLUSION_REASONS:
+        if symbol is None or symbol not in symbols or symbol in by_symbol or symbol in excluded or reason not in _TRACKED_EXCLUSION_REASONS:
             raise PortalWorkerError("checkpoint_corrupt")
         excluded[symbol] = reason
     if state == "complete" and len(by_symbol) + len(excluded) != len(symbols):
@@ -713,7 +720,7 @@ def _validate_checkpoint(payload: object) -> dict[str, object]:
     if excluded != sum(int(record.get("excluded", 0)) for record in batches):
         raise PortalWorkerError("checkpoint_corrupt")
     excluded_by_reason = payload.get("excluded_by_reason", {})
-    if not isinstance(excluded_by_reason, dict) or set(excluded_by_reason) - _EXCLUSION_REASONS:
+    if not isinstance(excluded_by_reason, dict) or set(excluded_by_reason) - _TRACKED_EXCLUSION_REASONS:
         raise PortalWorkerError("checkpoint_corrupt")
     if any(not isinstance(count, int) or isinstance(count, bool) or count < 0 for count in excluded_by_reason.values()):
         raise PortalWorkerError("checkpoint_corrupt")
@@ -1379,7 +1386,12 @@ class PortalRefreshWorker:
         if state == "publishing":
             if checkpoint.get("published_generation") is not None and current_matches():
                 recovered = dict(checkpoint)
-                recovered["completed"] = recovered["total"]
+                # ``total`` counts the whole universe, while ``completed`` must
+                # stay equal to the sum of the per-batch item counts so the
+                # checkpoint stays valid once some symbols are excluded.
+                recovered["completed"] = sum(
+                    int(record.get("completed", 0)) for record in recovered["batches"]
+                )
                 recovered["as_of"] = recovered["target_date"]
                 recovered["state"] = "success"
                 recovered["reason"] = "completed"
@@ -1749,7 +1761,16 @@ class PortalRefreshWorker:
                 )
                 if outcome.ok and outcome.item is not None:
                     items[symbol] = outcome.item
-                elif outcome.reason in _EXCLUSION_REASONS and self.history_window:
+                elif self.history_window and (
+                    outcome.reason in _EXCLUSION_REASONS
+                    # A provider-side failure only degrades into an exclusion
+                    # once its retry budget is spent; until then it keeps
+                    # retrying through the branch below.
+                    or (
+                        outcome.reason in _DEGRADABLE_REASONS
+                        and (not outcome.transient or attempt >= self.max_attempts)
+                    )
+                ):
                     excluded[symbol] = outcome.reason
                 else:
                     if outcome.reason == "aborted" or self._stop_event.is_set():
@@ -1932,6 +1953,9 @@ class PortalRefreshWorker:
                         "publish_timeout",
                     } else "failure"
                     return self._terminal(paths, checkpoint, state=state, reason=terminal_reason, started=started)
+                # This batch has durable, checksum-bound item data and an
+                # updated checkpoint; publish its verified progress upstream.
+                self._set_memory(checkpoint)
                 aggregate.update({str(item["symbol"]): item for item in payload["items"]})
                 exclusions.update({str(item["symbol"]): str(item["reason"]) for item in payload["excluded"]})
             if len(aggregate) + len(exclusions) != len(plan.symbols) or len(aggregate) < portal_refresh.MIN_SYMBOLS:

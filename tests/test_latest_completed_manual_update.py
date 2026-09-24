@@ -19,18 +19,18 @@ CALENDAR = [
 
 def test_latest_completed_trade_date_boundaries_holiday_and_weekend():
     resolve = runtime.resolve_latest_completed_trade_date
-    assert resolve(dt.datetime(2026, 8, 28, 18, 29, 59), CALENDAR) == dt.date(2026, 8, 27)
-    assert resolve(dt.datetime(2026, 8, 28, 18, 30, 0), CALENDAR) == dt.date(2026, 8, 28)
+    assert resolve(dt.datetime(2026, 8, 28, 15, 29, 59), CALENDAR) == dt.date(2026, 8, 27)
+    assert resolve(dt.datetime(2026, 8, 28, 15, 30, 0), CALENDAR) == dt.date(2026, 8, 28)
     assert resolve(dt.datetime(2026, 8, 29, 12), CALENDAR) == dt.date(2026, 8, 28)
     assert resolve(dt.datetime(2026, 8, 30, 12), CALENDAR) == dt.date(2026, 8, 28)
-    assert resolve(dt.datetime(2026, 8, 31, 18, 29), CALENDAR) == dt.date(2026, 8, 28)
+    assert resolve(dt.datetime(2026, 8, 31, 15, 29), CALENDAR) == dt.date(2026, 8, 28)
 
 
 def test_historical_index_calendar_accepts_friday_on_weekend_but_not_stale_thursday():
     resolve = runtime.resolve_latest_completed_trade_date
     friday = dt.date(2026, 9, 11)
     assert resolve(dt.datetime(2026, 9, 13, 21), [friday]) == friday
-    assert resolve(dt.datetime(2026, 9, 14, 18, 29), [friday]) == friday
+    assert resolve(dt.datetime(2026, 9, 14, 15, 29), [friday]) == friday
     for now, dates in (
         (dt.datetime(2026, 9, 13, 21), [dt.date(2026, 9, 10)]),
         (dt.datetime(2026, 9, 14, 19), [friday]),
@@ -41,7 +41,7 @@ def test_historical_index_calendar_accepts_friday_on_weekend_but_not_stale_thurs
 
 def test_latest_completed_trade_date_cross_year_and_timezone_equivalence():
     resolve = runtime.resolve_latest_completed_trade_date
-    local = dt.datetime(2026, 1, 5, 18, 30, tzinfo=runtime.SHANGHAI_TZ)
+    local = dt.datetime(2026, 1, 5, 15, 30, tzinfo=runtime.SHANGHAI_TZ)
     utc = local.astimezone(dt.timezone.utc)
     assert resolve(local, CALENDAR) == dt.date(2026, 1, 5)
     assert resolve(utc, CALENDAR) == dt.date(2026, 1, 5)
