@@ -170,6 +170,7 @@ const QTradeUpdate = (() => {
     portal: '/portal',
     pitch: '/research.html?view=decisions',
     factorboard: '/research.html?view=factors',
+    probability: '/probability.html',
   });
 
   function successToken(status) {

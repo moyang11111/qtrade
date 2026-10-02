@@ -16,6 +16,26 @@ import qtrade_adapters.deepseek_harness.runtime as update_runtime
 import server
 
 
+def test_atomic_status_write_recovers_from_transient_windows_read_lock(tmp_path, monkeypatch):
+    destination = tmp_path / "status.json"
+    destination.write_text('{"state":"running"}', encoding="utf-8")
+    replace = update_runtime.os.replace
+    attempts = []
+    def busy_then_replace(source, target):
+        attempts.append(1)
+        if len(attempts) <= 2:
+            error = PermissionError("Windows reader still holds the destination")
+            error.winerror = 32
+            raise error
+        return replace(source, target)
+    monkeypatch.setattr(update_runtime.os, "replace", busy_then_replace)
+    monkeypatch.setattr(update_runtime.time, "sleep", lambda delay: None)
+    update_runtime._atomic_write_json(destination, {"state": "aborted"})
+    assert json.loads(destination.read_text(encoding="utf-8"))["state"] == "aborted"
+    assert len(attempts) == 3
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 ROOT = Path(__file__).resolve().parents[1]
 CONTROL_JS = ROOT / "static" / "js" / "control.js"
 

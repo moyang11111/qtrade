@@ -29,6 +29,7 @@
     portal: 'iframePortal',
     pitch: 'iframePitch',
     factorboard: 'iframeFactorBoard',
+    probability: 'iframeProbability',
   });
 
   // ======================== DOM 引用 ========================
@@ -1063,7 +1064,7 @@
   }
   function hideAllOverlays() {
     ['trainingOverlay', 'autoPaperOverlay', 'pageFactors', 'pageRisk',
-     'pagePortal', 'pagePitch', 'pageControl', 'pageFactorBoard'].forEach(id => {
+     'pagePortal', 'pagePitch', 'pageControl', 'pageFactorBoard', 'pageProbability'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.hidden = true;
     });
@@ -1085,7 +1086,7 @@
   }
 
   const CONTROL_NAVIGATION_PAGES = new Set([
-    'market', 'portal', 'pitch', 'factorboard', 'factors', 'autopaper',
+    'market', 'portal', 'pitch', 'factorboard', 'probability', 'factors', 'autopaper',
   ]);
 
   function switchPage(page) {
@@ -1094,6 +1095,7 @@
     else if (page === 'portal') showEmbedPage('pagePortal', 'portal');
     else if (page === 'pitch') showEmbedPage('pagePitch', 'pitch');
     else if (page === 'factorboard') openFactorBoard();
+    else if (page === 'probability') showEmbedPage('pageProbability', 'probability');
     else if (page === 'factors') void openFactorPage();
     else if (page === 'autopaper') {
       hideAllOverlays();
@@ -1229,6 +1231,7 @@
     const ptClose = $('btnPitchClose'); if (ptClose) ptClose.addEventListener('click', showMarketPage);
     const cClose = $('btnControlClose'); if (cClose) cClose.addEventListener('click', showMarketPage);
     const fbClose = $('btnFactorBoardClose'); if (fbClose) fbClose.addEventListener('click', showMarketPage);
+    const probabilityClose = $('btnProbabilityClose'); if (probabilityClose) probabilityClose.addEventListener('click', showMarketPage);
     if (els.btnOpenFactorBoard) {
       els.btnOpenFactorBoard.addEventListener('click', () => openFactorBoard());
     }

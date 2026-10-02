@@ -392,6 +392,18 @@ def _status_has_transient_failure(path: Path) -> bool:
     return any(reason in _TRANSIENT_UPDATE_REASONS for reason in reasons)
 
 
+def _replace_with_retry(source: Path, destination: Path) -> None:
+    """Wait briefly for Windows readers to release a JSON destination."""
+    for attempt in range(6):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError as error:
+            if getattr(error, "winerror", None) not in {5, 32, 33} or attempt == 5:
+                raise
+            time.sleep(min(0.01 * 2 ** attempt, 0.1))
+
+
 def _atomic_write_json(path: Path, payload: dict) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -410,7 +422,7 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, destination)
+        _replace_with_retry(temporary, destination)
     finally:
         if temporary is not None and temporary.exists():
             temporary.unlink()
@@ -2118,6 +2130,13 @@ def maybe_auto_update(
 
         def invoke(target: datetime.date) -> int:
             previous = read_manual_update_status(effective_status)
+            if (
+                previous.get("mode") == "full_pipeline"
+                and previous.get("state") == "success"
+                and previous.get("trade_date") == target.isoformat()
+            ):
+                print("[auto-update] 当天完整快照已成功提交，跳过重复更新", flush=True)
+                return 0
             if (
                 previous.get("mode") == "portal_only"
                 and previous.get("state") == "portal_success"

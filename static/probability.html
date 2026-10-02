@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>下一交易日上涨研究 · QTrade</title>
+  <link rel="stylesheet" href="/css/probability.css">
+  <script src="/js/probability.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <span class="eyebrow">QTRADE · 选股研究</span>
+        <h1>下一交易日收盘上涨研究</h1>
+        <p>研究目标：预测信号日收盘后，下一交易日收盘价是否高于信号日收盘价。</p>
+      </div>
+      <div class="run-box">
+        <span id="run-state" role="status" aria-live="polite">尚未运行</span>
+        <button id="run-button" type="button">开始研究</button>
+      </div>
+    </header>
+
+    <section class="gate" aria-label="研究状态与限制">
+      <strong id="research-label">研究中 · 未验证</strong>
+      <p id="status-message">研究只会在点击“开始研究”后读取本地行情并运行，不会随数据更新自动启动。</p>
+      <p id="period">信号日：—　目标日：—</p>
+      <p id="freshness-banner" class="freshness-banner" hidden></p>
+      <p id="version">模型版本：—　数据版本：—</p>
+      <p id="model-window"></p>
+      <ul>
+        <li>历史股票池及退市、ST、停牌状态没有逐日记录，存在幸存者偏差风险。</li>
+        <li>快照标注 qfq，但公司行动调整的历史可得时点未核实；结果不能作为可信交易概率。</li>
+        <li>未验证买卖成交、涨跌停、停牌处理及费用后的净收益，不生成交易指令。</li>
+      </ul>
+    </section>
+
+    <section id="results" hidden>
+      <section class="panel">
+        <div class="section-heading"><div><h2>研究候选排序</h2><p id="prediction-note">按研究模型估计值由高到低排列；未经验证，不构成交易建议。</p><p id="prediction-context" class="candidate-context"></p></div><span id="prediction-count" class="muted">—</span></div>
+        <div class="table-wrap"><table><thead><tr><th>排名</th><th>代码</th><th>名称</th><th>估计上涨概率（研究值）</th></tr></thead><tbody id="prediction-rows"></tbody></table></div>
+      </section>
+
+      <div class="section-heading">
+        <div><h2>历史留出区诊断（已复用）</h2><p>模型先按滚动验证成绩选定，再查看这段历史测试。该区间已用于旧版报告，不是新的独立验证；当前评分模型可能已使用其中成熟标签。可靠性需等待新数据前瞻检验。</p></div>
+        <span id="sample-count" class="muted">样本：—</span>
+      </div>
+      <div class="metrics">
+        <article><span>模型 Brier 分数</span><strong id="brier">—</strong><small>历史留出区概率误差，越低越好</small></article>
+        <article><span>模型 Log loss</span><strong id="log-loss">—</strong><small>历史留出区概率误差，越低越好</small></article>
+        <article><span>AUC</span><strong id="auc">—</strong><small>只衡量样本排序</small></article>
+        <article><span>PR-AUC</span><strong id="pr-auc">—</strong><small>只衡量正类排序</small></article>
+      </div>
+      <div class="summary-line" id="benchmark"></div>
+
+      <section class="panel">
+        <div class="section-heading"><div><h2>测试集校准分箱</h2><p>每一档比较模型平均预测值与历史留出区实测上涨频率。</p></div></div>
+        <div class="table-wrap"><table><thead><tr><th>研究概率区间</th><th>平均预测</th><th>实测上涨频率</th><th>样本数</th></tr></thead><tbody id="calibration-rows"></tbody></table></div>
+      </section>
+
+
+      <section class="panel model-panel">
+        <h2>模型与样本量</h2>
+        <div id="model-summary" class="model-grid"></div>
+      </section>
+    </section>
+
+    <footer>研究结果只用于检验模型方法。样本外指标可能受股票池和复权数据限制影响，不代表收益保证。</footer>
+  </main>
+</body>
+</html>

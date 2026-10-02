@@ -57,6 +57,11 @@ from qtrade_adapters.deepseek_harness.portal_refresh import (
     read_current_snapshot,
 )
 from qtrade_adapters.deepseek_harness import snapshot_pipeline
+from qtrade_adapters.deepseek_harness.next_day_probability import (
+    ResearchJobManager,
+    dataset_version as next_day_dataset_version,
+    is_same_origin_local_request,
+)
 from qtrade_adapters.deepseek_harness.factor_library import (
     FactorLibrary,
     FactorLibraryError,
@@ -3065,6 +3070,7 @@ class EngineAutoPaperTrader:
 # ============================================================================
 
 SERVICE: DataService = None
+NEXT_DAY_RESEARCH_MANAGER = ResearchJobManager()
 STATIC_DIR: Path = None
 USER_DATA_DIR: Path | None = None
 AI_PAPER: AiPaperTrader = None
@@ -3072,6 +3078,10 @@ AUTO_PAPER: AutoPaperTrader = None
 FACTOR_LIBRARY: FactorLibrary | None = None
 FACTOR_LIBRARY_FILE: Path | None = None
 FACTOR_LIBRARY_PREFIX = "/api/factor-library"
+NEXT_DAY_RESEARCH_STATUS_PATH = "/api/research/next-day-probability/status"
+NEXT_DAY_RESEARCH_RUN_PATH = "/api/research/next-day-probability/run"
+_NEXT_DAY_CALENDAR_LOCK = threading.Lock()
+_NEXT_DAY_CALENDAR_CACHE = {"loaded_at": 0.0, "dates": (), "valid": False}
 DEEPSEEK_CHAT_SERVICE: DeepSeekChatService | None = None
 
 DEEPSEEK_CHAT_PREFIX = "/api/deepseek-chat"
@@ -3235,6 +3245,9 @@ def configure_update_state_dir(path: str | Path | None) -> Path:
     UPDATE_STATUS_PATH = state_dir / "daily_update_1830.status.json"
     UPDATE_LOG_PATH = state_dir / "daily_update_1830.log"
     UPDATE_LOCK_PATH = state_dir / "daily_update_1830.lock"
+    NEXT_DAY_RESEARCH_MANAGER.configure_storage_path(
+        state_dir / "next_day_probability.latest.json"
+    )
     return state_dir
 
 
@@ -3830,6 +3843,65 @@ def build_research_snapshot_payload(pipeline, view: str, symbol: str = "") -> di
     }
 
 
+def _next_day_probability_context() -> dict | None:
+    """Capture only the current committed pipeline and its bound portal history."""
+    service = SERVICE
+    if service is None:
+        return None
+    try:
+        with service._portal_reload_lock:
+            pipeline = service.active_pipeline
+        if pipeline is None:
+            return None
+        as_of = str(pipeline.manifest.get("target_date") or "")
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", as_of):
+            return None
+        portal_manifest = dict(pipeline.portal.manifest)
+        symbols = sorted({
+            str(symbol).zfill(6)
+            for symbol in portal_manifest.get("symbols", [])
+            if str(symbol).isdigit() and len(str(symbol)) <= 6
+        })
+        if (
+            portal_manifest.get("target_date") != as_of
+            or portal_manifest.get("generation") != pipeline.manifest.get("portal_generation")
+            or portal_manifest.get("db_sha256") != pipeline.manifest.get("portal_db_sha256")
+            or portal_manifest.get("db_size") != pipeline.manifest.get("portal_db_size")
+            or portal_manifest.get("history_window") != 320
+            or not symbols
+        ):
+            return None
+        database = Path(pipeline.portal.database)
+        if not symbols:
+            return None
+        return {
+            "as_of": as_of,
+            "symbols": symbols,
+            "generation": str(pipeline.manifest.get("generation") or ""),
+            "data_dir": service.data_dir,
+            "history_database": database,
+            "history_manifest": portal_manifest,
+        }
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def _next_trade_date_after(as_of: str) -> str | None:
+    """Return a future date only when the server-owned trading calendar confirms it."""
+    with _NEXT_DAY_CALENDAR_LOCK:
+        now = time.monotonic()
+        if now - _NEXT_DAY_CALENDAR_CACHE["loaded_at"] > 300:
+            try:
+                dates = tuple(snapshot_pipeline.load_trade_calendar_dates())
+                valid = True
+            except Exception:  # noqa: BLE001 - the page reports that the date is unconfirmed
+                dates, valid = (), False
+            _NEXT_DAY_CALENDAR_CACHE.update({"loaded_at": now, "dates": dates, "valid": valid})
+        if not _NEXT_DAY_CALENDAR_CACHE["valid"]:
+            return None
+        return next((item for item in _NEXT_DAY_CALENDAR_CACHE["dates"] if item > as_of), None)
+
+
 class APIHandler(SimpleHTTPRequestHandler):
     """静态文件 + JSON API。"""
 
@@ -4414,6 +4486,72 @@ class APIHandler(SimpleHTTPRequestHandler):
         except Exception:
             return self._deepseek_error(DeepSeekChatError("internal_error"))
 
+    def _next_day_probability_status(self):
+        context = _next_day_probability_context()
+        if context is None:
+            return self._json({
+                "state": "unavailable",
+                "message": "请先完成一次成功的数据更新，建立已验证快照。",
+            }, status=503, cors=False, no_store=True)
+        next_date = _next_trade_date_after(context["as_of"])
+        version = next_day_dataset_version(
+            context["data_dir"],
+            context["as_of"],
+            context["symbols"],
+            context["generation"],
+            next_date,
+            history_database=context["history_database"],
+            history_database_sha256=context["history_manifest"]["db_sha256"],
+            history_metadata_sha256=context["history_manifest"].get("metadata_sha256", ""),
+        )
+        return self._json(
+            NEXT_DAY_RESEARCH_MANAGER.snapshot(
+                context["as_of"],
+                next_date,
+            snapshot_generation=context["generation"],
+            data_version=version,
+            ),
+            cors=False,
+            no_store=True,
+        )
+
+    def _start_next_day_probability_research(self, parsed):
+        if parsed.query:
+            return self._json({"error": "unknown_field"}, status=400, cors=False, no_store=True)
+        origin = self.headers.get("Origin", "").strip()
+        host = self.headers.get("Host", "").strip()
+        fetch_site = self.headers.get("Sec-Fetch-Site", "").strip().lower()
+        if not is_same_origin_local_request(
+            origin,
+            host,
+            int(self.server.server_address[1]),
+            fetch_site,
+        ):
+            return self._json({"error": "cross_origin_denied"}, status=403, cors=False, no_store=True)
+        try:
+            content_length = int(self.headers.get("Content-Length", "0") or "0")
+        except (TypeError, ValueError):
+            return self._json({"error": "invalid_request"}, status=400, cors=False, no_store=True)
+        if content_length != 0 or self.headers.get("Transfer-Encoding"):
+            return self._json({"error": "request_body_not_supported"}, status=400, cors=False, no_store=True)
+        context = _next_day_probability_context()
+        if context is None:
+            return self._json({
+                "state": "unavailable",
+                "message": "请先完成一次成功的数据更新，建立已验证快照。",
+            }, status=503, cors=False, no_store=True)
+        next_date = _next_trade_date_after(context["as_of"])
+        payload = NEXT_DAY_RESEARCH_MANAGER.start(
+            data_dir=context["data_dir"],
+            as_of=context["as_of"],
+            eligible_symbols=context["symbols"],
+            next_trade_date=next_date,
+            snapshot_generation=context["generation"],
+            history_database=context["history_database"],
+            history_manifest=context["history_manifest"],
+        )
+        return self._json(payload, status=202, cors=False, no_store=True)
+
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
@@ -4438,6 +4576,8 @@ class APIHandler(SimpleHTTPRequestHandler):
             return self._update_run_stop()
         if path == UPDATE_RUN_STATUS_PATH:
             return self._manual_method_not_allowed("GET is required for update status")
+        if path == NEXT_DAY_RESEARCH_RUN_PATH:
+            return self._start_next_day_probability_research(parsed)
         if self._is_factor_library_path(path):
             return self._factor_post(path)
         if self._is_deepseek_chat_path(path):
@@ -4494,6 +4634,8 @@ class APIHandler(SimpleHTTPRequestHandler):
             return self._manual_method_not_allowed("POST is required for update stop")
         if path == UPDATE_RUN_STATUS_PATH:
             return self._update_run_status(query)
+        if path == NEXT_DAY_RESEARCH_STATUS_PATH:
+            return self._next_day_probability_status()
         if self._is_factor_library_path(path):
             return self._factor_get(path)
         if self._is_deepseek_chat_path(path):

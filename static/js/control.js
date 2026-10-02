@@ -42,7 +42,7 @@
   ]);
   const MANUAL_UPDATE_OUTPUTS = ['portal', 'factors', 'decision', 'sync'];
   const NAVIGATION_PAGES = new Set([
-    'market', 'portal', 'pitch', 'factorboard', 'factors', 'autopaper',
+    'market', 'portal', 'pitch', 'factorboard', 'probability', 'factors', 'autopaper',
   ]);
   const SAFE_STATES = new Set(['running', 'success', 'portal_success', 'skip', 'failure', 'unknown']);
   const SAFE_HARNESS_STATES = new Set(['disabled', 'unreachable', 'service_reachable']);

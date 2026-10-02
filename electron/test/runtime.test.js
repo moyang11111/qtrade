@@ -132,6 +132,10 @@ test('required packaged resources include the Python server and its local import
     'qtrade_base_bridge.py',
     'factors.py',
     'qtrade_adapters/deepseek_harness/portal_refresh.py',
+    'qtrade_adapters/deepseek_harness/next_day_probability.py',
+    'static/probability.html',
+    'static/js/probability.js',
+    'static/css/probability.css',
   ]);
   assert.doesNotThrow(() => runtime.assertRuntimeResources(paths));
 });
@@ -686,6 +690,7 @@ test('preload, package resources, and launcher are present and portable', () => 
     'qtrade_adapters/deepseek_harness/freshness.py',
     'qtrade_adapters/deepseek_harness/factor_library.py',
     'qtrade_adapters/deepseek_harness/portal_refresh.py',
+    'qtrade_adapters/deepseek_harness/next_day_probability.py',
     'qtrade_adapters/deepseek_harness/runtime.py',
   ]) {
     assert.ok(fs.existsSync(path.join(PROJECT_ROOT, relativePath)), relativePath);
@@ -716,8 +721,11 @@ test('preload, package resources, and launcher are present and portable', () => 
   assert.ok(packageJson.build.extraResources.some((entry) => entry.to === 'qtrade/static'));
   for (const relativePath of [
     'static/control.html',
+    'static/probability.html',
     'static/js/control.js',
+    'static/js/probability.js',
     'static/css/control-console.css',
+    'static/css/probability.css',
   ]) {
     assert.ok(fs.existsSync(path.join(PROJECT_ROOT, relativePath)), relativePath);
   }

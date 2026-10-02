@@ -68,6 +68,13 @@ function requiredRuntimeResources(paths) {
       'qtrade_adapters/deepseek_harness/portal_refresh.py',
       path.join(paths.root, 'qtrade_adapters', 'deepseek_harness', 'portal_refresh.py'),
     ],
+    [
+      'qtrade_adapters/deepseek_harness/next_day_probability.py',
+      path.join(paths.root, 'qtrade_adapters', 'deepseek_harness', 'next_day_probability.py'),
+    ],
+    ['static/probability.html', path.join(paths.staticDir, 'probability.html')],
+    ['static/js/probability.js', path.join(paths.staticDir, 'js', 'probability.js')],
+    ['static/css/probability.css', path.join(paths.staticDir, 'css', 'probability.css')],
   ];
 }
 

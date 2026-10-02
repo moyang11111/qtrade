@@ -718,6 +718,35 @@ def test_auto_scheduler_skips_portal_only_success_without_starting_full_pipeline
         runtime.stop_auto_update(timeout=1)
 
 
+def test_auto_scheduler_skips_full_pipeline_success_for_same_trade_date(tmp_path):
+    runtime.stop_auto_update()
+    state_root = tmp_path / "user-data" / "qtrade-state"
+    state_root.mkdir(parents=True)
+    status = state_root / "daily_update_1830.status.json"
+    status.write_text(json.dumps({
+        "schema_version": 1,
+        "mode": "full_pipeline",
+        "state": "success",
+        "trade_date": "2026-08-28",
+        "finished_at": "2026-08-28T20:00:00",
+    }), encoding="utf-8")
+    processes = BlockingAutoProcesses()
+    scheduler = runtime.maybe_auto_update(
+        base_dir_fn=lambda: tmp_path / "deck",
+        env={"QTRADE_UPDATE_STATE_DIR": str(state_root)},
+        subprocess_module=processes,
+        project_root=tmp_path / "qtrade",
+        clock=lambda: dt.datetime(2026, 8, 28, 15, 29),
+    )
+    assert scheduler is not None
+    try:
+        assert scheduler.run_pending(dt.datetime(2026, 8, 28, 15, 30)) == 0
+        assert processes.calls == []
+        assert json.loads(status.read_text(encoding="utf-8"))["state"] == "success"
+    finally:
+        runtime.stop_auto_update(timeout=1)
+
+
 def test_manual_and_auto_share_single_flight_lease(tmp_path):
     runtime.stop_auto_update()
     state_root = tmp_path / "user-data" / "qtrade-state"
