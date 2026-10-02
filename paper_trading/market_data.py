@@ -124,9 +124,10 @@ class MarketDataProvider:
         if self.service is None:
             raise ValueError("MarketDataProvider has no DataService")
 
-        info = self.service.get_info(symbol) or {}
+        getter = getattr(self.service, "get_execution_quote", self.service.get_info)
+        info = getter(symbol) or {}
         live_ts = bool(info.get("time"))
-        is_live_mode = bool(getattr(self.service, "live", True))
+        is_live_mode = bool(info.get("execution_live") or getattr(self.service, "live", True))
 
         price = float(info.get("latest") or 0)
         if price <= 0:
@@ -166,7 +167,7 @@ class MarketDataProvider:
         ts = _fmt_time(ts_raw or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
         # stale=True：实时模式下拿到的却是历史/缓存行情 → 引擎应拒绝以此价成交
-        stale = is_live_mode and not live_ts
+        stale = not is_live_mode or not live_ts
 
         return Quote(
             symbol=self.normalize_symbol(symbol),

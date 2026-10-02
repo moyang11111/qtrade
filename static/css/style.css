@@ -923,6 +923,16 @@ body {
 .auto-label select:focus { border-color: var(--accent); }
 .auto-controls .btn { height: 30px; padding: 0 12px; }
 
+.paper-manual-form { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
+.paper-manual-form label { display: flex; flex-direction: column; gap: 6px; color: var(--text-sec); font-size: 12px; }
+.paper-manual-form input, .paper-manual-form select { color: var(--text); background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; width: 160px; }
+.paper-manual-form select { width: 110px; }
+.paper-manual-form input:focus, .paper-manual-form select:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.paper-manual-form .btn { min-height: 35px; }
+.paper-actions { display: flex; gap: 6px; }
+.paper-actions .btn { white-space: nowrap; }
+.badge-manual { color: var(--accent); background: var(--bg-input); }
+
 .auto-error {
   margin: 10px 6px 0;
   padding: 9px 12px;

@@ -51,7 +51,9 @@ def test_market_display_uses_live_qfq_without_changing_research_history():
     assert info["kline_date"] == "2026-09-21"
     assert service.get_market_indicators("000001")["mas"]["ma5"][-1]["value"] == 20
     assert service.get_indicators("000001")["mas"]["ma5"][-1]["value"] == 10
-    assert MarketDataProvider(service).get_quote("000001").price == 10
+    # Execution quotes use unadjusted live prices; research history stays frozen.
+    assert MarketDataProvider(service).get_quote("000001").price == 20.5
+    assert service.get_info("000001")["latest"] == 10
 
 
 def test_market_display_falls_back_to_published_snapshot_and_reports_date():

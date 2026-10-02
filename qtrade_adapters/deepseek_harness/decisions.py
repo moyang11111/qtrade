@@ -29,13 +29,13 @@ def decide(
     prepare_sys_path(base)
     if rec.get("action") == "buy" and auto_paper is not None:
         try:
-            auto_paper.buy_from_decision(service, rec)
+            paper_result = auto_paper.buy_from_decision(service, rec)
             held = {p.get("symbol") for p in auto_paper.status(service).get("positions", [])}
-            if rec.get("code") not in held:
+            if rec.get("code") not in held and not (paper_result or {}).get("decision_queued"):
                 error = auto_paper.state.get("last_error") or "决策买入未成交"
                 handler._json({"ok": False, "error": error})
                 return
-            print(f"[decide] 已合入统一模拟盘: {rec.get('code')}")
+            print(f"[decide] 已接入模拟盘订单流程: {rec.get('code')}")
         except Exception as error:
             handler._json({"ok": False, "error": f"统一模拟盘买入失败: {error}"})
             return
@@ -72,7 +72,7 @@ def decide_bg_sync(base, rec=None, auto_paper=None, service=None):
         try:
             if auto_paper is not None:
                 auto_paper.buy_from_decision(service, rec)
-                print(f"[decide] 已合入统一模拟盘: {rec.get('code')}")
+                print(f"[decide] 已接入模拟盘订单流程: {rec.get('code')}")
         except Exception as error:
             print(f"[decide] 统一模拟盘买入失败: {error}")
     try:

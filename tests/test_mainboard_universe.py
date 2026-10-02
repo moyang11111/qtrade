@@ -29,6 +29,9 @@ def test_data_service_restores_only_buy_candidates_from_pipeline():
 
 def test_engine_paper_reset_keeps_engine_paused():
     trader = server.EngineAutoPaperTrader.__new__(server.EngineAutoPaperTrader)
+    import threading
+    trader._operation_lock = threading.RLock()
+    trader.engine_lock = SimpleNamespace(acquired=lambda: True)
     reset_calls = []
     trader.engine = SimpleNamespace(reset_account=lambda account, cash: reset_calls.append((account, cash)))
     trader.state = {"signal_mode": "sequoia_oneil"}

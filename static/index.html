@@ -224,9 +224,16 @@
   <!-- ====== 自动模拟盘 ====== -->
   <div class="auto-overlay" id="autoPaperOverlay" hidden>
     <div class="auto-header">
-      <div class="auto-title">⚙️ 自动模拟盘</div>
+      <div class="auto-title">⚙️ 模拟盘</div>
       <div class="auto-status" id="autoStatusBadge">加载中...</div>
       <div class="auto-controls">
+        <label class="auto-label">交易模式
+          <select id="autoExecutionMode">
+            <option value="manual">手动交易</option>
+            <option value="auto" selected>策略自动</option>
+            <option value="confirm">人工确认</option>
+          </select>
+        </label>
         <label class="auto-label">信号源
           <select id="autoSignalMode"></select>
         </label>
@@ -238,6 +245,7 @@
     </div>
 
     <div class="auto-error" id="autoError" hidden></div>
+    <p class="muted" id="autoExecutionPhase" style="padding:0 24px" aria-live="polite">收盘后生成信号，下一交易时段使用有效实时价模拟成交。</p>
     <div class="auto-metrics" id="autoMetrics">
       <div class="auto-metric loading">
         <div class="auto-metric-label">总资产</div>
@@ -274,6 +282,38 @@
     </div>
 
     <div class="auto-body">
+      <section class="auto-card auto-card-wide" id="autoManualCard" hidden>
+        <div class="auto-card-title">手动买卖</div>
+        <p class="muted">按当日有效实时行情模拟成交。买入须为100股的整数倍；当日买入次日可卖。手动模式不自动止盈止损，休市期间不受理订单。</p>
+        <form id="autoManualForm" class="paper-manual-form">
+          <label>股票代码<input id="autoManualSymbol" name="symbol" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="例如 000001" required></label>
+          <label>方向<select id="autoManualSide" name="side"><option value="buy">买入</option><option value="sell">卖出</option></select></label>
+          <label>数量（股）<input id="autoManualQty" name="qty" type="number" min="1" max="10000000" step="1" value="100" required></label>
+          <button class="btn" type="submit" id="autoManualSubmit">提交模拟订单</button>
+        </form>
+        <p class="muted" id="autoManualSession" aria-live="polite"></p>
+        <p class="muted" id="autoManualFeedback" role="status"></p>
+      </section>
+      <section class="auto-card auto-card-wide">
+        <div class="auto-card-title">交易建议与待执行订单 <span id="autoPendingCount"></span></div>
+        <p class="muted" id="autoPendingHelp">旧行情、休市或行情断线时等待；目标日结束后信号失效。止盈止损由收盘信号触发后，在下一交易时段执行。</p>
+        <div class="auto-table-wrap"><table class="auto-table" id="autoPendingTable">
+          <thead><tr><th>代码</th><th>方向</th><th>信号日</th><th>执行日</th><th>状态 / 理由</th><th>操作</th></tr></thead><tbody></tbody>
+        </table></div>
+      </section>
+      <section class="auto-card auto-card-wide">
+        <div class="auto-card-title">建议处理记录</div>
+        <div class="auto-table-wrap"><table class="auto-table" id="autoOrderHistory">
+          <thead><tr><th>代码</th><th>方向</th><th>执行日</th><th>结果</th><th>理由</th></tr></thead><tbody></tbody>
+        </table></div>
+      </section>
+      <section class="auto-card auto-card-wide">
+        <div class="auto-card-title">候选名单次日核对</div>
+        <p class="muted">自动保存上涨研究名单。开盘前冻结的名单用于前瞻验证；事后生成的名单单独标注。此表统计收盘涨跌，不代表模拟交易收益。</p>
+        <div class="auto-table-wrap"><table class="auto-table" id="autoResearchTable">
+          <thead><tr><th>信号日</th><th>目标日</th><th>记录类型</th><th>前10名上涨</th><th>前100名上涨</th><th>核对状态</th></tr></thead><tbody></tbody>
+        </table></div>
+      </section>
       <section class="auto-card auto-card-wide">
         <div class="auto-card-title">📦 当前持仓 <span id="autoPosCount"></span></div>
         <div class="auto-table-wrap">
@@ -289,6 +329,7 @@
                 <th class="num">盈亏</th>
                 <th class="num">市值</th>
                 <th>买入时间</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody></tbody>

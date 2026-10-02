@@ -47,6 +47,8 @@ import factors as factors_mod
 
 # ---- 本地仿真盘引擎（a-share-skill, MIT）----
 from paper_trading.engine import PaperTradingEngine
+from paper_trading.automation import AutoPaperCoordinator
+from paper_trading.clock import TradingClock
 from paper_trading.market_data import MarketDataProvider, infer_limit_prices
 from qtrade_adapters.deepseek_harness.market_data import (
     MIN_HISTORY_ROWS,
@@ -727,6 +729,13 @@ class DataService:
             except Exception:
                 pass
         return info
+
+    def get_execution_quote(self, symbol):
+        source = self.live_src or self.market_src
+        if source is None:
+            raise ValueError("实时成交行情不可用")
+        quote = source.fetch_quote(symbol)
+        return {**quote, "latest": quote["price"], "execution_live": True}
 
     @_portal_read
     def get_info(self, symbol: str) -> dict:
@@ -2493,576 +2502,17 @@ class AutoPaperTrader:
             return self.status(service)
 
 
-class EngineAutoPaperTrader:
-    """自动模拟盘：基于 vended a-share-skill PaperTradingEngine（SQLite 账本）。
-
-    - 账本 / 撮合 / T+1 / 涨跌停 / 手续费：PaperTradingEngine（MIT）
-    - 信号决策：复用 AutoPaperTrader 的信号引擎
-    - 元数据（running / signal_mode / last_run / positions_meta）存 auto_paper_meta.json
-    """
-
+class EngineAutoPaperTrader(AutoPaperCoordinator):
     SIGNAL_MODES = AutoPaperTrader.SIGNAL_MODES
     CYCLE_SECONDS = AutoPaperTrader.CYCLE_SECONDS
     INIT_CASH = AutoPaperTrader.INIT_CASH
-    ACCOUNT_ID = "default"
-    MAX_MOVE_GUARD = 0.20   # 主板 ±10% 涨跌停，用 ±20% 挡错价
-    MAX_NEW_PER_CYCLE = 3   # 单轮最大新开仓数
-    LOSS_PAUSE_PCT = -0.15  # 总资产回撤超过 15% 时暂停新开仓
-    MAX_FORWARD_RECORDS = 300  # 远期验证池最大记录数
-    L0_BREADTH_MIN = 0.40   # L0 择时门控：全市场宽度（站上MA20占比）低于该值不开新仓
-    MAX_FAMILY_POSITIONS = 4  # 单因子族最大仓位数（单因子暴露控制）
 
-    def __init__(self):
-        self.meta_file = Path("auto_paper_meta.json")
-        self.db_file = Path("auto_paper_state.db")
-        self.engine_lock = EngineLock(str(self.db_file) + ".engine.lock")
-        self.state = self._default_meta()
-        self._signals = AutoPaperTrader()
-        self.engine = PaperTradingEngine(str(self.db_file), market_data=MarketDataProvider(SERVICE))
-        self._load_meta()
-        try:
-            self.engine.get_account(self.ACCOUNT_ID)
-        except Exception:
-            self.engine.create_account(self.ACCOUNT_ID, self.INIT_CASH)
-        try:
-            self._migrate_legacy()
-        except Exception as e:
-            # 迁移失败不能阻塞启动，保留报错供查看
-            self.state["last_error"] = f"旧数据迁移失败（不影响新账本）: {e}"
-
-    # ---------- 元数据 ----------
-
-    def _default_meta(self) -> dict:
-        return {
-            "cash": self.INIT_CASH,
-            "running": False,
-            "signal_mode": "sequoia_oneil",
-            "last_run": None,
-            "last_error": None,
-            "_sig_date": {},
-            "_universe_n": 0,
-            "positions_meta": {},
-            "forward_pool": [],
-            "l0_breadth": None,
-            "l0_gate": True,
-            "family_exposure": {},
-        }
-
-    def _load_meta(self):
-        default = self._default_meta()
-        try:
-            data = json.loads(self.meta_file.read_text(encoding="utf-8"))
-            default.update(data if isinstance(data, dict) else {})
-        except Exception:
-            pass
-        self.state = default
-
-    def _save_meta(self):
-        self.meta_file.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    @staticmethod
-    def _position_source(meta: dict) -> str:
-        """把持仓元数据归一为界面使用的两类来源标签。"""
-        meta = meta if isinstance(meta, dict) else {}
-        explicit = str(meta.get("source") or "").strip()
-        if explicit in ("决策", "策略"):
-            return explicit
-        reason = str(meta.get("buy_reason") or "").strip()
-        return "决策" if reason.startswith("决策买入") else "策略"
-
-    # ---------- 存量迁移 ----------
-
-    def _migrate_legacy(self):
-        legacy = Path("auto_paper_state.json")
-        if not legacy.exists():
-            return
-        with self.engine._connect() as conn:
-            n = conn.execute("SELECT COUNT(*) AS c FROM position_lots").fetchone()["c"]
-            if n:
-                return
-            try:
-                data = json.loads(legacy.read_text(encoding="utf-8"))
-            except Exception:
-                return
-        self.state["signal_mode"] = data.get("signal_mode", self.state["signal_mode"])
-        self.state["running"] = bool(data.get("running", True))
-        self.state["last_run"] = data.get("last_run")
-        self.state["_universe_n"] = data.get("_universe_n", 0)
-        cash = float(data.get("cash", self.INIT_CASH))
-        import uuid as _uuid
-
-        with self.engine._connect() as conn:
-            for sym, pos in (data.get("positions") or {}).items():
-                d = pos.get("buy_date") or str(pos.get("buy_time", ""))[:10] or "2000-01-01"
-                conn.execute(
-                    "INSERT INTO position_lots(lot_id, account_id, symbol, acquired_date, qty, remaining_qty, cost_price, created_at) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-                    (_uuid.uuid4().hex[:16], self.ACCOUNT_ID, sym, d, int(pos["qty"]), int(pos["qty"]), float(pos["buy_price"]), pos.get("buy_time") or time.strftime("%Y-%m-%d %H:%M:%S")),
-                )
-                self.state["positions_meta"][sym] = {
-                    "buy_price": float(pos["buy_price"]),
-                    "buy_date": d,
-                    "buy_time": pos.get("buy_time", ""),
-                    "buy_reason": pos.get("buy_reason", ""),
-                    "source": self._position_source(pos),
-                    "target_price": pos.get("target_price"),
-                    "stop_price": pos.get("stop_price"),
-                }
-            for i, t in enumerate((data.get("trades") or [])[:1000]):
-                side = str(t.get("side", "buy")).lower()
-                price = float(t.get("price") or 0)
-                qty = int(t.get("qty") or 0)
-                amount = round(price * qty, 2)
-                tid = _uuid.uuid4().hex[:16]
-                conn.execute(
-                    "INSERT INTO trades(trade_id, order_id, account_id, symbol, side, price, qty, amount, commission, tax, created_at) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (tid, tid, self.ACCOUNT_ID, t.get("symbol", ""), side, price, qty, amount,
-                     round(float(t.get("cost") or amount * 0.0015), 2), 0.0, t.get("time", time.strftime("%Y-%m-%d %H:%M:%S"))),
-                )
-            conn.execute("UPDATE accounts SET initial_cash = ?, cash = ?, updated_at = ? WHERE account_id = ?",
-                         (self.INIT_CASH, cash, time.strftime("%Y-%m-%d %H:%M:%S"), self.ACCOUNT_ID))
-        self._save_meta()
-
-    # ---------- 状态 ----------
-
-    def _trade_note(self, order_id) -> str:
-        if not order_id:
-            return ""
-        try:
-            with self.engine._connect() as conn:
-                row = conn.execute("SELECT note FROM orders WHERE order_id = ?", (order_id,)).fetchone()
-            return row["note"] if row else ""
-        except Exception:
-            return ""
-
-    def _snapshots_hist(self) -> list:
-        try:
-            with self.engine._connect() as conn:
-                rows = conn.execute(
-                    "SELECT snapshot_time AS t, net_asset AS total FROM account_snapshots "
-                    "WHERE account_id = ? ORDER BY snapshot_time ASC",
-                    (self.ACCOUNT_ID,),
-                ).fetchall()
-            return [{"time": r["t"], "total": r["total"]} for r in rows][-120:]
-        except Exception:
-            return []
-
-    def status(self, service=None) -> dict:
-        self._load_meta()
-        try:
-            acc = self.engine.get_account(self.ACCOUNT_ID)
-        except Exception:
-            self.engine.create_account(self.ACCOUNT_ID, self.INIT_CASH)
-            acc = self.engine.get_account(self.ACCOUNT_ID)
-
-        pos_meta = self.state.get("positions_meta", {})
-        pos_list = []
-        for p in (acc.get("positions") or []):
-            m = pos_meta.get(p["symbol"], {})
-            buy_price = float(m.get("buy_price") or p.get("avg_cost") or 0)
-            last = float(p.get("last_price") or buy_price)
-            target = float(m.get("target_price") or (buy_price * (1 + self._signals.TAKE_PROFIT) if buy_price else 0))
-            stop = float(m.get("stop_price") or (buy_price * (1 - self._signals.STOP_LOSS) if buy_price else 0))
-            pnl = round((last - buy_price) * int(p["qty"]), 2) if buy_price else 0.0
-            pnl_pct = round((last / buy_price - 1) * 100, 2) if buy_price else 0.0
-            pos_list.append({
-                "symbol": p["symbol"], "qty": int(p["qty"]),
-                "buy_price": round(buy_price, 2), "avg_cost": round(buy_price, 4),
-                "target_price": round(target, 2), "stop_price": round(stop, 2),
-                "last_price": round(last, 2), "value": round(last * int(p["qty"]), 2),
-                "pnl": pnl, "pnl_pct": pnl_pct,
-                "target_pct": self._signals.TAKE_PROFIT * 100,
-                "stop_pct": -self._signals.STOP_LOSS * 100,
-                "buy_time": m.get("buy_time", ""), "buy_reason": m.get("buy_reason", ""),
-                "source": self._position_source(m),
-            })
-        pos_list.sort(key=lambda x: -x["value"])
-
-        trade_list = []
-        for t in (self.engine.list_trades(self.ACCOUNT_ID) or []):
-            trade_list.append({
-                "symbol": t["symbol"], "side": str(t["side"]).upper(),
-                "price": t["price"], "qty": t["qty"],
-                "time": t["created_at"], "reason": self._trade_note(t.get("order_id")),
-                "commission": t.get("commission"), "tax": t.get("tax"),
-                "pnl_pct": None, "pnl": None,
-            })
-
-        total = acc.get("net_asset") or 0.0
-        pnl = total - self.INIT_CASH
-        pnl_pct = round((total / self.INIT_CASH - 1) * 100, 2) if self.INIT_CASH else 0.0
-        st = self.state
-        summary = getattr(service, "universe_summary", None) if service is not None else None
-        if summary is None:
-            summary = {
-                "total": st.get("_universe_n", 0), "computable": 0, "tradable": 0,
-                "candidate": 0, "excluded_by_reason": {}, "as_of": None, "source": "unknown",
-            }
-        return {
-            "cash": round(acc.get("cash") or 0.0, 2),
-            "market_value": round(acc.get("market_value") or 0.0, 2),
-            "total": round(total, 2),
-            "pnl": round(pnl, 2),
-            "pnl_pct": pnl_pct,
-            "initial": self.INIT_CASH,
-            "positions": pos_list,
-            "position_count": len(pos_list),
-            "max_positions": self._signals.MAX_POSITIONS,
-            "trades": trade_list[:200],
-            "equity_hist": self._snapshots_hist(),
-            "running": bool(st.get("running", True)),
-            "last_run": st.get("last_run"),
-            "last_error": st.get("last_error"),
-            "cycle_seconds": self.CYCLE_SECONDS,
-            "signal_mode": st.get("signal_mode", "sequoia_oneil"),
-            "signal_mode_label": self.SIGNAL_MODES.get(st.get("signal_mode", "sequoia_oneil"), "sequoia_oneil"),
-            "signal_modes": [{"mode": k, "label": v} for k, v in self.SIGNAL_MODES.items()],
-            "engine_owner": True,
-            "universe_size": st.get("_universe_n", 0),
-            "universe_summary": summary,
-            "rules": {
-                "pos_ratio": self._signals.POS_RATIO, "take_profit": self._signals.TAKE_PROFIT,
-                "stop_loss": self._signals.STOP_LOSS, "cost": self._signals.COST,
-            },
-            "forward_pool": (st.get("forward_pool") or [])[-50:],
-            "risk": {
-                "max_positions": self._signals.MAX_POSITIONS,
-                "max_new_per_cycle": self.MAX_NEW_PER_CYCLE,
-                "loss_pause_pct": self.LOSS_PAUSE_PCT * 100,
-                "current_pnl_pct": round(((acc.get("net_asset") or 0) / self.INIT_CASH - 1) * 100, 2) if self.INIT_CASH else 0.0,
-                "l0_breadth": st.get("l0_breadth"),
-                "l0_gate": st.get("l0_gate", True),
-                "l0_breadth_min": self.L0_BREADTH_MIN,
-                "max_family_positions": self.MAX_FAMILY_POSITIONS,
-                "family_exposure": st.get("family_exposure", {}),
-            },
-        }
-
-    def toggle(self, service=None) -> dict:
-        self._load_meta()
-        self.state["running"] = not self.state.get("running", True)
-        self._save_meta()
-        return self.status(service)
-
-    def set_mode(self, mode: str, service=None) -> dict:
-        if mode not in self.SIGNAL_MODES:
-            raise ValueError(f"未知信号源: {mode}，可选: {', '.join(self.SIGNAL_MODES)}")
-        self._load_meta()
-        self.state["signal_mode"] = mode
-        self.state["_sig_date"] = {}
-        self._save_meta()
-        return self.status(service)
-
-    def reset(self, service=None) -> dict:
-        self._load_meta()
-        mode = self.state.get("signal_mode", "sequoia_oneil")
-        self.engine.reset_account(self.ACCOUNT_ID, self.INIT_CASH)
-        self.state = self._default_meta()
-        self.state["signal_mode"] = mode
-        self.state["running"] = False
-        self._save_meta()
-        return self.status(service)
-
-    # ---------- 信号 ----------
-
-    def _sig(self, df, rs_pct=50.0, breadth=1.0):
-        self._signals.state["signal_mode"] = self.state.get("signal_mode", "sequoia_oneil")
-        return self._signals._signal_for(df, rs_pct=rs_pct, breadth=breadth)
-
-    # ---------- 风控门禁 + 远期验证 ----------
-
-    def _risk_gate(self, acc) -> tuple:
-        """硬性风控：总资产回撤超阈值 → 暂停新开仓。返回 (是否通过, 原因)。"""
-        total = float(acc.get("net_asset") or 0)
-        pnl_pct = (total / self.INIT_CASH - 1) * 100 if self.INIT_CASH else 0.0
-        if pnl_pct <= self.LOSS_PAUSE_PCT * 100:
-            return False, f"总资产回撤 {pnl_pct:.1f}%，超过暂停新开仓阈值"
-        return True, ""
-
-    @staticmethod
-    def _factor_family(reason: str) -> str:
-        """按买入理由把持仓归入信号族（用于单因子暴露控制）。"""
-        r = reason or ""
-        if any(k in r for k in ("海龟", "突破", "新高", "攻关", "枢轴")):
-            return "breakout"      # 突破/新高
-        if any(k in r for k in ("MA5", "MA10", "均线", "金叉", "多头", "趋势")):
-            return "trend"         # 均线趋势
-        if any(k in r for k in ("RSI", "超卖", "反转", "回撤", "反弹", "低波", "lowvol")):
-            return "reversal"      # 反转/低波
-        if any(k in r for k in ("涨停", "洗盘", "连板")):
-            return "limitup"       # 涨停/情绪
-        if any(k in r for k in ("量", "缩量", "放量", "OBV")):
-            return "volume"        # 量价
-        return "other"
-
-    def _family_counts(self) -> dict:
-        from collections import Counter
-        cnt = Counter()
-        held = {p["symbol"] for p in self.engine.get_positions(self.ACCOUNT_ID)}
-        for sym in held:
-            meta = self.state["positions_meta"].get(sym, {})
-            cnt[self._factor_family(meta.get("buy_reason"))] += 1
-        return dict(cnt)
-
-    def _record_forward(self, sym, meta, entry, price, cur_date):
-        """把一笔已平仓交易写入远期验证池（五池：V1/5/20/60 由 hold_days 归纳）。"""
-        buy_date = meta.get("buy_date") or str(meta.get("buy_time", ""))[:10]
-        hold_days = None
-        if buy_date and cur_date:
-            try:
-                hold_days = max(0, (pd.Timestamp(cur_date) - pd.Timestamp(buy_date)).days)
-            except Exception:
-                hold_days = None
-        rec = {
-            "symbol": sym,
-            "entry_date": buy_date,
-            "entry_price": round(float(entry), 2),
-            "exit_date": cur_date,
-            "exit_price": round(float(price), 2),
-            "pnl_pct": round((float(price) / float(entry) - 1) * 100, 2) if entry else 0.0,
-            "hold_days": hold_days,
-            "horizons": [h for h in (1, 5, 20, 60) if hold_days is not None and hold_days >= h],
-        }
-        pool = self.state.setdefault("forward_pool", [])
-        pool.append(rec)
-        self.state["forward_pool"] = pool[-self.MAX_FORWARD_RECORDS:]
-
-    # ---------- 交易周期 ----------
-
-    def buy_from_decision(self, service, rec) -> dict:
-        """决策审批买入：把 Pitch 批准的 buy 合入统一模拟盘（同一账本，含 T+1/手续费/风控）。"""
-        self._load_meta()
-        if service is None:
-            return self.status(service)
-        sym = str(rec.get("code") or "").strip()
-        if not sym:
-            return {"ok": False, "error": "缺少 code"}
-        if not service.is_tradable(sym):
-            self.state["last_error"] = f"决策买入 {sym} 失败：标的暂不可交易"
-            self._save_meta()
-            return self.status(service)
-        if not self.state.get("running", True):
-            return self.status(service)
-        if not self.engine_lock.acquired():
-            return self.status(service)
-        held = {p["symbol"] for p in self.engine.get_positions(self.ACCOUNT_ID)}
-        if sym in held:
-            return self.status(service)
-        if len(held) >= self._signals.MAX_POSITIONS:
-            self.state["last_error"] = f"决策买入 {sym} 失败：持仓已达上限 {self._signals.MAX_POSITIONS}"
-            self._save_meta()
-            return self.status(service)
-        # ★L0 择时门控：与策略买入一致，宽度低于阈值时决策买入也暂缓
-        if not self.state.get("l0_gate", True):
-            b = self.state.get("l0_breadth", 0.0)
-            self.state["last_error"] = (f"L0 择时门控：市场宽度 {b:.1%} < "
-                                        f"{self.L0_BREADTH_MIN:.0%}，决策买入暂缓")
-            self._save_meta()
-            return self.status(service)
-        try:
-            kline = service.get_kline(sym, limit=1)
-            price = float(kline[-1]["close"]) if kline else None
-        except Exception:
-            price = rec.get("price") or None
-        if not price or price <= 0:
-            self.state["last_error"] = f"决策买入 {sym} 失败：无有效价格"
-            self._save_meta()
-            return self.status(service)
-        acc = self.engine.get_account(self.ACCOUNT_ID)
-        cash = float(acc.get("cash") or 0) - float(acc.get("frozen_cash") or 0)
-        total = float(acc.get("net_asset") or 0)
-        budget = total * self._signals.POS_RATIO
-        cost_per = price * (1 + self._signals.COST)
-        qty = int(budget / cost_per) // 100 * 100
-        if qty * cost_per > cash + 1e-6:
-            qty = int(cash / cost_per) // 100 * 100
-        if qty < 100:
-            self.state["last_error"] = f"决策买入 {sym} 失败：现金不足或金额过小"
-            self._save_meta()
-            return self.status(service)
-        reason = f"决策买入：{rec.get('name') or rec.get('reason') or 'Pitch 审批'}"
-        try:
-            order = self.engine.trade_at_quote(self.ACCOUNT_ID, sym, "buy", qty, reason)
-            fill = float(order.get("avg_fill_price") or price)
-            self.state["positions_meta"][sym] = {
-                "buy_price": fill,
-                "buy_date": time.strftime("%Y-%m-%d"),
-                "buy_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "buy_reason": reason,
-                "source": "决策",
-                "target_price": round(fill * (1 + self._signals.TAKE_PROFIT), 2),
-                "stop_price": round(fill * (1 - self._signals.STOP_LOSS), 2),
-            }
-            self.state["family_exposure"] = self._family_counts()
-            self.engine.snapshot_accounts()
-            self.state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            self._save_meta()
-        except Exception as e:
-            self.state["last_error"] = f"决策买入 {sym} 失败: {e}"
-            self._save_meta()
-        return self.status(service)
-
-    def cycle(self, service) -> dict:
-        if service is None:
-            return self.status(service)
-        self._load_meta()
-        if not self.state.get("running", True):
-            return self.status(service)
-        # 跨进程互斥：只有拿到引擎锁的进程真正交易，其余只读（与旧版一致）
-        if not self.engine_lock.acquired():
-            return self.status(service)
-        self.state["last_error"] = None
-        mode = self.state.get("signal_mode", "sequoia_oneil")
-        self._signals.state["signal_mode"] = mode
-        is_fusion = mode == "sequoia_oneil"
-        is_oneil = mode == "oneil"
-        # 股票池：全主板
-        candidate_symbols = []
-        mainboard = service.mainboard_symbols()
-        self.state["_universe_n"] = len(mainboard)
-        rs_map, breadth = {}, 1.0
-        if is_fusion or is_oneil:
-            rs_map, breadth, symbols = self._signals._mainboard_scan(
-                service, mainboard,
-                rs_min=SequoiaOneilEngine.RS_MIN if is_fusion else OneilSignalEngine.RS_MIN)
-            candidate_symbols = list(symbols)
-        else:
-            symbols = mainboard
-            # 全市场宽度（站上 MA20 占比）——用于 L0 择时门控，所有信号源统一计算
-            above = []
-            for sym in symbols:
-                d = service.load_history(sym)
-                if d is None or len(d) < 25:
-                    continue
-                c = d["close"].astype(float)
-                above.append(float(c.iloc[-1]) > float(c.rolling(20).mean().iloc[-1]))
-            if above:
-                breadth = sum(above) / len(above)
-
-        # L0 择时门控：宽度低于阈值时，本轮不开新仓（持仓卖出照常）
-        self.state["l0_breadth"] = round(breadth, 4)
-        self.state["l0_gate"] = bool(breadth >= self.L0_BREADTH_MIN)
-
-        def held_set():
-            return {p["symbol"] for p in self.engine.get_positions(self.ACCOUNT_ID)}
-
-        # 1) 卖出：止盈/止损/信号卖出（引擎负责 T+1 与涨跌停）
-        for sym, pos in list({p["symbol"]: p for p in self.engine.get_positions(self.ACCOUNT_ID)}.items()):
-            meta = self.state["positions_meta"].get(sym, {})
-            df = service._resolve_df(sym)
-            sig = self._sig(df, rs_pct=rs_map.get(sym, 50.0), breadth=breadth)
-            price = float(sig["price"]) if sig else float(pos.get("last_price") or 0)
-            entry = float(meta.get("buy_price") or pos.get("avg_cost") or 0)
-            last = float(meta.get("last", pos.get("last_price"))) or entry
-            anomaly = last > 0 and abs(price / last - 1) > self.MAX_MOVE_GUARD
-            if anomaly:
-                self.state["last_error"] = f"{sym} 价格异常 {last:.2f}->{price:.2f}，跳过该持仓本轮"
-                price = last
-            meta["last"] = price
-            cur_date = (sig or {}).get("date")
-            if not cur_date and df is not None and len(df) > 0:
-                cur_date = str(df.index[-1])[:10]
-            buy_date = meta.get("buy_date") or str(meta.get("buy_time", ""))[:10]
-            if anomaly or (buy_date and cur_date and buy_date == cur_date):
-                continue
-            target = float(meta.get("target_price") or (entry * (1 + self._signals.TAKE_PROFIT) if entry else 0))
-            stop = float(meta.get("stop_price") or (entry * (1 - self._signals.STOP_LOSS) if entry else 0))
-            reason = ""
-            if target and price >= target:
-                reason = f"止盈：触及 {target}"
-            elif stop and price <= stop:
-                reason = f"止损：跌破 {stop}"
-            elif sig and sig.get("action") == "sell" and sig.get("date") != self.state["_sig_date"].get(sym):
-                reason = f"信号卖出：{sig.get('reason', '')}"
-            if not reason:
-                continue
-            sellable = int(pos.get("sellable_qty") or 0)
-            qty = min(int(pos["qty"]), sellable)
-            if qty <= 0:
-                continue
-            try:
-                order = self.engine.trade_at_quote(self.ACCOUNT_ID, sym, "sell", qty, reason)
-                fill = float(order.get("avg_fill_price") or price)
-                self._record_forward(sym, meta, entry, fill, cur_date)
-            except Exception as e:
-                if "sellable" not in str(e).lower():
-                    self.state["last_error"] = f"卖出 {sym} 失败: {e}"
-
-        # 2) 买入：信号买入（含 L0 择时门控 + 单因子暴露控制 + 单轮新开仓上限）
-        acc0 = self.engine.get_account(self.ACCOUNT_ID)
-        risk_ok, risk_reason = self._risk_gate(acc0)
-        if risk_ok and not self.state.get("l0_gate", True):
-            risk_ok = False
-            l0_b = self.state.get("l0_breadth", 0.0)
-            risk_reason = f"L0 择时门控：市场宽度 {l0_b:.1%} < {self.L0_BREADTH_MIN:.0%}，暂缓新开仓"
-        new_buys = 0
-        for sym in symbols:
-            if not risk_ok:
-                self.state["last_error"] = risk_reason
-                break
-            if new_buys >= self.MAX_NEW_PER_CYCLE:
-                break
-            held = held_set()
-            if sym in held:
-                continue
-            if len(held) >= self._signals.MAX_POSITIONS:
-                break
-            if not service.is_tradable(sym):
-                continue
-            df = service.load_history(sym)
-            sig = self._sig(df, rs_pct=rs_map.get(sym, 50.0), breadth=breadth)
-            if not sig or sig.get("action") != "buy" or sig.get("date") == self.state["_sig_date"].get(sym):
-                continue
-            candidate_symbols.append(sym)
-            # 单因子暴露控制：同一信号族持仓数达到上限则跳过该买入
-            family = self._factor_family(sig.get("reason", ""))
-            if self._family_counts().get(family, 0) >= self.MAX_FAMILY_POSITIONS:
-                continue
-            acc = self.engine.get_account(self.ACCOUNT_ID)
-            cash = float(acc.get("cash") or 0) - float(acc.get("frozen_cash") or 0)
-            total = float(acc.get("net_asset") or 0)
-            budget = total * self._signals.POS_RATIO
-            price = float(sig.get("price") or 0)
-            cost_per = price * (1 + self._signals.COST)
-            if price <= 0 or cost_per <= 0:
-                continue
-            qty = int(budget / cost_per) // 100 * 100
-            if qty < 100 or qty * cost_per > cash + 1e-6:
-                continue
-            try:
-                order = self.engine.trade_at_quote(self.ACCOUNT_ID, sym, "buy", qty, sig.get("reason", ""))
-                fill_price = float(order.get("avg_fill_price") or price)
-                buy_date = sig.get("date") or time.strftime("%Y-%m-%d")
-                self.state["positions_meta"][sym] = {
-                    "buy_price": fill_price,
-                    "buy_date": buy_date,
-                    "buy_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "buy_reason": sig.get("reason", ""),
-                    "source": "策略",
-                    "target_price": round(fill_price * (1 + sig.get("take_pct", self._signals.TAKE_PROFIT)), 2),
-                    "stop_price": round(fill_price * (1 - sig.get("stop_pct", self._signals.STOP_LOSS)), 2),
-                }
-                self.state["_sig_date"][sym] = sig.get("date")
-                new_buys += 1
-            except Exception as e:
-                err = str(e)
-                if "limit" not in err.lower():
-                    self.state["last_error"] = f"买入 {sym} 失败: {e}"
-
-        # 清除已平仓的 meta，并刷新单因子暴露统计
-        held_now = held_set()
-        for sym in list(self.state["positions_meta"]):
-            if sym not in held_now:
-                self.state["positions_meta"].pop(sym, None)
-        self.state["family_exposure"] = self._family_counts()
-        service.set_candidate_symbols(candidate_symbols)
-
-        # 净值快照 + 保存
-        self.engine.snapshot_accounts()
-        self.state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        self._save_meta()
-        return self.status(service)
+    def __init__(self, state_dir=None, clock=None):
+        super().__init__(service=SERVICE, state_dir=state_dir or Path.cwd(),
+            signal_engine=AutoPaperTrader, lock_factory=EngineLock,
+            rs_thresholds={"sequoia_oneil": SequoiaOneilEngine.RS_MIN, "oneil": OneilSignalEngine.RS_MIN},
+            clock=clock or TradingClock(calendar_loader=snapshot_pipeline.load_trade_calendar_dates),
+            report_provider=lambda: NEXT_DAY_RESEARCH_MANAGER.snapshot())
 
 
 # ============================================================================
@@ -4576,6 +4026,8 @@ class APIHandler(SimpleHTTPRequestHandler):
             return self._update_run_stop()
         if path == UPDATE_RUN_STATUS_PATH:
             return self._manual_method_not_allowed("GET is required for update status")
+        if path == "/api/auto/paper":
+            return self._auto_paper(urllib.parse.parse_qs(parsed.query))
         if path == NEXT_DAY_RESEARCH_RUN_PATH:
             return self._start_next_day_probability_research(parsed)
         if self._is_factor_library_path(path):
@@ -4784,26 +4236,77 @@ class APIHandler(SimpleHTTPRequestHandler):
 
     # ---------- 自动模拟盘 ----------
 
+    def _read_paper_body(self, fields):
+        if self.headers.get('Transfer-Encoding'):
+            self.close_connection = True
+            raise ValueError('不支持分块订单请求')
+        if self.headers.get('Content-Type','').split(';',1)[0].strip().lower() != 'application/json':
+            raise ValueError('订单请求须使用JSON格式')
+        try:
+            length = int(self.headers.get('Content-Length','0'))
+        except ValueError:
+            raise ValueError('订单请求长度无效') from None
+        if not 0 < length <= 4096:
+            self.close_connection = True
+            raise ValueError('订单请求为空或过大')
+        try:
+            raw = self.rfile.read(length)
+            if len(raw)!=length:
+                raise ValueError('incomplete body')
+            body = json.loads(raw.decode('utf-8'),object_pairs_hook=self._reject_duplicate_json_pairs)
+        except (ValueError,UnicodeDecodeError,RecursionError):
+            raise ValueError('订单请求格式无效') from None
+        if not isinstance(body,dict) or set(body)!=set(fields):
+            raise ValueError('订单请求字段无效')
+        return body
+
     def _auto_paper(self, query):
         """自动模拟盘：status=查看, run=立即跑一轮, toggle=启动/暂停, reset=清仓重置, setmode=切信号源。"""
         if AUTO_PAPER is None:
             return self._json({"error": "自动模拟盘未初始化"}, status=500)
         action = query.get("action", ["status"])[0]
+        body_actions = {'set_execution_mode':{'mode'},'manual_trade':{'symbol','side','qty','request_id'},
+                        'approve':{'intent_id'},'reject':{'intent_id'},'cancel':{'intent_id'}}
+        if action != 'status':
+            if self.command != 'POST':
+                return self._json({'error':'POST is required for paper controls'},status=405,cors=False,no_store=True)
+            if not is_same_origin_local_request(self.headers.get('Origin',''),self.headers.get('Host',''),int(self.server.server_address[1]),self.headers.get('Sec-Fetch-Site','')):
+                return self._json({'error':'cross_origin_denied'},status=403,cors=False,no_store=True)
+            if action not in body_actions and (self.headers.get('Content-Length','0') != '0' or self.headers.get('Transfer-Encoding')):
+                return self._json({'error':'request_body_not_supported'},status=400,cors=False,no_store=True)
+            if action not in {'run','toggle','reset','setmode'} | set(body_actions):
+                return self._json({'error':'unknown_action'},status=400,cors=False,no_store=True)
 
-        if action == "run":
-            status = AUTO_PAPER.cycle(SERVICE)
-        elif action == "toggle":
-            status = AUTO_PAPER.toggle(SERVICE)
-        elif action == "reset":
-            status = AUTO_PAPER.reset(SERVICE)
-        elif action == "setmode":
-            try:
-                status = AUTO_PAPER.set_mode(query.get("mode", ["sequoia_oneil"])[0], SERVICE)
-            except ValueError as e:
-                return self._json({"error": str(e)}, status=400)
-        else:
-            status = AUTO_PAPER.status(SERVICE)
-        self._json(status)
+
+        try:
+            if any(len(values)!=1 for values in query.values()) or set(query)-({'action','mode'} if action=='setmode' else {'action'}):
+                raise ValueError('请求参数无效')
+            body = self._read_paper_body(body_actions[action]) if action in body_actions else {}
+            if 'intent_id' in body and (not isinstance(body['intent_id'],str) or len(body['intent_id'])!=64 or any(c not in '0123456789abcdef' for c in body['intent_id'])):
+                raise ValueError('建议标识无效')
+            if action == 'run':
+                status = AUTO_PAPER.cycle(SERVICE,force=True)
+            elif action == 'toggle':
+                status = AUTO_PAPER.toggle(SERVICE)
+            elif action == 'reset':
+                status = AUTO_PAPER.reset(SERVICE)
+            elif action == 'setmode':
+                status = AUTO_PAPER.set_mode(query.get('mode',['sequoia_oneil'])[0],SERVICE)
+            elif action == 'set_execution_mode':
+                if not isinstance(body['mode'],str):
+                    raise ValueError('交易模式无效')
+                status = AUTO_PAPER.set_execution_mode(body['mode'],SERVICE)
+            elif action == 'manual_trade':
+                status = AUTO_PAPER.manual_trade(SERVICE,**body)
+            elif action in {'approve','reject'}:
+                status = AUTO_PAPER.review_intent(SERVICE,body['intent_id'],action=='approve')
+            elif action == 'cancel':
+                status = AUTO_PAPER.cancel_intent(SERVICE,body['intent_id'])
+            else:
+                status = AUTO_PAPER.status(SERVICE)
+        except ValueError as exc:
+            return self._json({'error':str(exc)},status=400,cors=False,no_store=True)
+        self._json(status,cors=False,no_store=True)
 
     # ---------- K线训练营 ----------
 
@@ -5035,7 +4538,7 @@ def main():
     # 初始化
     global AI_PAPER, AUTO_PAPER
     AI_PAPER = AiPaperTrader()
-    AUTO_PAPER = EngineAutoPaperTrader()
+    AUTO_PAPER = EngineAutoPaperTrader(state_dir=UPDATE_STATUS_PATH.parent / "paper_trading")
 
     # 自动模拟盘：后台线程定时按独立信号引擎自动买卖
     def _auto_paper_loop():

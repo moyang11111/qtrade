@@ -6,6 +6,8 @@ from __future__ import annotations
 import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager
+import json
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, time as time_type
@@ -15,6 +17,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 
 from .market_data import MarketDataProvider, infer_limit_prices
+from .clock import TradingClock
 
 
 def now_ts() -> str:
@@ -75,7 +78,7 @@ def calc_commission(amount: float, symbol: Optional[str] = None) -> float:
 
 
 def calc_tax(side: str, amount: float) -> float:
-    return 0.0 if side.lower() != "sell" else round(amount * 0.001, 2)
+    return 0.0 if side.lower() != "sell" else round(amount * 0.0005, 2)
 
 
 def validate_price_tick(price: float) -> float:
@@ -101,17 +104,29 @@ class OrderRequest:
 
 
 class PaperTradingEngine:
-    def __init__(self, db_path: str, market_data: Optional[MarketDataProvider] = None) -> None:
+    def __init__(self, db_path: str, market_data: Optional[MarketDataProvider] = None, *, clock=None) -> None:
         self.db_path = db_path
+        self.clock = clock or TradingClock()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.market_data = market_data or MarketDataProvider()
         self._lock = threading.RLock()
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+    @contextmanager
+    def _connect(self):
+        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=10)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
+    def _now_ts(self):
+        return self.clock.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _trade_date(self):
+        return self.clock.today()
 
     def _init_db(self) -> None:
         with self._connect() as conn:
@@ -176,6 +191,29 @@ class PaperTradingEngine:
                     net_asset REAL NOT NULL,
                     position_count INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS execution_keys (
+                    intent_key TEXT PRIMARY KEY, order_id TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS paper_position_meta (
+                    account_id TEXT NOT NULL, symbol TEXT NOT NULL, payload TEXT NOT NULL,
+                    PRIMARY KEY(account_id,symbol)
+                );
+                CREATE TABLE IF NOT EXISTS paper_intents (
+                    intent_id TEXT PRIMARY KEY, account_id TEXT NOT NULL, mode TEXT NOT NULL,
+                    symbol TEXT NOT NULL, side TEXT NOT NULL, signal_date TEXT NOT NULL,
+                    execution_date TEXT NOT NULL, generation TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending', payload TEXT NOT NULL,
+                    order_id TEXT, created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS paper_automation_state (
+                    account_id TEXT PRIMARY KEY, payload TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS paper_research_freezes (
+                    freeze_id TEXT PRIMARY KEY, signal_date TEXT NOT NULL,
+                    target_date TEXT NOT NULL, generated_at TEXT NOT NULL,
+                    frozen_at TEXT NOT NULL, prospective INTEGER NOT NULL,
+                    payload TEXT NOT NULL, outcome TEXT
+                );
                 CREATE TABLE IF NOT EXISTS system_settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -189,7 +227,7 @@ class PaperTradingEngine:
             if existing:
                 raise ValueError(f"account {account_id} already exists")
             account_count = conn.execute("SELECT COUNT(*) AS cnt FROM accounts").fetchone()["cnt"]
-            ts = now_ts()
+            ts = self._now_ts()
             conn.execute(
                 "INSERT INTO accounts(account_id, initial_cash, cash, frozen_cash, created_at, updated_at) VALUES(?, ?, ?, 0, ?, ?)",
                 (account_id, float(initial_cash), float(initial_cash), ts, ts),
@@ -242,7 +280,7 @@ class PaperTradingEngine:
             available_cash = float(account["cash"]) - float(account["frozen_cash"])
             if delta < 0 and available_cash + 1e-6 < abs(delta):
                 raise ValueError(f"insufficient available cash, available={round(available_cash, 2)}")
-            ts = now_ts()
+            ts = self._now_ts()
             conn.execute(
                 "UPDATE accounts SET initial_cash = initial_cash + ?, cash = cash + ?, updated_at = ? WHERE account_id = ?",
                 (delta, delta, ts, account_id),
@@ -257,7 +295,7 @@ class PaperTradingEngine:
             if not account:
                 raise ValueError(f"account {account_id} not found")
             base_cash = float(initial_cash if initial_cash is not None else account["initial_cash"])
-            ts = now_ts()
+            ts = self._now_ts()
             conn.execute(
                 "UPDATE accounts SET initial_cash = ?, cash = ?, frozen_cash = 0, updated_at = ? WHERE account_id = ?",
                 (base_cash, base_cash, ts, account_id),
@@ -266,6 +304,9 @@ class PaperTradingEngine:
             conn.execute("DELETE FROM trades WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM position_lots WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM account_snapshots WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM execution_keys WHERE order_id NOT IN (SELECT order_id FROM orders)")
+            conn.execute("DELETE FROM paper_position_meta WHERE account_id=?", (account_id,))
+            conn.execute("UPDATE paper_intents SET status='cancelled' WHERE account_id=? AND status IN ('pending','awaiting_confirmation')", (account_id,))
         return self.get_account(account_id)
 
     def place_order(self, req: OrderRequest) -> Dict:
@@ -282,7 +323,7 @@ class PaperTradingEngine:
             raise ValueError("A-share buy order qty must be multiple of 100")
         if req.order_type == "limit" and (req.limit_price is None or req.limit_price <= 0):
             raise ValueError("limit_price required for limit orders")
-        if req.order_type == "market" and not is_trading_time():
+        if req.order_type == "market" and not self.clock.is_session():
             raise ValueError("market orders are only accepted during trading hours")
         if req.order_type == "limit" and req.limit_price is not None:
             req.limit_price = validate_price_tick(req.limit_price)
@@ -318,7 +359,7 @@ class PaperTradingEngine:
                     raise ValueError("A-share sell qty must be multiple of 100 unless selling all remaining shares")
 
             order_id = uuid.uuid4().hex[:16]
-            ts = now_ts()
+            ts = self._now_ts()
             conn.execute(
                 """
                 INSERT INTO orders(order_id, account_id, symbol, side, order_type, limit_price, qty, reserved_cash, filled_qty, avg_fill_price, status, note, last_checked_at, validity, created_at, updated_at)
@@ -333,12 +374,8 @@ class PaperTradingEngine:
             self.process_orders()
         return self.get_order(order_id)
 
-    def trade_at_quote(self, account_id: str, symbol: str, side: str, qty: int, note: str = "") -> Dict:
-        """Immediately fill a market order at the latest quote (bypasses trading-hours gating).
-
-        Used by Qtrade auto paper which evaluates on the latest completed bar even
-        outside trading hours. Still enforces T+1 (sellable lots) and price limits.
-        """
+    def trade_at_quote(self, account_id: str, symbol: str, side: str, qty: int, note: str = "", *, intent_key=None, metadata=None) -> Dict:
+        """Fill only with a fresh quote in an exchange-confirmed session."""
         req = OrderRequest(account_id=account_id, symbol=symbol, side=side, qty=qty, order_type="market", note=note)
         req.symbol = self.market_data.normalize_symbol(req.symbol)
         req.side = req.side.lower()
@@ -349,15 +386,10 @@ class PaperTradingEngine:
         if req.side == "buy" and req.qty % 100 != 0:
             raise ValueError("A-share buy order qty must be multiple of 100")
 
+        if not self.clock.is_session():
+            raise ValueError('非连续交易时段，等待下一有效交易时段')
         quote = self.market_data.get_quote(req.symbol)
-        if getattr(quote, "stale", False):
-            raise ValueError("非当日行情，跳过成交（实时模式未取到当日价）")
-        try:
-            ok = float(quote.price) > 0 and max(float(quote.open), float(quote.high), float(quote.low), float(quote.price)) > 0
-        except (TypeError, ValueError):
-            ok = False
-        if not ok:
-            raise ValueError(f"symbol {req.symbol} quote unavailable for immediate trade")
+        self.clock.validate_quote(quote)
         self._validate_price_limits(req, quote)
 
         if req.side == "buy" and quote.limit_up is not None and float(quote.price) >= float(quote.limit_up):
@@ -366,6 +398,12 @@ class PaperTradingEngine:
             raise ValueError(f"跌停无法卖出 {req.symbol}")
 
         with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if intent_key:
+                old = conn.execute("SELECT o.* FROM execution_keys e JOIN orders o ON o.order_id=e.order_id WHERE e.intent_key=?", (intent_key,)).fetchone()
+                if old:
+                    return dict(old)
+
             account = conn.execute("SELECT * FROM accounts WHERE account_id = ?", (req.account_id,)).fetchone()
             if not account:
                 raise ValueError(f"account {req.account_id} not found")
@@ -378,11 +416,13 @@ class PaperTradingEngine:
                     raise ValueError(f"insufficient available cash, available={available:.2f}")
             else:
                 sellable = self._get_sellable_qty(conn, req.account_id, req.symbol)
+                if req.qty % 100 and req.qty != self._get_total_qty(conn,req.account_id,req.symbol):
+                    raise ValueError('A-share sell qty must be multiple of 100 unless selling all remaining shares')
                 if sellable < req.qty:
                     raise ValueError(f"insufficient sellable qty (T+1), available={sellable}")
 
             order_id = uuid.uuid4().hex[:16]
-            ts = now_ts()
+            ts = self._now_ts()
             conn.execute(
                 """
                 INSERT INTO orders(order_id, account_id, symbol, side, order_type, limit_price, qty, reserved_cash, filled_qty, avg_fill_price, status, note, last_checked_at, validity, created_at, updated_at)
@@ -394,6 +434,29 @@ class PaperTradingEngine:
             row = conn.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,)).fetchone()
             self._fill_order(conn, row, float(quote.price), market_date)
             row = conn.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,)).fetchone()
+            if row["status"] != "filled":
+                raise ValueError("订单未成交")
+            if intent_key:
+                conn.execute("INSERT INTO execution_keys(intent_key,order_id) VALUES(?,?)", (intent_key,order_id))
+                conn.execute("UPDATE paper_intents SET status='filled',order_id=? WHERE intent_id=?", (order_id,intent_key))
+            if metadata is not None and req.side == "buy":
+                meta = {**metadata, "buy_price": float(row["avg_fill_price"]), "buy_date": market_date, "buy_time": ts}
+                lots = conn.execute('SELECT SUM(remaining_qty * cost_price)/SUM(remaining_qty) AS avg,MIN(created_at) AS first_time,MIN(acquired_date) AS first_day FROM position_lots WHERE account_id=? AND symbol=? AND remaining_qty>0',(account_id,req.symbol)).fetchone()
+                meta.update(buy_price=float(lots['avg']),buy_time=lots['first_time'],buy_date=lots['first_day'])
+                if 'take_pct' in meta:
+                    meta['target_price'] = round(meta['buy_price']*(1+meta['take_pct']),2)
+                if 'stop_pct' in meta:
+                    meta['stop_price'] = round(meta['buy_price']*(1-meta['stop_pct']),2)
+                conn.execute("INSERT OR REPLACE INTO paper_position_meta(account_id,symbol,payload) VALUES(?,?,?)", (account_id,req.symbol,json.dumps(meta,ensure_ascii=False)))
+            elif req.side == 'sell':
+                lots = conn.execute('SELECT SUM(remaining_qty * cost_price)/SUM(remaining_qty) AS avg,MIN(created_at) AS first_time,MIN(acquired_date) AS first_day FROM position_lots WHERE account_id=? AND symbol=? AND remaining_qty>0',(account_id,req.symbol)).fetchone()
+                old_meta = conn.execute('SELECT payload FROM paper_position_meta WHERE account_id=? AND symbol=?',(account_id,req.symbol)).fetchone()
+                if lots['avg'] is None:
+                    conn.execute('DELETE FROM paper_position_meta WHERE account_id=? AND symbol=?',(account_id,req.symbol))
+                elif old_meta:
+                    meta = json.loads(old_meta['payload'])
+                    meta.update(buy_price=float(lots['avg']),buy_time=lots['first_time'],buy_date=lots['first_day'])
+                    conn.execute('UPDATE paper_position_meta SET payload=? WHERE account_id=? AND symbol=?',(json.dumps(meta,ensure_ascii=False),account_id,req.symbol))
             return dict(row)
 
     def cancel_order(self, order_id: str) -> Dict:
@@ -403,14 +466,14 @@ class PaperTradingEngine:
                 raise ValueError(f"order {order_id} not found")
             if order["status"] != "open":
                 raise ValueError(f"order {order_id} is not open")
-            ts = now_ts()
+            ts = self._now_ts()
             if float(order["reserved_cash"]) > 0:
                 conn.execute("UPDATE accounts SET frozen_cash = MAX(0, frozen_cash - ?), updated_at = ? WHERE account_id = ?", (float(order["reserved_cash"]), ts, order["account_id"]))
             conn.execute("UPDATE orders SET status = 'cancelled', updated_at = ? WHERE order_id = ?", (ts, order_id))
         return self.get_order(order_id)
 
     def process_orders(self) -> Dict:
-        if not is_trading_time():
+        if not self.clock.is_session():
             expired = self.expire_day_orders()
             return {"processed": 0, "filled": 0, "expired": expired}
         with self._lock, self._connect() as conn:
@@ -421,16 +484,16 @@ class PaperTradingEngine:
             for order in open_orders:
                 quote = self.market_data.get_quote(order["symbol"])
                 if not self._is_quote_tradable(quote):
-                    ts = now_ts()
+                    ts = self._now_ts()
                     conn.execute("UPDATE orders SET last_checked_at = ?, updated_at = ? WHERE order_id = ?", (ts, ts, order["order_id"]))
                     continue
-                market_date = quote.timestamp.split(" ")[0] if quote.timestamp else trade_date()
+                market_date = quote.timestamp.split(" ")[0] if quote.timestamp else self._trade_date()
                 fill_price = self._get_fill_price(order, quote)
                 if fill_price is not None:
                     self._fill_order(conn, order, fill_price, market_date)
                     filled += 1
                 else:
-                    ts = now_ts()
+                    ts = self._now_ts()
                     conn.execute("UPDATE orders SET last_checked_at = ?, updated_at = ? WHERE order_id = ?", (ts, ts, order["order_id"]))
             return {"processed": len(open_orders), "filled": filled, "expired": 0}
 
@@ -441,7 +504,7 @@ class PaperTradingEngine:
             open_orders = conn.execute("SELECT * FROM orders WHERE status = 'open' AND validity = 'day' ORDER BY created_at ASC").fetchall()
             expired = 0
             for order in open_orders:
-                ts = now_ts()
+                ts = self._now_ts()
                 if float(order["reserved_cash"]) > 0:
                     conn.execute("UPDATE accounts SET frozen_cash = MAX(0, frozen_cash - ?), updated_at = ? WHERE account_id = ?", (float(order["reserved_cash"]), ts, order["account_id"]))
                 conn.execute("UPDATE orders SET status = 'expired', note = ?, updated_at = ? WHERE order_id = ?", ("expired at market close", ts, order["order_id"]))
@@ -451,7 +514,7 @@ class PaperTradingEngine:
     def snapshot_accounts(self) -> Dict:
         accounts = self.list_accounts()
         with self._lock, self._connect() as conn:
-            ts = now_ts()
+            ts = self._now_ts()
             for account in accounts:
                 conn.execute(
                     """
@@ -649,19 +712,10 @@ class PaperTradingEngine:
 
     def _is_quote_tradable(self, quote) -> bool:
         try:
-            if float(quote.price) <= 0:
-                return False
-            if max(float(quote.open), float(quote.high), float(quote.low), float(quote.price)) <= 0:
-                return False
-        except Exception:
+            self.clock.validate_quote(quote)
+            return True
+        except ValueError:
             return False
-        if not getattr(quote, "timestamp", None):
-            return False
-        try:
-            quote_date = str(quote.timestamp).split(" ")[0]
-        except Exception:
-            return False
-        return quote_date == trade_date()
 
     def _should_fill(self, order: sqlite3.Row, last_price: float) -> bool:
         if order["order_type"] == "market":
@@ -737,7 +791,7 @@ class PaperTradingEngine:
         amount = round(fill_price * qty, 2)
         commission = calc_commission(amount, order["symbol"])
         tax = calc_tax(order["side"], amount)
-        ts = now_ts()
+        ts = self._now_ts()
         if order["side"] == "buy":
             account = conn.execute("SELECT * FROM accounts WHERE account_id = ?", (order["account_id"],)).fetchone()
             if float(account["cash"]) + 1e-6 < amount + commission:
@@ -753,8 +807,10 @@ class PaperTradingEngine:
         else:
             sellable_lots = conn.execute(
                 "SELECT * FROM position_lots WHERE account_id = ? AND symbol = ? AND remaining_qty > 0 AND acquired_date < ? ORDER BY acquired_date ASC, created_at ASC",
-                (order["account_id"], order["symbol"], trade_date()),
+                (order["account_id"], order["symbol"], self._trade_date()),
             ).fetchall()
+            if sum(int(lot["remaining_qty"]) for lot in sellable_lots) < qty:
+                raise ValueError("insufficient sellable qty at fill time")
             remaining = qty
             for lot in sellable_lots:
                 if remaining <= 0:
@@ -779,7 +835,7 @@ class PaperTradingEngine:
     def _get_sellable_qty(self, conn: sqlite3.Connection, account_id: str, symbol: str) -> int:
         row = conn.execute(
             "SELECT COALESCE(SUM(remaining_qty), 0) AS qty FROM position_lots WHERE account_id = ? AND symbol = ? AND remaining_qty > 0 AND acquired_date < ?",
-            (account_id, symbol, trade_date()),
+            (account_id, symbol, self._trade_date()),
         ).fetchone()
         return int(row["qty"] or 0)
 

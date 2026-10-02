@@ -80,7 +80,11 @@ const API = (() => {
     getAutoPaper(action = 'status', mode = null) {
       const params = { action };
       if (mode) params.mode = mode;
-      return get('/api/auto/paper', params);
+      if (action === 'status') return get('/api/auto/paper', params);
+      return jsonRequest('/api/auto/paper?' + new URLSearchParams(params), 'POST');
+    },
+    paperAction(action, payload) {
+      return jsonRequest('/api/auto/paper?' + new URLSearchParams({ action }), 'POST', payload);
     },
 
     /** K线训练营：抽一道看图猜涨跌题（已脱敏） */
