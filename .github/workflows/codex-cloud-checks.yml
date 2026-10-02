@@ -1,0 +1,49 @@
+name: codex-cloud-checks
+
+on:
+  push:
+    paths:
+      - ".github/workflows/codex-cloud-checks.yml"
+      - "scripts/codex_cloud_*.sh"
+      - "pyproject.toml"
+      - "electron/package.json"
+      - "electron/package-lock.json"
+  pull_request:
+    paths:
+      - ".github/workflows/codex-cloud-checks.yml"
+      - "scripts/codex_cloud_*.sh"
+      - "pyproject.toml"
+      - "electron/package.json"
+      - "electron/package-lock.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cloud-setup:
+    name: Cloud installation and offline checks / Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TZ: Asia/Shanghai
+      MPLBACKEND: Agg
+      QTRADE_NO_HARNESS: "1"
+      QTRADE_NO_AUTOUPDATE: "1"
+      QTRADE_ELECTRON_CSV_ONLY: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.19.4"
+          cache: npm
+          cache-dependency-path: electron/package-lock.json
+      - name: Validate shell scripts
+        run: bash -n scripts/codex_cloud_setup.sh scripts/codex_cloud_check.sh
+      - name: Install and verify the cloud toolchain
+        run: bash scripts/codex_cloud_setup.sh

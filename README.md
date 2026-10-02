@@ -29,6 +29,9 @@ python scripts/backtest_lhb_pullback.py
 
 ## 质量门禁与本地 CSV 冒烟
 
+Codex 云端安装与使用说明见 [docs/codex-cloud.md](docs/codex-cloud.md)。
+云端 Linux 环境可运行 `bash scripts/codex_cloud_setup.sh` 安装依赖并执行离线检查。
+
 `test` extra 声明了全量测试、Ruff、包构建以及测试导入所需的 `pytdx`。在干净虚拟环境中运行：
 
 ```bash
