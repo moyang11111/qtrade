@@ -31,6 +31,16 @@ class MarketSnapshotError(RuntimeError):
     """The source bundle cannot be trusted or installed."""
 
 
+def _sha256_file(path: Path) -> str:
+    """Hash a file in bounded chunks on every supported Python version."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _paths(user_data_dir: str | Path):
     user_data = Path(user_data_dir)
     state = user_data / "state"
@@ -76,8 +86,7 @@ def export_bundle(user_data_dir: str | Path, output: str | Path) -> dict[str, ob
         if (current_portal.manifest["generation"], current_pipeline.manifest["generation"]) != (portal_gen, pipeline_gen):
             raise MarketSnapshotError("snapshot_changed")
         os.replace(staging, output_path)
-        with output_path.open("rb") as source:
-            digest = hashlib.file_digest(source, "sha256").hexdigest()
+        digest = _sha256_file(output_path)
         return {"target_date": portal.manifest["target_date"], "sha256": digest, "bytes": output_path.stat().st_size}
     finally:
         staging.unlink(missing_ok=True)
@@ -136,8 +145,9 @@ def import_bundle(
 
     bundle_path = Path(bundle)
     if expected_sha256 is not None:
-        with bundle_path.open("rb") as source:
-            actual_digest = hashlib.file_digest(source, "sha256").hexdigest()
+        if not bundle_path.is_file() or bundle_path.stat().st_size > MAX_ARCHIVE_BYTES:
+            raise MarketSnapshotError("bundle_missing_or_large")
+        actual_digest = _sha256_file(bundle_path)
         if re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256) is None or actual_digest != expected_sha256.lower():
             raise MarketSnapshotError("bundle_digest_mismatch")
     state, portal_paths, pipeline_paths = _paths(user_data_dir)
