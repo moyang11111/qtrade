@@ -373,6 +373,10 @@ def test_tdx_cannot_turn_raw_bar_into_qfq_snapshot(monkeypatch):
 
 
 def test_calendar_uses_tencent_then_eastmoney_without_sina(monkeypatch):
+    monkeypatch.setattr(
+        "qtrade_adapters.deepseek_harness.portal_refresh_provider._recent_index_dates",
+        lambda: [],
+    )
     calls = []
 
     class Frame:
@@ -394,6 +398,45 @@ def test_calendar_uses_tencent_then_eastmoney_without_sina(monkeypatch):
     ))
     assert _load_trade_dates() == ["2026-08-27", TARGET]
     assert calls == ["tencent", "eastmoney"]
+
+
+@pytest.mark.parametrize("recent,expected", [
+    (["2026-08-27", TARGET], ["2026-08-27", TARGET]),
+    ([TARGET], ["2026-08-27"]),
+    ([], ["2026-08-27"]),
+])
+def test_calendar_supplements_lagging_history_only_with_overlapping_index_bars(monkeypatch, recent, expected):
+    frame = {"date": SimpleNamespace(tolist=lambda: ["2026-08-27"])}
+    monkeypatch.setitem(__import__("sys").modules, "akshare", SimpleNamespace(
+        stock_zh_index_daily_tx=lambda **_: frame,
+    ))
+    monkeypatch.setattr(
+        "qtrade_adapters.deepseek_harness.portal_refresh_provider._recent_index_dates",
+        lambda: recent,
+    )
+    assert _load_trade_dates() == expected
+
+
+@pytest.mark.parametrize("row,valid", [
+    (["2026-08-28", "10", "11", "12", "9", "100"], True),
+    (["2099-01-01", "10", "11", "12", "9", "100"], False),
+    (["2026-08-28", "nan", "11", "12", "9", "100"], False),
+    (["2026-08-28"], False),
+])
+def test_live_index_calendar_rejects_invalid_bars(monkeypatch, row, valid):
+    import requests
+    from qtrade_adapters.deepseek_harness.portal_refresh_provider import _recent_index_dates
+
+    response = SimpleNamespace(
+        raise_for_status=lambda: None,
+        json=lambda: {"code": 0, "data": {"sh000001": {"day": [row]}}},
+    )
+    monkeypatch.setattr(requests, "get", lambda *_, **__: response)
+    if valid:
+        assert _recent_index_dates() == [TARGET]
+    else:
+        with pytest.raises(PortalPlanError, match="calendar_unavailable"):
+            _recent_index_dates()
 
 
 @pytest.mark.parametrize(

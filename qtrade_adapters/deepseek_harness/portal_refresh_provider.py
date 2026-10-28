@@ -165,6 +165,34 @@ def _calendar_token(target: str, dates: Iterable[str]) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
+def _recent_index_dates() -> list[str]:
+    """Read the live index tail; the yearly history endpoint can lag a session."""
+    import requests
+
+    with _akshare_network_guard():
+        response = requests.get(
+            _TENCENT_QFQ_URL, params={"param": "sh000001,day,,,20,qfq"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    if not isinstance(payload, dict) or payload.get("code") != 0:
+        raise PortalPlanError("calendar_unavailable")
+    rows = payload.get("data", {}).get("sh000001", {}).get("day")
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 100:
+        raise PortalPlanError("calendar_unavailable")
+    dates = []
+    today = _datetime.date.today().isoformat()
+    for row in rows:
+        if not isinstance(row, list) or len(row) < 6:
+            raise PortalPlanError("calendar_unavailable")
+        day = _date_text(row[0])
+        prices = [float(value) for value in row[1:5]]
+        if day > today or any(not math.isfinite(value) or value <= 0 for value in prices):
+            raise PortalPlanError("calendar_unavailable")
+        dates.append(day)
+    return sorted(set(dates))
+
+
 def _load_trade_dates() -> list[str]:
     """Read recent exchange sessions from fixed Tencent/Eastmoney index histories."""
 
@@ -189,6 +217,15 @@ def _load_trade_dates() -> list[str]:
                     )
                 dates = [_date_text(value) for value in frame["date"].tolist()]
                 if dates and len(dates) <= _MAX_CALENDAR_DATES:
+                    if max(dates) < _datetime.date.today().isoformat():
+                        try:
+                            recent = _recent_index_dates()
+                            # Require overlap with verified history; never infer
+                            # a session merely because today is a weekday.
+                            if set(recent).intersection(dates):
+                                dates = sorted(set(dates).union(recent))
+                        except Exception:
+                            pass
                     return dates
             except Exception:
                 continue

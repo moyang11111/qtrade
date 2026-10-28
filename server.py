@@ -59,6 +59,7 @@ from qtrade_adapters.deepseek_harness.portal_refresh import (
     read_current_snapshot,
 )
 from qtrade_adapters.deepseek_harness import snapshot_pipeline
+from qtrade_adapters.deepseek_harness import github_market_snapshot
 from qtrade_adapters.deepseek_harness.next_day_probability import (
     ResearchJobManager,
     dataset_version as next_day_dataset_version,
@@ -2839,7 +2840,7 @@ def get_manual_update_controller():
             log_file=UPDATE_LOG_PATH,
             user_data_dir=USER_DATA_DIR,
             mode="full_pipeline",
-            run_fn=snapshot_pipeline.run_snapshot_pipeline,
+            run_fn=github_market_snapshot.run_cloud_first,
             on_success=None,
             prepare_fn=snapshot_pipeline.prepare_snapshot_candidate,
             activate_fn=snapshot_pipeline.prepare_snapshot_candidate,

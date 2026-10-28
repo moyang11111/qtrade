@@ -1,0 +1,71 @@
+name: QTrade daily market snapshot
+
+on:
+  schedule:
+    - cron: '55 18 * * 1-5'
+      timezone: Asia/Shanghai
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: qtrade-market-data
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Check out QTrade code
+        uses: actions/checkout@v4
+        with:
+          repository: moyang11111/qtrade
+          ref: main
+          path: qtrade
+          persist-credentials: false
+      - name: Use Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install collector dependencies
+        run: python -m pip install -e './qtrade[data]'
+      - name: Recover last verified snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/qtrade-seed"
+          gh release download --repo "$GITHUB_REPOSITORY" --pattern qtrade-market.zip --dir "$RUNNER_TEMP/qtrade-seed"
+          python qtrade/scripts/github_market_data.py import \
+            --user-data "$RUNNER_TEMP/qtrade-data" \
+            --bundle "$RUNNER_TEMP/qtrade-seed/qtrade-market.zip"
+      - name: Collect and verify today's session
+        id: collect
+        env:
+          TZ: Asia/Shanghai
+        run: |
+          today="$(date +%F)"
+          echo "target_date=$today" >> "$GITHUB_OUTPUT"
+          python qtrade/scripts/github_market_data.py collect \
+            --user-data "$RUNNER_TEMP/qtrade-data" \
+            --target-date "$today" \
+            --bundle "$RUNNER_TEMP/qtrade-market.zip"
+          if test -f "$RUNNER_TEMP/qtrade-market.zip"; then
+            echo 'published=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish verified private Release
+        if: steps.collect.outputs.published == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="data-${{ steps.collect.outputs.target_date }}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists; keeping the published asset."
+            exit 0
+          fi
+          gh release create "$tag" "$RUNNER_TEMP/qtrade-market.zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "QTrade market data ${{ steps.collect.outputs.target_date }}" \
+            --notes "Verified portal, factors, and decisions snapshot." \
+            --latest
