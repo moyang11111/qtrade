@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import multiprocessing
+import os
+import shutil
 import time
+import zipfile
 from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 
-from qtrade_adapters.deepseek_harness import portal_refresh, snapshot_pipeline
+from qtrade_adapters.deepseek_harness import github_market_snapshot, portal_refresh, snapshot_pipeline
 from qtrade_adapters.deepseek_harness.portal_refresh_provider import (
     PROVIDER_VERSION,
     PortalPlanError,
@@ -142,6 +146,156 @@ def _factors(scores=None):
             for symbol, score in zip(sorted(SYMBOLS), scores)
         ],
     }
+
+
+def test_market_bundle_round_trip_and_stale_import(tmp_path: Path) -> None:
+    user_data, state, portal = _fixture(tmp_path / "source")
+    snapshot_pipeline.publish_pipeline(
+        portal, _factors(), snapshot_pipeline.build_decision_records(_factors(), target_date=TARGET),
+        state_dir=state, user_data_dir=user_data,
+    )
+    bundle = tmp_path / "market.zip"
+    published = github_market_snapshot.export_bundle(user_data, bundle)
+    assert published["target_date"] == TARGET
+    destination = tmp_path / "destination" / "user-data"
+    assert github_market_snapshot.import_bundle(destination, bundle, expected_sha256=published["sha256"]) == TARGET
+    assert github_market_snapshot.import_bundle(destination, bundle) == "already_current"
+    imported = snapshot_pipeline.read_current_pipeline(destination / "state", user_data_dir=destination)
+    assert imported is not None
+    assert imported.manifest["generation"] == snapshot_pipeline.read_current_pipeline(state, user_data_dir=user_data).manifest["generation"]
+
+
+def test_market_bundle_rejects_corruption_without_changing_current(tmp_path: Path) -> None:
+    user_data, state, portal = _fixture(tmp_path / "source")
+    snapshot_pipeline.publish_pipeline(
+        portal, _factors(), snapshot_pipeline.build_decision_records(_factors(), target_date=TARGET),
+        state_dir=state, user_data_dir=user_data,
+    )
+    bundle = tmp_path / "market.zip"
+    github_market_snapshot.export_bundle(user_data, bundle)
+    corrupted = tmp_path / "corrupted.zip"
+    with zipfile.ZipFile(bundle) as source, zipfile.ZipFile(corrupted, "w") as target:
+        for item in source.infolist():
+            content = source.read(item.filename)
+            if item.filename.endswith("bars_incr.db"):
+                content = b"wrong" + content[5:]
+            target.writestr(item, content)
+    destination = tmp_path / "destination" / "user-data"
+    with pytest.raises(github_market_snapshot.MarketSnapshotError):
+        github_market_snapshot.import_bundle(destination, corrupted)
+    assert snapshot_pipeline.read_current_pipeline(destination / "state", user_data_dir=destination) is None
+
+
+def test_private_release_download_checks_digest_and_does_not_forward_token(tmp_path: Path, monkeypatch) -> None:
+    payload = b"verified-test-asset"
+    digest = hashlib.sha256(payload).hexdigest()
+    calls = []
+
+    class Response:
+        def __init__(self, status_code, *, data=None, headers=None):
+            self.status_code = status_code
+            self.data = data
+            self.headers = headers or {}
+
+        def raise_for_status(self):
+            assert self.status_code < 400
+
+        def json(self):
+            return {"tag_name": "data-2026-08-28", "assets": [{
+                "name": "qtrade-market.zip", "state": "uploaded", "id": 12,
+                "size": len(payload), "digest": f"sha256:{digest}",
+            }]}
+
+        def iter_content(self, _size):
+            yield self.data
+
+        def close(self):
+            pass
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        if url.endswith("/latest"):
+            return Response(200)
+        if url.endswith("/assets/12"):
+            return Response(302, headers={"Location": "https://release-assets.githubusercontent.com/asset"})
+        return Response(200, data=payload)
+
+    import requests
+    monkeypatch.setattr(requests, "get", fake_get)
+    output = tmp_path / "qtrade-market.zip"
+    result = github_market_snapshot.download_latest_bundle("owner/private-data", "test-token", output)
+    assert result["sha256"] == digest
+    assert output.read_bytes() == payload
+    assert calls[0][1]["headers"]["Authorization"] == "Bearer test-token"
+    assert "headers" not in calls[2][1]
+
+
+def test_existing_update_button_can_activate_private_release(tmp_path: Path, monkeypatch) -> None:
+    user_data, state, portal = _fixture(tmp_path / "source")
+    snapshot_pipeline.publish_pipeline(
+        portal, _factors(), snapshot_pipeline.build_decision_records(_factors(), target_date=TARGET),
+        state_dir=state, user_data_dir=user_data,
+    )
+    archive = tmp_path / "qtrade-market.zip"
+    published = github_market_snapshot.export_bundle(user_data, archive)
+    destination = tmp_path / "destination" / "user-data"
+    status_file = tmp_path / "status" / "daily_update_1830.status.json"
+    adopted = []
+
+    def download(_repo, _token, output):
+        shutil.copyfile(archive, output)
+        return {"target_date": f"data-{TARGET}", "sha256": published["sha256"]}
+
+    monkeypatch.setattr(github_market_snapshot, "download_latest_bundle", download)
+    manual_path = status_file.with_name("daily_update_1830.manual.lock")
+    manual_lease = snapshot_pipeline._PipelineLease(manual_path)
+    assert manual_lease.acquire()
+    identity = manual_path.stat()
+    try:
+        result = github_market_snapshot.run_cloud_first(
+            tmp_path, date.fromisoformat(TARGET),
+            user_data_dir=destination, status_file=status_file,
+            lease_path=manual_path, lease_token=(os.getpid(), identity.st_dev, identity.st_ino),
+            environment={"QTRADE_DATA_GITHUB_REPO": "owner/private-data", "QTRADE_DATA_GITHUB_TOKEN": "test-token"},
+            commit_fn=lambda pipeline: adopted.append(pipeline) or True,
+        )
+    finally:
+        manual_lease.release()
+    assert result == 0
+    assert len(adopted) == 1
+    assert adopted[0].manifest["target_date"] == TARGET
+    assert json.loads(status_file.read_text(encoding="utf-8"))["state"] == "success"
+
+
+def test_private_release_does_not_bypass_busy_pipeline_lease(tmp_path: Path, monkeypatch) -> None:
+    status_file = tmp_path / "state" / "daily_update_1830.status.json"
+    pipeline_lease = snapshot_pipeline._PipelineLease(status_file.with_name("daily_update_1830.lock"))
+    assert pipeline_lease.acquire()
+    monkeypatch.setattr(github_market_snapshot, "download_latest_bundle", lambda *_: pytest.fail("download ran"))
+    monkeypatch.setattr(snapshot_pipeline, "run_snapshot_pipeline", lambda *_args, **_kwargs: pytest.fail("local pipeline ran"))
+    try:
+        result = github_market_snapshot.run_cloud_first(
+            tmp_path, date.fromisoformat(TARGET), user_data_dir=tmp_path / "data", status_file=status_file,
+            environment={"QTRADE_DATA_GITHUB_REPO": "owner/private-data", "QTRADE_DATA_GITHUB_TOKEN": "test-token"},
+        )
+    finally:
+        pipeline_lease.release()
+    assert result == 1
+
+
+@pytest.mark.parametrize("rejected_hook", ["prepare_fn", "activate_fn", "commit_fn"])
+def test_market_bundle_rolls_back_pointer_when_service_rejects_it(tmp_path: Path, rejected_hook: str) -> None:
+    user_data, state, portal = _fixture(tmp_path / "source")
+    snapshot_pipeline.publish_pipeline(
+        portal, _factors(), snapshot_pipeline.build_decision_records(_factors(), target_date=TARGET),
+        state_dir=state, user_data_dir=user_data,
+    )
+    bundle = tmp_path / "market.zip"
+    github_market_snapshot.export_bundle(user_data, bundle)
+    destination = tmp_path / "destination" / "user-data"
+    with pytest.raises(github_market_snapshot.MarketSnapshotError, match="bundle_(preflight|activation)_failed"):
+        github_market_snapshot.import_bundle(destination, bundle, **{rejected_hook: lambda _pipeline: False})
+    assert snapshot_pipeline.read_current_pipeline(destination / "state", user_data_dir=destination) is None
 
 
 def test_pipeline_publish_is_generation_bound_and_idempotent(tmp_path: Path) -> None:
