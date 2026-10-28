@@ -152,7 +152,10 @@ def import_bundle(
             raise MarketSnapshotError("bundle_digest_mismatch")
     state, portal_paths, pipeline_paths = _paths(user_data_dir)
     current = snapshot_pipeline.read_current_pipeline(state, user_data_dir=user_data_dir)
-    with tempfile.TemporaryDirectory(prefix="qtrade-market-") as temporary:
+    # Windows' default TEMP may use an 8.3 short path (RUNNER~1). Resolve it
+    # before extraction so the portal validator sees its canonical spelling.
+    temp_parent = Path(os.path.realpath(tempfile.gettempdir()))
+    with tempfile.TemporaryDirectory(prefix="qtrade-market-", dir=temp_parent) as temporary:
         source_data = Path(temporary) / "user-data"
         portal, pipeline = _extract_verified_bundle(bundle_path, source_data)
         date = portal.manifest["target_date"]
