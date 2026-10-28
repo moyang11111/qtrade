@@ -7,6 +7,7 @@ import hashlib
 import multiprocessing
 import os
 import shutil
+import sys
 import time
 import zipfile
 from datetime import date, timedelta
@@ -163,6 +164,26 @@ def test_market_bundle_round_trip_and_stale_import(tmp_path: Path) -> None:
     imported = snapshot_pipeline.read_current_pipeline(destination / "state", user_data_dir=destination)
     assert imported is not None
     assert imported.manifest["generation"] == snapshot_pipeline.read_current_pipeline(state, user_data_dir=user_data).manifest["generation"]
+
+
+def test_cloud_collect_cli_uses_pipeline_status_contract_on_closed_day(tmp_path: Path, monkeypatch, capsys) -> None:
+    from scripts import github_market_data
+
+    user_data, state, portal = _fixture(tmp_path / "source")
+    factors = _factors()
+    snapshot_pipeline.publish_pipeline(
+        portal, factors, snapshot_pipeline.build_decision_records(factors, target_date=TARGET),
+        state_dir=state, user_data_dir=user_data,
+    )
+    bundle = tmp_path / "unpublished.zip"
+    monkeypatch.setattr(sys, "argv", [
+        "github_market_data.py", "collect", "--user-data", str(user_data),
+        "--target-date", "2026-08-29", "--bundle", str(bundle),
+    ])
+    assert github_market_data.main() == 0
+    assert json.loads(capsys.readouterr().out)["result"] == "market_closed"
+    assert json.loads((state / "daily_update_1830.status.json").read_text(encoding="utf-8"))["state"] == "skip"
+    assert not bundle.exists()
 
 
 def test_market_bundle_rejects_corruption_without_changing_current(tmp_path: Path) -> None:

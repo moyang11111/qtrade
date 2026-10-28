@@ -49,7 +49,7 @@ def main() -> int:
             if current.manifest["target_date"] >= args.target_date:
                 result = {"result": "already_current", "target_date": current.manifest["target_date"]}
             else:
-                status = user_data / "collect-status.json"
+                status = user_data / "state" / "daily_update_1830.status.json"
                 code = snapshot_pipeline.run_snapshot_pipeline(
                     Path.cwd(), args.target_date,
                     user_data_dir=user_data, state_dir=user_data / "state",
@@ -57,7 +57,7 @@ def main() -> int:
                     plan_inputs_builder=snapshot_pipeline.load_current_or_bootstrap_bound_plan_inputs,
                     calendar_loader=snapshot_pipeline.load_trade_calendar_dates,
                 )
-                outcome = json.loads(status.read_text(encoding="utf-8"))
+                outcome = json.loads(status.read_text(encoding="utf-8")) if status.is_file() else {}
                 if code != 0:
                     raise github_market_snapshot.MarketSnapshotError(str(outcome.get("reason", "collection_failed")))
                 if outcome.get("state") == "skip":
